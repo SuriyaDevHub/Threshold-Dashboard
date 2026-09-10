@@ -1,0 +1,225 @@
+# Build prompt: Business Rule Management Module (Rule Console)
+
+Use this prompt as-is with an AI coding assistant (Claude Code, Cursor, etc.)
+to generate the full module. It's self-contained — no other context needed.
+
+---
+
+## Objective
+
+Build a business rule management module for a financial reconciliation
+system (similar in spirit to a Data360 Analyzer or an ETL rules engine).
+The module lets non-developers create, update, and delete data-quality /
+exception-detection rules, replacing a currently hardcoded YAML config.
+Every write must be validated before it touches disk, and every mutation
+must be auditable and reversible.
+
+The module has three layers:
+1. **Schema & validation** — defines what a valid rule looks like.
+2. **Rule store** — validated CRUD over YAML files, with versioning and audit log.
+3. **Rule engine + UI** — turns a rule into an executable query and lets a user build, test, and publish rules.
+
+---
+
+## Domain context
+
+Rules evaluate trade/reconciliation records with fields like:
+
+```
+deviation_bps        numeric
+bid_ask_spread       numeric
+transacted_price     numeric
+fair_price           numeric
+product_subtype      categorical
+issuer_rating        categorical
+region               categorical
+tenor                categorical
+credit_rating        categorical
+notional_range       categorical
+trad_ref             identifier
+```
+
+A rule expresses a boolean condition tree over these fields (AND/OR groups
+of leaf conditions), plus metadata: which fields to segment by, a severity,
+an action to take on match (e.g. `flag_exception`), an owner, and a
+lifecycle status.
+
+Numeric fields support: `gt, gte, lt, lte, between`.
+Categorical fields support: `eq, ne, in, not_in`.
+An operator used against the wrong field type must fail validation.
+
+---
+
+## Part 1 — Schema & validation (Python, Pydantic v2)
+
+Create `rule_schema.py`:
+
+- `KNOWN_FIELDS`: set of allowed field names (from the table above).
+- `FIELD_TYPES`: dict mapping each field to `numeric | categorical | identifier`.
+- `Operator` enum covering all operators listed above.
+- `RuleStatus` enum: `draft, pending, active, deprecated`.
+- `Severity` enum: `low, medium, high, critical`.
+- `Condition` model: `field`, `operator`, `value` (float | str | list).
+  - Validate `field` is in `KNOWN_FIELDS`.
+  - Validate the operator matches the field's type (numeric field →
+    numeric operator only, etc.) — raise a clear, human-readable error
+    naming the field and the allowed operator set.
+  - Validate `between` requires exactly two values; `in`/`not_in` require
+    a non-empty list.
+- `CompositeCondition` model: `logic: "AND" | "OR"`, `conditions: List[Condition | CompositeCondition]` — recursive, so arbitrary nesting is possible.
+- `Rule` model: `rule_id` (alphanumeric/underscore only), `name`, `version`
+  (int, default 1), `status`, `condition` (Condition or CompositeCondition),
+  `segmentation` (list of known fields), `action`, `severity`, `owner`,
+  `created_at`, `updated_at`, `notes`.
+- All validation errors must be collectible and human-readable — the UI
+  layer will show them verbatim to the person editing the rule.
+
+## Part 2 — Condition → SQL translator
+
+Create `condition_translator.py`:
+
+- `translate(condition) -> (sql_fragment, params)`: recursively walks a
+  `Condition`/`CompositeCondition` tree and produces a **parameterized**
+  WHERE clause (`?` placeholders) plus an ordered params list. Field names
+  are safe to interpolate directly (they're whitelisted upstream); values
+  must NEVER be interpolated — always passed as query parameters.
+- `build_query(condition, table="trades") -> (sql, params)`: wraps the
+  above into a full `SELECT * FROM <table> WHERE ...`.
+- Target engine: DuckDB. Handle `between`, `in`, `not_in` specially
+  (multi-placeholder); all other operators map directly (`gt`→`>`, etc.).
+
+## Part 3 — Rule store (validated CRUD)
+
+Create `rule_store.py` with a `RuleStore` class:
+
+- **Storage layout**: one YAML file per rule at `rules/<rule_id>.yml` —
+  never one giant config file. History backups at
+  `rules/_history/<rule_id>_v<timestamp>.yml`. Audit log as JSON Lines at
+  `audit_log.jsonl` (one line per mutation: timestamp, action, rule_id,
+  actor, detail).
+- **Atomic writes**: write to a temp file in the same directory, then
+  `rename`/`move` into place — never write the target file directly, so a
+  crash mid-write can't corrupt a rule.
+- **Validation gate (this is the core requirement)**: expose
+  `validate(rule_dict) -> Rule` (schema-only, raises `RuleValidationError`
+  with readable messages) and `dry_run(rule, conn, table) -> dict`
+  (executes the translated SQL against a real/sample DuckDB connection,
+  returns `match_count` + first-10-rows preview). Compose both into
+  `validate_and_dry_run(rule_dict, conn=None)`, which every create/update
+  path must call before writing anything to disk.
+- **create(rule_dict, actor, conn=None)**: reject if `rule_id` already
+  exists; validate + optional dry-run; stamp `created_at`/`updated_at`;
+  write; audit-log `"create"`.
+- **update(rule_id, updates, actor, conn=None)**: load existing, merge
+  updates, bump `version`, re-validate (+ dry-run) the *merged* result
+  before writing; back up the previous version first; audit-log
+  `"update"` with `from_version`/`to_version`.
+- **delete(rule_id, actor, hard=False)**: default to **soft delete**
+  (`status → deprecated`, file stays, history stays); `hard=True` removes
+  the file after backing it up. Audit-log accordingly.
+- **promote(rule_id, actor)**: a distinct method (not folded into
+  `update`) that moves `draft/pending → active` — this is the
+  maker-checker approval action and should be auditable as its own
+  action type, separate from a content edit.
+- **get / list(status=None)**: read-only accessors.
+
+## Part 4 — FastAPI layer
+
+Expose the store over HTTP:
+
+- `GET /rules?status=` — list rules, optional status filter.
+- `GET /rules/{id}` — fetch one.
+- `POST /rules` — create (body = rule fields; call `store.create`).
+- `PUT /rules/{id}` — update.
+- `DELETE /rules/{id}` — soft delete by default; `?hard=true` for hard delete.
+- `POST /rules/{id}/promote` — maker-checker approval.
+- `POST /rules/validate` — schema-only validation, no write (for live
+  form feedback in the UI).
+- `POST /rules/{id}/test` or `/rules/test` (for unsaved drafts) — runs
+  `dry_run` and returns `match_count` + preview + generated SQL.
+- Every endpoint should surface `RuleValidationError` as HTTP 422 with the
+  readable error list in the response body, not a generic 500.
+- Every mutating endpoint takes an `actor` (from auth context or a header
+  for now) and passes it through to the store for the audit log.
+
+## Part 5 — UI (rule console)
+
+Build an interactive console — a two-pane layout:
+
+- **Left rail**: status filter dropdown (all/draft/pending/active/deprecated),
+  a scrollable list of rules showing `rule_id`, `name`, a color-coded
+  status pill, and version number. "+ New rule" button up top.
+- **Right pane** (detail/editor), shown when a rule is selected or being created:
+  - Rule ID (editable only when creating new — immutable after), name, owner, severity, action dropdowns.
+  - Segmentation: toggle chips for each known field.
+  - Condition builder: an AND/OR toggle for the top-level group, then a
+    dynamic list of condition rows — each row has a field dropdown, an
+    operator dropdown (filtered to the operators valid for that field's
+    type), and a value input that adapts to the operator (single input,
+    two inputs for `between`, comma-separated list for `in`/`not_in`).
+    "+ Add condition" / remove-row (✕) controls.
+  - Action bar: **Run test (dry run)**, **Save as draft / Save changes**,
+    **Promote to active** (only shown when status is draft/pending),
+    **Deprecate** (only shown when status is active).
+  - Validation errors render in a distinct error panel listing every
+    failed check in plain language — nothing gets saved while errors are
+    present.
+  - A successful test run shows: match count against however many sample
+    records exist, the generated SQL, and a preview table of the first
+    few matching rows.
+- **Bottom strip**: collapsible audit log, newest entries first, showing
+  timestamp, action, rule_id, actor, and any relevant detail (e.g.
+  version transition).
+- Seed the UI with 1–2 example rules (one active, one draft) so it's
+  demonstrable without manual setup, and a small in-memory sample dataset
+  (10–15 rows covering the known fields) for the dry-run to execute
+  against before a real database connection exists.
+
+### Visual/interaction requirements
+- This is an internal ops tool for a financial reconciliation team —
+  design it like a technical console (flat surfaces, hairline borders,
+  monospace for rule IDs/SQL/field names, sans-serif for UI copy/labels),
+  not a consumer SaaS product. Status pills: draft (neutral grey), pending
+  (amber), active (green), deprecated (muted red).
+- Every button label states the exact action it performs ("Save as
+  draft", "Promote to active", "Deprecate") — no vague labels like
+  "Submit" or "Confirm".
+- Errors are specific and state which field/condition failed and why;
+  never a generic "invalid input".
+
+---
+
+## Testing requirements (do not skip)
+
+1. **Schema validation tests**: unknown field rejected; operator/field-type
+   mismatch rejected; incomplete `between` rejected; empty `in`/`not_in`
+   rejected; duplicate `rule_id` on create rejected; a well-formed rule
+   passes with zero errors.
+2. **Translator tests**: a composite AND/OR condition produces the
+   expected SQL shape and correctly ordered parameters.
+3. **Dry-run tests**: match count against a known sample dataset matches
+   a manually computed expected count; every previewed row actually
+   satisfies the condition; switching AND→OR on the same leaf conditions
+   never decreases the match count.
+4. **Store tests**: create → update (version increments, prior version
+   backed up) → soft-delete (status flips, file retained) → audit log
+   contains one entry per mutation in the right order.
+5. If building the UI in a browser-based environment where headless
+   browser automation isn't available, at minimum extract and
+   unit-test the pure validation/translation/dry-run logic directly
+   (no DOM dependency) so correctness is verified even without a full
+   click-through test.
+
+---
+
+## Deliverables checklist
+
+- [ ] `rule_schema.py` — Pydantic models + validation
+- [ ] `condition_translator.py` — condition tree → parameterized SQL
+- [ ] `rule_store.py` — validated CRUD, versioning, audit log, atomic writes
+- [ ] FastAPI router exposing the store
+- [ ] Rule console UI (list + editor + condition builder + test panel + audit log)
+- [ ] Test suite covering schema, translator, dry-run, and store behavior
+- [ ] One-time migration script sketch: read the existing hardcoded YAML,
+      map it into the new per-rule schema, write via `store.create()` so
+      it passes through the same validation gate as any new rule
