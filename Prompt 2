@@ -1,0 +1,250 @@
+# Master Build Prompt — Generic Exception Closure & Validation System
+
+Use this prompt as-is with an AI coding assistant (Claude Code, Cursor, etc.)
+to generate the complete system in one pass, or to extend it. It is
+self-contained — no other context needed.
+
+---
+
+## Objective
+
+Build a configuration-driven exception-closure engine that replaces
+per-product, per-rule-ID hardcoded validators. A rule is ONE object that
+may run business logic directly against an exception record, or first run
+an ordered pipeline of pre-steps (enrich from an external source, or
+pivot/aggregate the dataset itself) — each conditionally applied — before
+the business logic runs. When satisfied, the rule stamps a mandatory
+reason code and rendered commentary. A single generic validator function
+applies whatever rules are currently active, for ANY product, with zero
+product- or rule-ID-specific code, and automatically reflects a rule
+amendment on the very next call — no restart, no redeploy.
+
+---
+
+## Part 1 — Rule schema (`rule_schema_v2.py`, Pydantic v2)
+
+- `PRODUCT_FIELDS: Dict[str, Dict[str, str]]` — per-product field name →
+  type (`numeric | categorical | identifier`). Seed with `cash_bonds`, `fx`,
+  `repo`; adding a product later means adding one entry here, nothing else.
+- `Operator` enum: `gt, gte, lt, lte, between` (numeric) and
+  `eq, ne, in, not_in` (categorical/identifier).
+- `RuleStatus`: `draft, pending, active, disabled, deprecated`.
+- `Severity`: `low, medium, high, critical`.
+- `Condition{field, operator, value}` and recursive
+  `CompositeCondition{logic: AND|OR, conditions: [Condition|CompositeCondition]}`.
+- `DeriveSpec{output_field, op, a, b}` — op restricted to
+  `abs_diff, diff, sum, ratio, pct_diff`. Never eval() user input.
+- `EnrichStep{step_id, apply_when: Optional[condition], source_name,
+  join_on, fields: {source_col: output_field}, field_types, derive[]}`.
+- `PivotStep{step_id, apply_when: Optional[condition], group_by[],
+  agg_function (sum|count|avg|min|max), agg_field, output_field, derive[]}`.
+- `Rule{rule_id, name, product, version, status, severity, owner, mode
+  (direct|enriched), pre_steps: [EnrichStep|PivotStep], priority: int
+  (lower runs first), condition, reason_code_id: str (mandatory,
+  non-blank), commentary: str (mandatory, non-blank, supports {field}
+  placeholders), created_at, updated_at, notes}`.
+- Model validator: `mode="direct"` forbids `pre_steps`; `mode="enriched"`
+  requires at least one; `step_id` unique within a rule.
+
+## Part 2 — Field resolution & validation (`field_resolver.py`)
+
+The core mechanism. Fields become available progressively:
+`stage 0 = PRODUCT_FIELDS[product]`; `after pre_step[i] = stage i +
+pre_step[i]'s declared outputs`. A step's `apply_when` may only reference
+fields available BEFORE that step (it cannot gate on its own output). The
+business `condition` may reference base fields plus ALL pre-step outputs.
+
+- `SOURCE_SCHEMAS: Dict[str, Dict[str, str]]` — declared columns/types per
+  external source (e.g. `issuer_credit_events`, `manual_override_log`,
+  `counterparty_master`, `fx_benchmark_rates`).
+- `fields_before_step(product, pre_steps, index) -> {field: type}`.
+- `step_outputs(step) -> {field: type}` — an enrich step's outputs come
+  from its `fields` mapping (typed via `field_types` or the source
+  schema); a pivot step's output is always numeric; derive outputs are
+  always numeric.
+- `validate_condition(cond, available_fields, where) -> [errors]` —
+  recursive; checks field exists at this stage, operator matches type,
+  `between`/`in`/`not_in` shape correctness.
+- `validate_rule(rule_dict) -> (Rule|None, [errors])` — the single
+  validation entry point: schema validation, then per-step gate/source/
+  join/aggregate checks against the fields available AT THAT STAGE, then
+  the business condition against ALL available fields. Collect every
+  error; never stop at the first one.
+
+## Part 3 — Pipeline engine (`pipeline_engine.py`)
+
+- `eval_condition(cond, record) -> bool` — recursive AND/OR evaluation;
+  missing field or type-coercion failure returns `False`, never raises.
+- `run_rule(rule, exceptions_df, sources, dataset_override=None) -> [{record, trail, decision}]`:
+  precompute pivot aggregates ONCE per rule call (group_by + agg over the
+  whole dataset), then per record: run each pre_step in declared order
+  (skip — not error — on `apply_when` false or on no source/aggregate
+  match, recording why in the trail), apply whitelisted `derive` ops,
+  then evaluate the business condition. Satisfied → `{outcome: closed,
+  reason_code_id, commentary: rendered with {field} substitution from the
+  prepared record}`. Not satisfied → `{outcome: open}`.
+
+## Part 4 — Persistence (`rule_store_v2.py`)
+
+`RuleStore(base_dir)`:
+- One YAML file per rule at `rules/<rule_id>.yml`; history backups at
+  `rules/_history/<rule_id>_v<timestamp>.yml`; append-only
+  `audit_log.jsonl` (timestamp, action, rule_id, actor, detail).
+- Atomic writes: temp file in the same directory + `rename`.
+- `validate(rule_dict) -> Rule` — calls `field_resolver.validate_rule()`,
+  raises `RuleValidationError` with the full readable error list on
+  failure.
+- `create`, `update` (bumps version; **does not reset status** — amending
+  an active rule keeps it active), `get`, `list(product=, status=)`.
+- Lifecycle: `promote` (draft/pending/disabled → active), `disable`
+  (active → disabled), `deprecate` (any non-deprecated → deprecated,
+  terminal). Illegal transitions raise with the current status and the
+  legal source states named.
+- `fingerprint(product) -> str` — sorted `"rule_id:version"` pairs for
+  currently-ACTIVE rules of that product. Changes if and only if the
+  active rule set for that product changed (promote/disable/deprecate/
+  amend-while-active). This is what makes "no restart needed" possible.
+
+## Part 5 — Runtime loading (`rule_registry.py`)
+
+`RuleRegistry(store)`:
+- `get_active_rules(product) -> [Rule]`, sorted by `priority`. Internally:
+  compare `store.fingerprint(product)` to the cached value for that
+  product; if different, reload from the store and update the cache;
+  otherwise return the cached list. Expose a `reload_count` counter for
+  observability/testing.
+- This is the ONLY place that decides whether to hit the store again — no
+  other component should cache rules itself.
+
+## Part 6 — Generic validator (`generic_validator.py`)
+
+`validate_exceptions(product, exceptions_df, sources, registry) ->
+DataFrame with columns added: status (CLEARED|ALERTED), matched_rule,
+reason_code_id, commentary`.
+
+Implementation constraint (verify by inspecting the function's source): it
+must contain **no product name and no rule_id literal** anywhere in its
+executable body — only generic field/condition logic via
+`registry.get_active_rules(product)` and `pipeline_engine.run_rule()`.
+Rules evaluate in priority order; first one whose condition is satisfied
+for a given record wins; a record no rule closes is ALERTED. This single
+function is the ONLY validator needed for every product, present and
+future.
+
+## Part 7 — UI (single HTML file, no build step, no framework)
+
+Two tabs:
+
+**Rule Console** — left rail: product + status filters, rule list with
+status pill (draft/active/disabled/deprecated color-coded), version,
+product/mode tags. Right pane, rule editor:
+- Rule ID (immutable after create), name, product (immutable after
+  create), owner, severity, priority.
+- Mode toggle: Direct / Enriched-pivoted. Enriched reveals a **pre-step
+  builder**: ordered step cards, each showing an "Apply when" gate
+  (dropdown of fields available BEFORE that step; "+ Add condition" if
+  none set, meaning always-run), then either an enrich config (source
+  dropdown, join-on dropdown scoped to available fields, source-column →
+  output-field mapping rows) or a pivot config (multi-select group_by,
+  agg function + field, output field name), then a derived-fields section
+  (output name, op, operand A, operand B — operand dropdowns scoped to
+  fields available at that point). Each step card shows "Adds to the
+  record: <list>".
+- Business logic section: condition builder whose field dropdown is
+  scoped to base fields + ALL pre-step outputs (stage-aware, matching
+  `field_resolver`).
+- Closure section: reason code ID input, commentary input with a hint
+  listing available `{field}` placeholders.
+- Action bar: **Run test (dry run)** (shows match table + per-record step
+  trail), **Save as draft / Save changes**, **Promote to active** (shown
+  only when legal), **Disable** (only from active), **Deprecate** (any
+  non-deprecated).
+- Validation errors render in a distinct panel, verbatim, before anything
+  saves.
+
+**Exception Analysis** — product dropdown, uploaded-dataset dropdown
+(simulate 1-2 named sample datasets per product), "Run validation"
+button. A status strip shows which active rules were loaded for the
+selected product (as chips) and a running registry-reload counter, so the
+caching/reload behavior is visible, not just correct. Results render as a
+table: trade ref, CLEARED/ALERTED pill, matched rule, reason code,
+commentary. Switching tabs preserves state; creating/amending/promoting a
+rule in the Rule Console tab and returning to re-run validation must show
+the updated outcome with no page reload.
+
+Design language: internal ops console, not consumer SaaS — flat surfaces,
+hairline borders, monospace for IDs/field names/SQL-like content,
+sans-serif for labels, status colors (draft=grey, pending=amber,
+active=green, disabled=grey, deprecated=red).
+
+---
+
+## Testing requirements — do not skip any of these
+
+1. **Schema/resolver tests** (pure Python, no browser): unknown field
+   rejected at the correct pipeline stage; operator/type mismatch
+   rejected; a step's `apply_when` referencing its own output rejected; a
+   business condition referencing a field no step produces rejected;
+   direct mode with pre_steps rejected; enriched mode with zero pre_steps
+   rejected; missing/blank `reason_code_id` or `commentary` rejected;
+   product-field scoping enforced (a cash_bonds field rejected on an fx
+   rule); a well-formed direct rule, enriched rule (with a conditional
+   enrich step + derive), and pivot rule all validate and produce correct
+   dry-run match counts against a small hand-built sample dataset,
+   cross-checked by manually filtering the same data.
+2. **Store/registry/validator tests**: full lifecycle (create → update →
+   promote → disable → re-promote → deprecate) with illegal transitions
+   rejected; `fingerprint()` changes if and only if the active set
+   changed; amending an ALREADY-ACTIVE rule does not reset its status and
+   is picked up on the immediate next `get_active_rules()` call with no
+   explicit reload call; disabling a rule removes it from the very next
+   call; two active rules for one product resolved by `priority`; a
+   second product's dataset never matches the first product's rules;
+   the generic validator's source code contains no product/rule_id
+   literals (assert by inspecting `inspect.getsource()`), and the exact
+   same function correctly validates all three seeded products.
+3. **Real headless-browser UI tests** — required, not optional, and must
+   be a genuine browser, not a DOM-less reimplementation:
+   - If `puppeteer`'s default Chrome download is blocked by network
+     policy (common in sandboxed/corporate environments — downloads from
+     `storage.googleapis.com`), do NOT fall back to logic-only testing.
+     Instead use `puppeteer-core` + `@sparticuz/chromium`, which ships a
+     real Chromium binary INSIDE the npm package tarball (from
+     `registry.npmjs.org`), extractable and launchable with zero external
+     download. Install with `PUPPETEER_SKIP_DOWNLOAD=true npm install
+     puppeteer-core @sparticuz/chromium`; get the binary path via
+     `require('@sparticuz/chromium').default.executablePath()`.
+   - Click through: create a rule with an invalid pre-step config, verify
+     the exact validation panel error text; fix it; run a dry-run and
+     verify the rendered match table; save; walk the full lifecycle
+     through the actual buttons (not by calling JS functions directly)
+     checking status text after each click, watching for CSS
+     `text-transform` quirks (`innerText` reflects rendered case, not
+     source case — assert case-insensitively or you'll get false
+     failures); build a brand-new enriched rule end-to-end in the UI
+     (typed fields, not pre-seeded data) and confirm its dry-run output;
+     switch to Exception Analysis, run validation, then go amend the
+     SAME active rule's threshold with no promote step, return, re-run
+     on the same dataset with no page reload, and confirm the outcome
+     visibly changes for at least one record.
+   - When a browser test fails, verify which side the bug is on before
+     "fixing": a wrong CSS selector picking the wrong element (e.g. two
+     `<select>` elements on a page — confirm which one a broad selector
+     actually matched) is a common false-positive; only patch the
+     application if the failure reproduces with a maximally-specific
+     selector too.
+
+## Deliverables checklist
+
+- [ ] `rule_schema_v2.py`
+- [ ] `field_resolver.py`
+- [ ] `pipeline_engine.py`
+- [ ] `rule_store_v2.py`
+- [ ] `rule_registry.py`
+- [ ] `generic_validator.py`
+- [ ] Single-file UI with Rule Console + Exception Analysis tabs
+- [ ] Pure-Python test suite (schema/resolver/engine + store/registry/validator)
+- [ ] Real headless-browser test suite (puppeteer-core + @sparticuz/chromium)
+- [ ] A short migration note: what a caller currently doing
+      `yaml.safe_load(open(f"rules/{product}.yml"))` + rule-ID branching
+      changes to (`RuleRegistry` + `generic_validator.validate_exceptions()`)
