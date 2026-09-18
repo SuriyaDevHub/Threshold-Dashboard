@@ -1,0 +1,279 @@
+"""
+fx_ric_formatter.py
+--------------------
+Forms correct Reuters/LSEG RIC codes for FX spot currency pairs, regardless
+of how base/counter currency is ordered in your source data, and generates
+contributor-specific RIC variants (composite, "=R", "=W", "=TDS", etc.)
+from a list you define.
+
+WHY THIS EXISTS
+----------------
+1) ORDERING: Reuters/LSEG RICs follow MARKET CONVENTION order, not whatever
+   base/counter order a source system stores. E.g. EUR is always base vs
+   USD ("EUR=" = EURUSD), but USD is always base vs JPY ("JPY=" = USDJPY).
+   If your data has a pair stored counter-first relative to convention,
+   building the RIC naively either pulls no data or pulls the inverse rate
+   -- which is exactly the "very high deviation" symptom (rate vs 1/rate).
+
+2) CONTRIBUTORS: the same currency pair can have multiple RICs depending
+   on the source/contributor appended after the root:
+       "EUR="        -> default composite
+       "EUR=R"       -> Reuters/Refinitiv polled composite
+       "EUR=W"       -> a specific contributor/venue code
+       "EUR=TDS"     -> a specific bank contributor code (e.g. TD Securities)
+   Which suffixes exist and what they mean is entitlement/subscription
+   specific -- this module does NOT hardcode a fixed meaning for any
+   contributor code. Instead you define the list of suffixes you actually
+   use, and the module applies market-convention ordering once and then
+   fans that root out across every suffix you give it.
+
+USAGE
+-----
+    from fx_ric_formatter import get_correct_ric, get_ric_variants, process_dataframe
+
+    get_correct_ric("JPY", "USD")
+    # {'ric_root': 'JPY', 'market_base': 'USD', 'market_counter': 'JPY',
+    #  'input_base': 'JPY', 'input_counter': 'USD', 'is_inverted': True}
+
+    get_ric_variants("EUR", "USD", suffixes=["=", "=R", "=TDS"])
+    # {'ric_root': 'EUR', 'is_inverted': False,
+    #  'rics': ['EUR=', 'EUR=R', 'EUR=TDS']}
+
+    df = process_dataframe(
+        df, pair_col="CCY_PAIR", rate_col="RATE",
+        suffixes=["=", "=R", "=TDS"],
+    )
+    # one row per (pair, suffix) with columns: ric_root, market_base,
+    # market_counter, is_inverted, suffix, ric, rate_corrected
+
+CAVEATS
+-------
+- Currency hierarchy below reflects standard, widely used FX market
+  convention (G10 rules + the near-universal "everything else quotes
+  against USD with USD as base" rule). It will not perfectly capture
+  every EM-vs-EM cross convention some desks quote directly rather than
+  via USD -- those are the edge cases worth validating against LSEG's own
+  symbology lookup (Eikon / Refinitiv Data Library `convert_symbols`, or
+  Workspace instrument search) if you trade EM-EM crosses directly.
+- Contributor suffixes are NOT validated against any master list here --
+  you own that list. A suffix code your entitlement doesn't actually have
+  will just produce a RIC that returns no data at fetch time, same as
+  today, but at least the ROOT will be correct.
+"""
+
+from __future__ import annotations
+import re
+from typing import Optional, Sequence
+
+# ---------------------------------------------------------------------------
+# Currency hierarchy: LOWER number = HIGHER priority = more likely to be BASE
+# currency in the market-convention pair.
+#
+# Tier 1 (1-11): fixed, well-established G10 hierarchy.
+# Tier 2 (100+): all other active ISO 4217 currencies. Their relative order
+# vs each other rarely matters for GFX cash (crosses between two of these
+# are uncommon; they almost always trade vs USD or a G10 major, and since
+# they're all >5 (USD's priority) USD is always correctly resolved as base
+# against every one of them). Alphabetical for determinism/maintainability.
+# ---------------------------------------------------------------------------
+CURRENCY_PRIORITY = {
+    # --- Tier 1: G10 / majors ---
+    "EUR": 1, "GBP": 2, "AUD": 3, "NZD": 4, "USD": 5,
+    "CAD": 6, "CHF": 7, "NOK": 8, "SEK": 9, "DKK": 10, "JPY": 11,
+
+    # --- Tier 2: rest of active ISO 4217 currencies (alphabetical) ---
+    "AED": 100, "AFN": 101, "ALL": 102, "AMD": 103, "ANG": 104, "AOA": 105,
+    "ARS": 106, "AWG": 107, "AZN": 108, "BAM": 109, "BBD": 110, "BDT": 111,
+    "BGN": 112, "BHD": 113, "BIF": 114, "BMD": 115, "BND": 116, "BOB": 117,
+    "BRL": 118, "BSD": 119, "BTN": 120, "BWP": 121, "BYN": 122, "BZD": 123,
+    "CDF": 124, "CLP": 125, "CNH": 126, "CNY": 126, "COP": 127, "CRC": 128,
+    "CUP": 129, "CVE": 130, "CZK": 131, "DJF": 132, "DOP": 133, "DZD": 134,
+    "EGP": 135, "ERN": 136, "ETB": 137, "FJD": 138, "GEL": 139, "GHS": 140,
+    "GIP": 141, "GMD": 142, "GNF": 143, "GTQ": 144, "GYD": 145, "HKD": 146,
+    "HNL": 147, "HTG": 148, "HUF": 149, "IDR": 150, "ILS": 151, "INR": 152,
+    "IQD": 153, "IRR": 154, "ISK": 155, "JMD": 156, "JOD": 157, "KES": 158,
+    "KGS": 159, "KHR": 160, "KMF": 161, "KPW": 162, "KRW": 163, "KWD": 164,
+    "KYD": 165, "KZT": 166, "LAK": 167, "LBP": 168, "LKR": 169, "LRD": 170,
+    "LSL": 171, "LYD": 172, "MAD": 173, "MDL": 174, "MGA": 175, "MKD": 176,
+    "MMK": 177, "MNT": 178, "MOP": 179, "MRU": 180, "MUR": 181, "MVR": 182,
+    "MWK": 183, "MXN": 184, "MYR": 185, "MZN": 186, "NAD": 187, "NGN": 188,
+    "NIO": 189, "NPR": 190, "OMR": 191, "PAB": 192, "PEN": 193, "PGK": 194,
+    "PHP": 195, "PKR": 196, "PLN": 197, "PYG": 198, "QAR": 199, "RON": 200,
+    "RSD": 201, "RUB": 202, "RWF": 203, "SAR": 204, "SBD": 205, "SCR": 206,
+    "SDG": 207, "SGD": 208, "SLE": 209, "SOS": 210, "SRD": 211, "SSP": 212,
+    "STN": 213, "SYP": 214, "SZL": 215, "THB": 216, "TJS": 217, "TMT": 218,
+    "TND": 219, "TOP": 220, "TRY": 221, "TTD": 222, "TWD": 223, "TZS": 224,
+    "UAH": 225, "UGX": 226, "UYU": 227, "UZS": 228, "VES": 229, "VND": 230,
+    "VUV": 231, "WST": 232, "XAF": 233, "XCD": 234, "XOF": 235, "XPF": 236,
+    "YER": 237, "ZAR": 238, "ZMW": 239, "ZWL": 240,
+}
+
+_PAIR_SPLIT_RE = re.compile(r"[\s/_\-\\]+")
+
+# Default suffix set is intentionally minimal (just the plain composite).
+# Override with your own entitled contributor codes, e.g.:
+#   ["=", "=R", "=W", "=TDS", "=RBSN", "=BARC"]
+DEFAULT_SUFFIXES = ["="]
+
+
+def normalize_ccy_pair(pair_str: str) -> tuple[str, str]:
+    """
+    Parse a currency-pair string in almost any common format into
+    (ccy1, ccy2) as given (NOT yet corrected for market convention).
+
+    Handles: "EUR/USD", "EUR-USD", "EUR_USD", "EUR USD", "EURUSD"
+    """
+    pair_str = pair_str.strip().upper()
+    parts = [p for p in _PAIR_SPLIT_RE.split(pair_str) if p]
+
+    if len(parts) == 2 and len(parts[0]) == 3 and len(parts[1]) == 3:
+        return parts[0], parts[1]
+
+    if len(pair_str) == 6 and pair_str.isalpha():
+        return pair_str[:3], pair_str[3:]
+
+    raise ValueError(
+        f"Could not parse currency pair from '{pair_str}'. "
+        "Expected formats like 'EUR/USD', 'EURUSD', 'EUR-USD'."
+    )
+
+
+def get_correct_ric(ccy1: str, ccy2: str) -> dict:
+    """
+    Given two currency codes (in whatever order your source data has them),
+    return the market-convention-correct RIC ROOT (no suffix) and whether
+    your input order was inverted relative to convention.
+
+    Returns:
+        ric_root       - root letters before the suffix, e.g. "EUR", "JPY", "EURJPY"
+        market_base    - correct base currency per market convention
+        market_counter - correct counter currency per market convention
+        input_base     - ccy1 as passed in
+        input_counter  - ccy2 as passed in
+        is_inverted    - True if your stored rate is 1/market_rate and needs
+                          inverting to match the RIC's actual quotation direction
+    """
+    ccy1, ccy2 = ccy1.strip().upper(), ccy2.strip().upper()
+
+    if ccy1 == ccy2:
+        raise ValueError(f"Base and counter currency are identical: '{ccy1}'")
+
+    for c in (ccy1, ccy2):
+        if c not in CURRENCY_PRIORITY:
+            raise KeyError(
+                f"Currency '{c}' not found in CURRENCY_PRIORITY table. "
+                "Add it with an appropriate priority rank before using this pair."
+            )
+
+    if CURRENCY_PRIORITY[ccy1] < CURRENCY_PRIORITY[ccy2]:
+        market_base, market_counter = ccy1, ccy2
+    else:
+        market_base, market_counter = ccy2, ccy1
+
+    if market_base == "USD":
+        ric_root = market_counter
+    elif market_counter == "USD":
+        ric_root = market_base
+    else:
+        ric_root = f"{market_base}{market_counter}"
+
+    return {
+        "ric_root": ric_root,
+        "market_base": market_base,
+        "market_counter": market_counter,
+        "input_base": ccy1,
+        "input_counter": ccy2,
+        "is_inverted": (market_base != ccy1),
+    }
+
+
+def get_ric_variants(ccy1: str, ccy2: str, suffixes: Sequence[str] = DEFAULT_SUFFIXES) -> dict:
+    """
+    Same as get_correct_ric(), but also fans the root out across every
+    suffix in `suffixes` to produce the full list of contributor RICs.
+
+    `suffixes` entries are appended AS-IS to the root, so include whatever
+    separator character your suffixes need, e.g. "=", "=R", "=TDS", "+".
+    """
+    base_result = get_correct_ric(ccy1, ccy2)
+    base_result["rics"] = [f"{base_result['ric_root']}{sfx}" for sfx in suffixes]
+    return base_result
+
+
+def ric_from_pair_string(pair_str: str, suffixes: Sequence[str] = DEFAULT_SUFFIXES) -> dict:
+    """Convenience wrapper: parse a pair string, then return get_ric_variants() result."""
+    ccy1, ccy2 = normalize_ccy_pair(pair_str)
+    return get_ric_variants(ccy1, ccy2, suffixes=suffixes)
+
+
+def process_dataframe(
+    df,
+    pair_col: str,
+    rate_col: Optional[str] = None,
+    suffixes: Sequence[str] = DEFAULT_SUFFIXES,
+    explode: bool = True,
+):
+    """
+    Apply RIC correction + contributor expansion across a pandas DataFrame.
+
+    Parameters
+    ----------
+    df       : pandas.DataFrame containing a currency-pair column
+    pair_col : name of the column holding the pair string
+    rate_col : optional column holding the rate value. If given, a
+               'rate_corrected' column is added (1/rate where inverted).
+    suffixes : list of contributor suffixes to generate per pair, e.g.
+               ["=", "=R", "=TDS"]. Defaults to just ["="].
+    explode  : if True (default), returns ONE ROW PER (pair, suffix)
+               combination with 'ric' + 'suffix' columns -- handy for
+               fetching every contributor variant. If False, returns one
+               row per pair with a 'rics' column containing the full list.
+
+    Adds columns: ric_root, market_base, market_counter, is_inverted,
+    and either (suffix, ric) per exploded row, or 'rics' as a list column.
+    """
+    results = df[pair_col].apply(lambda p: ric_from_pair_string(p, suffixes=suffixes))
+
+    df = df.copy()
+    df["ric_root"] = results.apply(lambda r: r["ric_root"])
+    df["market_base"] = results.apply(lambda r: r["market_base"])
+    df["market_counter"] = results.apply(lambda r: r["market_counter"])
+    df["is_inverted"] = results.apply(lambda r: r["is_inverted"])
+
+    if rate_col is not None:
+        df["rate_corrected"] = df.apply(
+            lambda row: (1.0 / row[rate_col]) if row["is_inverted"] and row[rate_col] not in (0, None)
+            else row[rate_col],
+            axis=1,
+        )
+
+    df["rics"] = results.apply(lambda r: r["rics"])
+
+    if not explode:
+        return df
+
+    df = df.explode("rics", ignore_index=True).rename(columns={"rics": "ric"})
+    df["suffix"] = [ric[len(root):] for ric, root in zip(df["ric"], df["ric_root"])]
+    return df
+
+
+if __name__ == "__main__":
+    test_cases = [
+        ("EUR", "USD"),
+        ("USD", "JPY"),
+        ("JPY", "USD"),   # inverted vs convention
+        ("USD", "INR"),
+        ("INR", "USD"),   # inverted vs convention
+        ("EUR", "JPY"),
+        ("GBP", "AUD"),
+        ("USD", "ZAR"),
+        ("USD", "TRY"),
+    ]
+    print(f"{'input':<12}{'root':<10}{'market pair':<16}{'inverted?':<10}{'variants (=,=R,=TDS)'}")
+    for c1, c2 in test_cases:
+        r = get_ric_variants(c1, c2, suffixes=["=", "=R", "=TDS"])
+        print(
+            f"{c1}/{c2:<8}{r['ric_root']:<10}"
+            f"{r['market_base']}/{r['market_counter']:<10}"
+            f"{str(r['is_inverted']):<10}{r['rics']}"
+        )
