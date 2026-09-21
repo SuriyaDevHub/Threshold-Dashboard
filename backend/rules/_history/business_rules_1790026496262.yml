@@ -201,10 +201,10 @@ rules:
     version: 1
     created_by: seed_script
     created_at: 1790026272.2721386
-    updated_by: suriya.dev
-    updated_at: 1790026496.23508
+    updated_by: reviewer.lead
+    updated_at: 1790026296.8652718
     notes: Seeded worked example — see scripts/seed_rule_designer.py.
-    last_dry_run_id: dryrun_e4b59e3ccf
+    last_dry_run_id: dryrun_c68b7545f0
     approvals:
       - actor: suriya.dev
         role: RULE_CREATOR
@@ -222,5 +222,5 @@ rules:
         timestamp: 1790026296.8652673
         comment: Publishing v1 — initial worked example.
     depends_on: []
-last_updated_at: 1790026496.2622666
-last_updated_by: suriya.dev
+last_updated_at: 1790026296.8890667
+last_updated_by: reviewer.lead
