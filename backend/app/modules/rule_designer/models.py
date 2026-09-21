@@ -510,6 +510,61 @@ class ImpactResult(BaseModel):
 
 
 # --------------------------------------------------------------------------
+# Shadow / parallel testing — the new engine's decision vs. a legacy
+# validator's already-produced output, joined by record id. This is how a
+# migration off a hardcoded `{product}_validator.py` gets proven safe
+# before cutover: no code from the legacy validator is imported or run
+# here, its output is just data like any other upload.
+# --------------------------------------------------------------------------
+
+class LegacyResultRow(BaseModel):
+    record_id: str
+    legacy_status: str
+    legacy_reason_code: Optional[str] = None
+    legacy_commentary: Optional[str] = None
+
+
+class ShadowComparisonCategory(str, Enum):
+    AGREE_ALERT = "agree_alert"
+    AGREE_CLEAR = "agree_clear"
+    NEW_ONLY = "new_only"        # new rule alerts, legacy did not — review for over-alerting
+    LEGACY_ONLY = "legacy_only"  # legacy alerted, new rule did not — the regression risk
+
+
+class ShadowRecordComparison(BaseModel):
+    record_id: Any
+    category: ShadowComparisonCategory
+    legacy_status: Optional[str] = None
+    legacy_reason_code: Optional[str] = None
+    new_matched: bool = False
+    new_outcome: Dict[str, Any] = Field(default_factory=dict)
+    trail: List[RecordTraceStep] = Field(default_factory=list)
+
+
+class ShadowTestSummary(BaseModel):
+    total_compared: int = 0
+    dataset_records_without_legacy_result: int = 0
+    legacy_results_without_dataset_record: int = 0
+    agree_alert: int = 0
+    agree_clear: int = 0
+    new_only: int = 0
+    legacy_only: int = 0
+    agreement_rate_pct: float = 0.0
+
+
+class ShadowTestResult(BaseModel):
+    id: str = Field(default_factory=lambda: _id("shadow"))
+    rule_id: str
+    rule_version: int
+    dataset_id: str
+    legacy_alert_values: List[str] = Field(default_factory=list)
+    created_by: str = "system"
+    created_at: float = Field(default_factory=time.time)
+    summary: ShadowTestSummary = Field(default_factory=ShadowTestSummary)
+    mismatches: List[ShadowRecordComparison] = Field(default_factory=list)  # new_only + legacy_only, capped
+
+
+# --------------------------------------------------------------------------
 # Versioning + audit
 # --------------------------------------------------------------------------
 

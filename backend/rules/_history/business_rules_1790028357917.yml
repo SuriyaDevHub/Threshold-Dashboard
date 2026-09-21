@@ -3,7 +3,7 @@ rules:
   - rule_id: FX_DEVIATION_HIGH_RISK
     name: USD FX Deviation — High Risk
     description: USD trades whose booked price deviates from the market reference price by more than the currency's applicable threshold (looked up from the currency reference file) are classified as HIGH risk, provided notional exceeds 1,000,000.
-    status: PUBLISHED
+    status: DRAFT
     priority: 10
     conflict_handling: first_match
     authoring_mode: visual
@@ -201,10 +201,10 @@ rules:
     version: 1
     created_by: seed_script
     created_at: 1790026272.2721386
-    updated_by: reviewer.lead
-    updated_at: 1790028358.2491605
+    updated_by: suriya.dev
+    updated_at: 1790028332.4201882
     notes: Seeded worked example — see scripts/seed_rule_designer.py.
-    last_dry_run_id: dryrun_9b1074987d
+    last_dry_run_id: dryrun_e08d09d9aa
     approvals:
       - actor: suriya.dev
         role: RULE_CREATOR
@@ -221,21 +221,6 @@ rules:
         action: PUBLISHED
         timestamp: 1790026296.8652673
         comment: Publishing v1 — initial worked example.
-      - actor: suriya.dev
-        role: RULE_CREATOR
-        action: PENDING_APPROVAL
-        timestamp: 1790028358.0564213
-        comment: Re-bound to current session dataset.
-      - actor: reviewer.lead
-        role: APPROVER
-        action: APPROVED
-        timestamp: 1790028358.1600423
-        comment: Parity confirmed via shadow test against legacy sample.
-      - actor: reviewer.lead
-        role: APPROVER
-        action: PUBLISHED
-        timestamp: 1790028358.249155
-        comment: Publishing v1 with shadow-test parity confirmed.
     depends_on: []
-last_updated_at: 1790028358.2762413
-last_updated_by: reviewer.lead
+last_updated_at: 1790028332.4517655
+last_updated_by: suriya.dev

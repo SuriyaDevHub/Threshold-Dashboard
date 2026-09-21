@@ -72,7 +72,7 @@ rules:
             missing_strategy: default
             default_values:
               Risk_Group: UNKNOWN
-              Threshold: 5
+              Threshold: 5.0
               Market_Region: UNKNOWN
             flag_field:
             fallback_reference_file_id:
@@ -191,7 +191,7 @@ rules:
         - id: edge_fe8bd48934
           source: n_condition
           target: n_outcome
-    dataset_id: ds_1c985dc10d
+    dataset_id: ds_18093b9fe1
     required_columns:
       - trade_id
       - currency
@@ -201,10 +201,10 @@ rules:
     version: 1
     created_by: seed_script
     created_at: 1790026272.2721386
-    updated_by: reviewer.lead
-    updated_at: 1790028358.2491605
+    updated_by: suriya.dev
+    updated_at: 1790026496.23508
     notes: Seeded worked example — see scripts/seed_rule_designer.py.
-    last_dry_run_id: dryrun_9b1074987d
+    last_dry_run_id: dryrun_e4b59e3ccf
     approvals:
       - actor: suriya.dev
         role: RULE_CREATOR
@@ -221,21 +221,6 @@ rules:
         action: PUBLISHED
         timestamp: 1790026296.8652673
         comment: Publishing v1 — initial worked example.
-      - actor: suriya.dev
-        role: RULE_CREATOR
-        action: PENDING_APPROVAL
-        timestamp: 1790028358.0564213
-        comment: Re-bound to current session dataset.
-      - actor: reviewer.lead
-        role: APPROVER
-        action: APPROVED
-        timestamp: 1790028358.1600423
-        comment: Parity confirmed via shadow test against legacy sample.
-      - actor: reviewer.lead
-        role: APPROVER
-        action: PUBLISHED
-        timestamp: 1790028358.249155
-        comment: Publishing v1 with shadow-test parity confirmed.
     depends_on: []
-last_updated_at: 1790028358.2762413
-last_updated_by: reviewer.lead
+last_updated_at: 1790026496.2622666
+last_updated_by: suriya.dev

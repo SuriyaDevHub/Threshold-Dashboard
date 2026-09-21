@@ -9,6 +9,7 @@ __pycache__/
 # not the YAML rule store, which IS committed as the worked example.
 backend/_datasets/
 backend/_dry_runs/
+backend/_shadow_tests/
 
 # --- Node / frontend ---
 frontend/node_modules/

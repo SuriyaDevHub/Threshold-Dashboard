@@ -11,10 +11,12 @@ import WorkflowCanvas from "../components/WorkflowCanvas.jsx";
 import DryRunResults from "../components/DryRunResults.jsx";
 import ImpactView from "../components/ImpactView.jsx";
 import DiffView from "../components/DiffView.jsx";
+import ShadowTestView from "../components/ShadowTestView.jsx";
 
 const TABS = [
   { id: "workflow", label: "Workflow / Rule builder" },
   { id: "dryrun", label: "Dry run" },
+  { id: "shadow", label: "Shadow test (vs legacy)" },
   { id: "impact", label: "Impact analysis" },
   { id: "review", label: "Review" },
   { id: "history", label: "History" },
@@ -158,6 +160,7 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
         <WorkflowTab rule={rule} schema={schema} datasetId={datasetId} mutateWorkflow={mutateWorkflow} setNotice={setNotice} meta={meta} />
       )}
       {tab === "dryrun" && <DryRunTab ruleId={ruleId} datasetId={datasetId} schema={schema} onRan={(r) => setRule((prev) => ({ ...prev, status: prev.status === "VALIDATED" ? "DRY_RUN_COMPLETED" : prev.status }))} />}
+      {tab === "shadow" && <ShadowTestView ruleId={ruleId} datasetId={datasetId} />}
       {tab === "impact" && <ImpactTab ruleId={ruleId} datasetId={datasetId} schema={schema} />}
       {tab === "review" && <ReviewTab ruleId={ruleId} />}
       {tab === "history" && <HistoryTab rule={rule} />}
