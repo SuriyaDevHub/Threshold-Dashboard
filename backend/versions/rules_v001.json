@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "file": "rules_v001.yml",
+  "created_by": "reviewer.lead",
+  "created_at": 1790026296.9436862,
+  "description": "Publishing v1 — initial worked example.",
+  "rule_ids_changed": [
+    "FX_DEVIATION_HIGH_RISK"
+  ],
+  "dry_run_dataset_id": "ds_18093b9fe1",
+  "dry_run_result_id": "dryrun_c68b7545f0",
+  "approved_by": "reviewer.lead",
+  "published_at": 1790026296.9436762
+}

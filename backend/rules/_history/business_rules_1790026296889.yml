@@ -1,0 +1,221 @@
+schema_version: 1
+rules:
+  - rule_id: FX_DEVIATION_HIGH_RISK
+    name: USD FX Deviation — High Risk
+    description: USD trades whose booked price deviates from the market reference price by more than the currency's applicable threshold (looked up from the currency reference file) are classified as HIGH risk, provided notional exceeds 1,000,000.
+    status: APPROVED
+    priority: 10
+    conflict_handling: first_match
+    authoring_mode: visual
+    source_text:
+    interpretation_notes: []
+    workflow:
+      nodes:
+        - id: n_input
+          type: input
+          label: Trade dataset
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_calc_dev
+          type: calculate
+          label: Deviation %
+          position:
+            x: 0.0
+            y: 120.0
+          filter:
+          lookup:
+          calculate:
+            output_field: Deviation_Pct
+            expression: abs(booked_price - reference_price) / reference_price * 100
+            output_type: numeric
+            description: Booked vs. reference price deviation, as a percentage.
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_lookup_ccy
+          type: lookup
+          label: Currency reference lookup
+          position:
+            x: 0.0
+            y: 240.0
+          filter:
+          lookup:
+            lookup_type: exact
+            reference_file_id: ref_66b4447129
+            reference_version:
+            join_keys:
+              - source: currency
+                reference: Currency
+            range_field:
+            range_low_column:
+            range_high_column:
+            date_field:
+            date_from_column:
+            date_to_column:
+            fields:
+              - source_column: Risk_Group
+                output_field: Risk_Group
+              - source_column: Threshold
+                output_field: Threshold
+              - source_column: Market_Region
+                output_field: Market_Region
+            join_type: left
+            missing_strategy: default
+            default_values:
+              Risk_Group: UNKNOWN
+              Threshold: 5.0
+              Market_Region: UNKNOWN
+            flag_field:
+            fallback_reference_file_id:
+            priority_strategy: first_match
+            priority_field:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_calc_adj
+          type: calculate
+          label: Adjusted deviation
+          position:
+            x: 0.0
+            y: 360.0
+          filter:
+          lookup:
+          calculate:
+            output_field: Adjusted_Deviation
+            expression: Deviation_Pct / Threshold
+            output_type: numeric
+            description:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_condition
+          type: condition
+          label: High-risk FX deviation
+          position:
+            x: 0.0
+            y: 480.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+            kind: group
+            id: grp_6f2ed753e5
+            operator: AND
+            children:
+              - kind: condition
+                id: cond_a781fff704
+                field: currency
+                operator: eq
+                value:
+                  type: static
+                  value: USD
+                  name:
+                value2:
+                values:
+              - kind: condition
+                id: cond_37fb1f9628
+                field: Deviation_Pct
+                operator: gt
+                value:
+                  type: column
+                  value:
+                  name: Threshold
+                value2:
+                values:
+              - kind: condition
+                id: cond_7dee21c177
+                field: notional
+                operator: gt
+                value:
+                  type: static
+                  value: 1000000
+                  name:
+                value2:
+                values:
+          outcomes:
+          transform:
+          validation:
+        - id: n_outcome
+          type: outcome
+          label: Flag as high risk
+          position:
+            x: 0.0
+            y: 600.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+            - field: Alert
+              value:
+                type: static
+                value: true
+                name:
+            - field: Risk_Level
+              value:
+                type: static
+                value: HIGH
+                name:
+            - field: Reason
+              value:
+                type: static
+                value: Deviation exceeds applicable threshold
+                name:
+          transform:
+          validation:
+      edges:
+        - id: edge_5ede61f139
+          source: n_input
+          target: n_calc_dev
+        - id: edge_7f8a9a6c49
+          source: n_calc_dev
+          target: n_lookup_ccy
+        - id: edge_32826de740
+          source: n_lookup_ccy
+          target: n_calc_adj
+        - id: edge_1a64167b61
+          source: n_calc_adj
+          target: n_condition
+        - id: edge_fe8bd48934
+          source: n_condition
+          target: n_outcome
+    dataset_id: ds_18093b9fe1
+    required_columns:
+      - trade_id
+      - currency
+      - booked_price
+      - reference_price
+      - notional
+    version: 1
+    created_by: seed_script
+    created_at: 1790026272.2721386
+    updated_by: reviewer.lead
+    updated_at: 1790026296.788766
+    notes: Seeded worked example — see scripts/seed_rule_designer.py.
+    last_dry_run_id: dryrun_c68b7545f0
+    approvals:
+      - actor: suriya.dev
+        role: RULE_CREATOR
+        action: PENDING_APPROVAL
+        timestamp: 1790026296.7166207
+        comment: Initial worked example, ready for review.
+      - actor: reviewer.lead
+        role: APPROVER
+        action: APPROVED
+        timestamp: 1790026296.7887619
+        comment: Logic and enrichment look correct; dry-run matches expectation.
+    depends_on: []
+last_updated_at: 1790026296.8125918
+last_updated_by: reviewer.lead

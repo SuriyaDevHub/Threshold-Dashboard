@@ -1,0 +1,27 @@
+{
+  "ref_66b4447129": {
+    "name": "currency_reference",
+    "versions": [
+      {
+        "version": 1,
+        "uploaded_by": "seed_script",
+        "uploaded_at": 1790026272.2714655,
+        "records": 6,
+        "columns": [
+          "Currency",
+          "Risk_Group",
+          "Threshold",
+          "Market_Region"
+        ],
+        "column_types": {
+          "Currency": "string",
+          "Risk_Group": "string",
+          "Threshold": "numeric",
+          "Market_Region": "string"
+        },
+        "file_path": "ref_66b4447129/v1.json",
+        "status": "active"
+      }
+    ]
+  }
+}
