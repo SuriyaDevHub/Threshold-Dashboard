@@ -3,6 +3,19 @@ machine-readable source of truth. This module is the ONLY place that reads
 or writes it — nothing in the API layer or the frontend touches it
 directly, and the frontend never sees YAML at all.
 
+Storage is per product: `rules/<product>/business_rules.yml`. A single
+monolithic file works for one worked example; it stops working the moment
+two products' rule authors touch it in the same window — atomic file
+writes mean one publish blocks or corrupts the other. Splitting by product
+also makes the admin "enable/disable a whole product's rules" action and
+per-product version history (versioned independently, rolled back
+independently) a natural consequence of the storage layout rather than
+something layered on top.
+
+A rule_id is still globally unique, so a small index
+(`rules/_index.json`, rule_id -> product) makes `get_rule(rule_id)` and
+friends O(1) instead of a scan across every product's file.
+
 Load path:  existing YAML -> raw dict (ruamel round-trip, comments/order
             kept) -> canonical Rule models (best-effort per item; a rule
             that fails to parse is reported, not dropped or crashed on).
@@ -11,18 +24,14 @@ Save path:  canonical Rule models -> merged into the raw round-trip
             top-level key, comment and ordering is left exactly as read)
             -> atomic write (temp file + os.replace) with a timestamped
             backup, never a partial write.
-
-We first INSPECT whatever is on disk rather than assume a shape (spec
-§2/§55): `inspect_yaml()` reports the top-level keys and, if a `rules` key
-exists, how many entries parsed cleanly vs. not, before anything else in
-the app relies on it.
 """
 from __future__ import annotations
 
 import io
+import json
 import os
 import time
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import ValidationError
 from ruamel.yaml import YAML
@@ -31,8 +40,6 @@ from app.modules.rule_designer.models import Rule
 
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 RULES_DIR = os.path.join(_BACKEND_DIR, "rules")
-HISTORY_DIR = os.path.join(RULES_DIR, "_history")
-RULES_FILE = os.path.join(RULES_DIR, "business_rules.yml")
 
 _yaml = YAML()
 _yaml.preserve_quotes = True
@@ -40,27 +47,88 @@ _yaml.width = 4096
 _yaml.indent(mapping=2, sequence=4, offset=2)
 
 
-def _ensure_dirs() -> None:
+def _product_dir(product: str) -> str:
+    return os.path.join(RULES_DIR, product.upper())
+
+
+def _history_dir(product: str) -> str:
+    return os.path.join(_product_dir(product), "_history")
+
+
+def _rules_file(product: str) -> str:
+    return os.path.join(_product_dir(product), "business_rules.yml")
+
+
+def _ensure_dirs(product: str) -> None:
+    os.makedirs(_product_dir(product), exist_ok=True)
+    os.makedirs(_history_dir(product), exist_ok=True)
+
+
+# --------------------------------------------------------------------------
+# rule_id -> product index (rule_id stays globally unique)
+# --------------------------------------------------------------------------
+
+def _index_path() -> str:
+    return os.path.join(RULES_DIR, "_index.json")
+
+
+def _load_index() -> Dict[str, str]:
+    path = _index_path()
+    if not os.path.exists(path):
+        return {}
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def _save_index(idx: Dict[str, str]) -> None:
     os.makedirs(RULES_DIR, exist_ok=True)
-    os.makedirs(HISTORY_DIR, exist_ok=True)
+    path = _index_path()
+    tmp = path + f".tmp{os.getpid()}"
+    with open(tmp, "w") as fh:
+        json.dump(idx, fh, indent=2)
+    os.replace(tmp, path)
 
 
-def load_raw() -> Dict[str, Any]:
-    """The existing YAML, parsed as-is. Never assumes `rules` exists."""
-    _ensure_dirs()
-    if not os.path.exists(RULES_FILE):
-        return {"schema_version": 1, "rules": []}
-    with open(RULES_FILE) as fh:
+def resolve_product(rule_id: str) -> Optional[str]:
+    return _load_index().get(rule_id)
+
+
+def _index_upsert(rule_ids_by_product: Dict[str, str]) -> None:
+    idx = _load_index()
+    idx.update(rule_ids_by_product)
+    _save_index(idx)
+
+
+def _index_remove(rule_id: str) -> None:
+    idx = _load_index()
+    if rule_id in idx:
+        del idx[rule_id]
+        _save_index(idx)
+
+
+# --------------------------------------------------------------------------
+# Per-product read/write
+# --------------------------------------------------------------------------
+
+def load_raw(product: str) -> Dict[str, Any]:
+    """The existing YAML for one product, parsed as-is. Never assumes
+    `rules` exists."""
+    _ensure_dirs(product)
+    path = _rules_file(product)
+    if not os.path.exists(path):
+        return {"schema_version": 1, "product": product.upper(), "rules": []}
+    with open(path) as fh:
         data = _yaml.load(fh)
-    return data if data is not None else {"schema_version": 1, "rules": []}
+    return data if data is not None else {"schema_version": 1, "product": product.upper(), "rules": []}
 
 
-def inspect_yaml() -> Dict[str, Any]:
+def inspect_yaml(product: str) -> Dict[str, Any]:
     """Phase-1 inspection report: what shape is actually on disk right now."""
-    raw = load_raw()
+    raw = load_raw(product)
     report: Dict[str, Any] = {
-        "path": RULES_FILE,
-        "exists": os.path.exists(RULES_FILE),
+        "product": product.upper(),
+        "path": _rules_file(product),
+        "exists": os.path.exists(_rules_file(product)),
         "top_level_keys": list(raw.keys()) if isinstance(raw, dict) else [],
         "rule_count": 0,
         "parsed_ok": 0,
@@ -90,9 +158,9 @@ def _plain(obj: Any) -> Any:
     return obj
 
 
-def load_rules() -> Tuple[List[Rule], List[Dict[str, Any]]]:
+def load_rules(product: str) -> Tuple[List[Rule], List[Dict[str, Any]]]:
     """Returns (rules that parsed, [{rule_id, errors}] for ones that didn't)."""
-    raw = load_raw()
+    raw = load_raw(product)
     rules: List[Rule] = []
     failures: List[Dict[str, Any]] = []
     for item in raw.get("rules", []) or []:
@@ -108,14 +176,44 @@ def _rule_to_plain(rule: Rule) -> dict:
     return rule.model_dump(mode="json")
 
 
+def _backup(product: str) -> None:
+    path = _rules_file(product)
+    if os.path.exists(path):
+        backup = os.path.join(_history_dir(product), f"business_rules_{int(time.time() * 1000)}.yml")
+        with open(path) as src, open(backup, "w") as dst:
+            dst.write(src.read())
+
+
+def _atomic_write(product: str, raw: Dict[str, Any]) -> None:
+    path = _rules_file(product)
+    tmp_path = path + f".tmp{os.getpid()}"
+    try:
+        with open(tmp_path, "w") as fh:
+            _yaml.dump(raw, fh)
+        os.replace(tmp_path, path)
+    except Exception:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
+
+
 def save_rules(rules: List[Rule], actor: str = "system") -> None:
-    """Merge the given rules into the on-disk YAML, touching only the
-    `rules` list and only the entries whose rule_id is in `rules` — every
-    other top-level key and every other rule entry is preserved verbatim.
-    Atomic: written to a temp file in the same directory, then renamed.
+    """Merge the given rules into their product's on-disk YAML, touching
+    only the `rules` list and only the entries whose rule_id is in `rules`
+    — every other top-level key and every other rule entry is preserved
+    verbatim. Atomic: written to a temp file in the same directory, then
+    renamed. Every rule in `rules` must share one product — mixing
+    products in one call is almost always a bug at the caller.
     """
-    _ensure_dirs()
-    raw = load_raw()
+    if not rules:
+        return
+    products = {r.product for r in rules}
+    if len(products) > 1:
+        raise ValueError(f"save_rules() received rules from multiple products: {sorted(products)}")
+    product = next(iter(products))
+
+    _ensure_dirs(product)
+    raw = load_raw(product)
     if "rules" not in raw or raw.get("rules") is None:
         raw["rules"] = []
 
@@ -135,42 +233,27 @@ def save_rules(rules: List[Rule], actor: str = "system") -> None:
             new_list.append(_rule_to_plain(r))
     raw["rules"] = new_list
     raw["schema_version"] = raw.get("schema_version", 1)
+    raw["product"] = product.upper()
     raw["last_updated_at"] = time.time()
     raw["last_updated_by"] = actor
 
-    if os.path.exists(RULES_FILE):
-        backup = os.path.join(HISTORY_DIR, f"business_rules_{int(time.time() * 1000)}.yml")
-        with open(RULES_FILE) as src, open(backup, "w") as dst:
-            dst.write(src.read())
-
-    tmp_path = RULES_FILE + f".tmp{os.getpid()}"
-    try:
-        with open(tmp_path, "w") as fh:
-            _yaml.dump(raw, fh)
-        os.replace(tmp_path, RULES_FILE)
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise
+    _backup(product)
+    _atomic_write(product, raw)
+    _index_upsert({rid: product for rid in by_id})
 
 
-def delete_rule(rule_id: str, actor: str = "system") -> bool:
-    raw = load_raw()
+def delete_rule(rule_id: str, product: str, actor: str = "system") -> bool:
+    raw = load_raw(product)
     before = len(raw.get("rules", []))
     raw["rules"] = [r for r in raw.get("rules", []) if _plain(r).get("rule_id") != rule_id]
     if len(raw["rules"]) == before:
         return False
     raw["last_updated_at"] = time.time()
     raw["last_updated_by"] = actor
-    _ensure_dirs()
-    if os.path.exists(RULES_FILE):
-        backup = os.path.join(HISTORY_DIR, f"business_rules_{int(time.time() * 1000)}.yml")
-        with open(RULES_FILE) as src, open(backup, "w") as dst:
-            dst.write(src.read())
-    tmp_path = RULES_FILE + f".tmp{os.getpid()}"
-    with open(tmp_path, "w") as fh:
-        _yaml.dump(raw, fh)
-    os.replace(tmp_path, RULES_FILE)
+    _ensure_dirs(product)
+    _backup(product)
+    _atomic_write(product, raw)
+    _index_remove(rule_id)
     return True
 
 
@@ -180,5 +263,5 @@ def dump_to_text(raw: Dict[str, Any]) -> str:
     return buf.getvalue()
 
 
-def rules_yaml_text() -> str:
-    return dump_to_text(load_raw())
+def rules_yaml_text(product: str) -> str:
+    return dump_to_text(load_raw(product))

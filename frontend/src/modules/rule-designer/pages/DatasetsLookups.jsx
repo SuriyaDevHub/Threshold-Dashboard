@@ -15,7 +15,7 @@ function readFileText(file) {
 }
 
 export default function DatasetsLookups() {
-  const { actor, role } = useActor();
+  const { actor, role, isAdmin } = useActor();
   const { loading, data, error, reload } = useAsync(
     useCallback(() => Promise.all([rd.datasets(), rd.referenceFiles()]).then(([d, r]) => ({ datasets: d.datasets, files: r.files })), []),
     [],
@@ -104,15 +104,19 @@ export default function DatasetsLookups() {
             </tbody>
           </table>
         </div>
-        <div className="controls controls--row">
-          <label className="control" style={{ minWidth: 220 }}><span>Name</span>
-            <input value={refName} onChange={(e) => setRefName(e.target.value)} placeholder="e.g. currency_reference" /></label>
-          <label className="control"><span>CSV file</span>
-            <input type="file" accept=".csv" onChange={(e) => setRefFile(e.target.files?.[0] || null)} /></label>
-          <button className="btn" disabled={busy || !refFile || !refName.trim()} onClick={uploadReference}>
-            <Upload size={14} style={{ marginRight: 6, verticalAlign: "-2px" }} />Upload version
-          </button>
-        </div>
+        {isAdmin ? (
+          <div className="controls controls--row">
+            <label className="control" style={{ minWidth: 220 }}><span>Name</span>
+              <input value={refName} onChange={(e) => setRefName(e.target.value)} placeholder="e.g. currency_reference" /></label>
+            <label className="control"><span>CSV file</span>
+              <input type="file" accept=".csv" onChange={(e) => setRefFile(e.target.files?.[0] || null)} /></label>
+            <button className="btn" disabled={busy || !refFile || !refName.trim()} onClick={uploadReference}>
+              <Upload size={14} style={{ marginRight: 6, verticalAlign: "-2px" }} />Upload version
+            </button>
+          </div>
+        ) : (
+          <p className="preview-note">Uploading reference files is Admin-only.</p>
+        )}
         <p className="empty-hint">Uploading with the same name creates a new immutable version — published rules keep referencing the version they were tested against.</p>
       </Card>
     </>

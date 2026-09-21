@@ -111,6 +111,7 @@ def build_demo_workflow(reference_file_id: str) -> Workflow:
 def seed_rule(reference_file_id: str) -> Rule:
     rule = Rule(
         rule_id="FX_DEVIATION_HIGH_RISK",
+        product="CASH_BONDS",  # matches the mock BRV dataset this seed dry-runs against
         name="USD FX Deviation — High Risk",
         description=(
             "USD trades whose booked price deviates from the market reference price by "
@@ -129,7 +130,13 @@ def seed_rule(reference_file_id: str) -> Rule:
 
 
 if __name__ == "__main__":
+    from app.modules.rule_designer import product_registry
+    from app.modules.rule_designer.models import MigrationStatus
+
+    product_registry.set_migration_status("CASH_BONDS", MigrationStatus.IN_PROGRESS, "seed_script")
+    print("product registry:", [p.code for p in product_registry.list_products()])
+
     ref_id = seed_reference_data()
     seed_rule(ref_id)
-    print("\n--- rules/business_rules.yml ---")
-    print(yaml_service.rules_yaml_text())
+    print("\n--- rules/CASH_BONDS/business_rules.yml ---")
+    print(yaml_service.rules_yaml_text("CASH_BONDS"))

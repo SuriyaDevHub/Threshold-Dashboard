@@ -23,12 +23,25 @@ export default function Dashboard({ onOpenRule }) {
         <Stat label="Versions published" value={data.versions_published} />
       </div>
 
+      <Card title="Products">
+        <div className="ds-list">
+          {data.products.map((p) => (
+            <div key={p.code} className="ds-row" style={{ cursor: "default" }}>
+              <span className="ds-label">{p.name} <span className="mono ds-id">{p.code}</span></span>
+              {!p.enabled && <span className="badge badge--breach">disabled</span>}
+              <span className="ds-count mono">{p.rule_count} rule(s)</span>
+            </div>
+          ))}
+        </div>
+      </Card>
+
       <Card title="Recently updated rules">
         {data.recent_rules.length === 0 && <p className="empty-hint">No rules yet — create one in the Rules tab.</p>}
         <div className="ds-list">
           {data.recent_rules.map((r) => (
             <button key={r.rule_id} className="ds-row" style={{ width: "100%", textAlign: "left" }} onClick={() => onOpenRule(r.rule_id)}>
               <span className="ds-label">{r.name} <span className="mono ds-id">{r.rule_id}</span></span>
+              <span className="mono ds-id">{r.product}</span>
               <span className={`rd-status rd-status--${r.status.toLowerCase()}`}>{r.status.replace(/_/g, " ")}</span>
               <span className="ds-count mono">{fmtDate(r.updated_at)} · {r.updated_by}</span>
             </button>

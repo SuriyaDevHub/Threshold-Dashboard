@@ -3,6 +3,7 @@ import { ModuleHeader } from "../../components/ui.jsx";
 import { RoleProvider } from "./RoleContext.jsx";
 import RoleBar from "./components/RoleBar.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
+import Products from "./pages/Products.jsx";
 import RuleList from "./pages/RuleList.jsx";
 import RuleWorkspace from "./pages/RuleWorkspace.jsx";
 import DatasetsLookups from "./pages/DatasetsLookups.jsx";
@@ -20,6 +21,7 @@ export const meta = {
 
 const TOP_TABS = [
   { id: "dashboard", label: "Dashboard" },
+  { id: "products", label: "Products" },
   { id: "rules", label: "Rules" },
   { id: "data", label: "Datasets & Lookups" },
   { id: "versions", label: "Versions" },
@@ -49,6 +51,7 @@ function RuleDesignerInner() {
       )}
 
       {tab === "dashboard" && !selectedRule && <Dashboard onOpenRule={openRule} />}
+      {tab === "products" && !selectedRule && <Products />}
       {tab === "rules" && !selectedRule && <RuleList onOpenRule={openRule} />}
       {tab === "rules" && selectedRule && (
         <RuleWorkspace ruleId={selectedRule} onBack={() => setSelectedRule(null)} onDeleted={() => setSelectedRule(null)} />

@@ -9,8 +9,8 @@ from app.modules.rule_designer import reference_store, version_service, workflow
 from app.modules.rule_designer.models import ImpactResult, Rule
 
 
-def _published_rule_from_version(rule_id: str, version: int) -> Optional[Rule]:
-    text = version_service.get_version_yaml_text(version)
+def _published_rule_from_version(product: str, rule_id: str, version: int) -> Optional[Rule]:
+    text = version_service.get_version_yaml_text(product, version)
     if text is None:
         return None
     raw = yaml_service._yaml.load(text)  # noqa: SLF001
@@ -27,9 +27,11 @@ def run_impact_analysis(proposed_rule: Rule, dataset_id: str, actor: str,
     if rows is None:
         raise ValueError(f"dataset '{dataset_id}' not found")
 
-    versions = [v for v in version_service.list_versions() if proposed_rule.rule_id in v.rule_ids_changed]
+    versions = [v for v in version_service.list_versions(proposed_rule.product)
+                if proposed_rule.rule_id in v.rule_ids_changed]
     current_version_no = versions[-1].version if versions else None
-    current_rule = _published_rule_from_version(proposed_rule.rule_id, current_version_no) if current_version_no else None
+    current_rule = _published_rule_from_version(proposed_rule.product, proposed_rule.rule_id, current_version_no) \
+        if current_version_no else None
 
     proposed_records, _, proposed_summary = workflow_engine.run_workflow(
         proposed_rule.workflow, rows, reference_store.reference_loader, record_id_field=record_id_field,

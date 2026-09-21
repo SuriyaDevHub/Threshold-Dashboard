@@ -13,27 +13,27 @@ import pytest
 
 from app.core import store as dataset_store
 from app.modules.rule_designer import (
-    condition_engine, expr_engine, lookup_engine, reference_store, rule_store, shadow_test_service,
-    validation_service, version_service, workflow_engine, yaml_service,
+    condition_engine, expr_engine, lookup_engine, product_engine, product_registry, reference_store,
+    rule_store, shadow_test_service, validation_service, version_service, workflow_engine, yaml_service,
 )
 from app.modules.rule_designer.models import (
-    Condition, ConditionGroup, DeriveSpec, LookupConfig, LookupFieldMap, LookupType,
+    Condition, ConditionGroup, ConflictHandling, DeriveSpec, LookupConfig, LookupFieldMap, LookupType,
     MissingLookupStrategy, NodeType, Operator, OutcomeAction, PriorityStrategy, Rule, RuleStatus,
     ShadowComparisonCategory, Role, ValueRef, Workflow, WorkflowEdge, WorkflowNode,
 )
+
+TEST_PRODUCT = "TESTPROD"
 
 
 @pytest.fixture(autouse=True)
 def isolated_storage(tmp_path, monkeypatch):
     """Every test gets its own rules/versions/reference_data/audit dirs so
-    tests never see each other's state or the real seeded data."""
-    rules_dir = tmp_path / "rules"
-    monkeypatch.setattr(yaml_service, "RULES_DIR", str(rules_dir))
-    monkeypatch.setattr(yaml_service, "HISTORY_DIR", str(rules_dir / "_history"))
-    monkeypatch.setattr(yaml_service, "RULES_FILE", str(rules_dir / "business_rules.yml"))
-
+    tests never see each other's state or the real seeded data, plus a
+    clean product registry seeded with one TESTPROD entry."""
+    monkeypatch.setattr(yaml_service, "RULES_DIR", str(tmp_path / "rules"))
     monkeypatch.setattr(version_service, "VERSIONS_DIR", str(tmp_path / "versions"))
     monkeypatch.setattr(reference_store, "BASE_DIR", str(tmp_path / "reference_data"))
+    monkeypatch.setattr(product_registry, "REGISTRY_PATH", str(tmp_path / "rules" / "products.json"))
 
     import app.modules.rule_designer.audit_service as audit_service
     monkeypatch.setattr(audit_service, "AUDIT_DIR", str(tmp_path / "audit"))
@@ -42,8 +42,16 @@ def isolated_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(shadow_test_service, "SHADOW_DIR", str(tmp_path / "shadow_tests"))
     monkeypatch.setattr(dataset_store.get_settings(), "DATA_DIR", str(tmp_path / "_datasets"))
     dataset_store._MEM.clear()  # noqa: SLF001 — in-memory dataset store is process-global
+
+    os.makedirs(tmp_path / "rules", exist_ok=True)
+    product_registry.create_product(TEST_PRODUCT, "Test Product", "seeded for tests", "tester")
     yield
     dataset_store._MEM.clear()  # noqa: SLF001
+
+
+def _rule(**kw) -> Rule:
+    kw.setdefault("product", TEST_PRODUCT)
+    return Rule(**kw)
 
 
 # --------------------------------------------------------------------------
@@ -271,7 +279,7 @@ def test_validation_catches_missing_dataset_column():
 
 
 def test_validation_workflow_flags_unavailable_field():
-    rule = Rule(rule_id="R1", name="R1", required_columns=["Currency"], workflow=Workflow(
+    rule = _rule(rule_id="R1", name="R1", required_columns=["Currency"], workflow=Workflow(
         nodes=[WorkflowNode(id="in", type=NodeType.INPUT),
                WorkflowNode(id="cond", type=NodeType.CONDITION, condition=ConditionGroup(
                    operator="AND", children=[Condition(field="Nonexistent", operator=Operator.EQ,
@@ -284,7 +292,7 @@ def test_validation_workflow_flags_unavailable_field():
 
 
 def test_validation_between_requires_two_values():
-    rule = Rule(rule_id="R2", name="R2", required_columns=["x"], workflow=Workflow(
+    rule = _rule(rule_id="R2", name="R2", required_columns=["x"], workflow=Workflow(
         nodes=[WorkflowNode(id="in", type=NodeType.INPUT),
                WorkflowNode(id="cond", type=NodeType.CONDITION, condition=ConditionGroup(
                    operator="AND", children=[Condition(field="x", operator=Operator.BETWEEN)]))],
@@ -295,29 +303,29 @@ def test_validation_between_requires_two_values():
 
 
 # --------------------------------------------------------------------------
-# yaml_service — round trip, atomic write, preserving unrelated content
+# yaml_service — round trip, atomic write, preserving unrelated content,
+# per-product isolation, and the rule_id -> product index
 # --------------------------------------------------------------------------
 
 def test_yaml_round_trip_and_preserves_unrelated_keys():
-    rule = Rule(rule_id="A1", name="Rule A1")
+    rule = _rule(rule_id="A1", name="Rule A1")
     yaml_service.save_rules([rule], actor="tester")
 
-    raw = yaml_service.load_raw()
+    raw = yaml_service.load_raw(TEST_PRODUCT)
     raw["some_unrelated_section"] = {"kept": True}
-    raw["rules"].append({"rule_id": "LEGACY", "name": "Legacy rule", "status": "DRAFT",
-                          "priority": 100, "conflict_handling": "first_match",
+    raw["rules"].append({"rule_id": "LEGACY", "product": TEST_PRODUCT, "name": "Legacy rule", "status": "DRAFT",
+                          "enabled": True, "priority": 100, "conflict_handling": "first_match",
                           "authoring_mode": "visual", "interpretation_notes": [],
                           "workflow": {"nodes": [], "edges": []}, "required_columns": [],
                           "version": 1, "created_by": "x", "created_at": 0, "updated_by": "x",
                           "updated_at": 0, "notes": "", "approvals": [], "depends_on": []})
-    import io
-    with open(yaml_service.RULES_FILE, "w") as fh:
+    with open(yaml_service._rules_file(TEST_PRODUCT), "w") as fh:  # noqa: SLF001
         yaml_service._yaml.dump(raw, fh)  # noqa: SLF001
 
     rule.name = "Rule A1 (edited)"
     yaml_service.save_rules([rule], actor="tester2")
 
-    raw2 = yaml_service.load_raw()
+    raw2 = yaml_service.load_raw(TEST_PRODUCT)
     assert raw2["some_unrelated_section"] == {"kept": True}
     ids = {r["rule_id"] for r in raw2["rules"]}
     assert ids == {"A1", "LEGACY"}
@@ -326,47 +334,178 @@ def test_yaml_round_trip_and_preserves_unrelated_keys():
 
 
 def test_yaml_inspect_reports_parse_errors_without_crashing():
-    os = __import__("os")
-    os.makedirs(yaml_service.RULES_DIR, exist_ok=True)
-    with open(yaml_service.RULES_FILE, "w") as fh:
+    os.makedirs(yaml_service._product_dir(TEST_PRODUCT), exist_ok=True)  # noqa: SLF001
+    with open(yaml_service._rules_file(TEST_PRODUCT), "w") as fh:  # noqa: SLF001
         fh.write("rules:\n  - rule_id: 'bad rule!'\n    name: Bad\n")  # invalid rule_id chars
-    report = yaml_service.inspect_yaml()
+    report = yaml_service.inspect_yaml(TEST_PRODUCT)
     assert report["rule_count"] == 1
     assert report["parsed_ok"] == 0
     assert len(report["parse_errors"]) == 1
 
 
+def test_yaml_products_are_isolated_files():
+    product_registry.create_product("OTHERPROD", "Other Product", "", "tester")
+    yaml_service.save_rules([_rule(rule_id="P1", name="P1")], actor="tester")
+    yaml_service.save_rules([_rule(rule_id="P2", name="P2", product="OTHERPROD")], actor="tester")
+
+    testprod_rules, _ = yaml_service.load_rules(TEST_PRODUCT)
+    otherprod_rules, _ = yaml_service.load_rules("OTHERPROD")
+    assert {r.rule_id for r in testprod_rules} == {"P1"}
+    assert {r.rule_id for r in otherprod_rules} == {"P2"}
+
+
+def test_rule_id_to_product_index_resolves_without_scanning():
+    yaml_service.save_rules([_rule(rule_id="IDX1", name="Indexed")], actor="tester")
+    assert yaml_service.resolve_product("IDX1") == TEST_PRODUCT
+    assert yaml_service.resolve_product("NOPE") is None
+
+
 # --------------------------------------------------------------------------
-# rule_store — lifecycle transitions
+# rule_store — lifecycle transitions, product-scoped lookup
 # --------------------------------------------------------------------------
 
+def test_get_rule_resolves_product_automatically():
+    rule_store.upsert_rule(_rule(rule_id="L0", name="L0"), "tester")
+    found = rule_store.get_rule("L0")  # no product passed — resolved via index
+    assert found is not None and found.product == TEST_PRODUCT
+
+
 def test_lifecycle_illegal_transition_rejected():
-    rule = Rule(rule_id="L1", name="L1")
+    rule = _rule(rule_id="L1", name="L1")
     rule_store.upsert_rule(rule, "tester")
     with pytest.raises(ValueError):
         rule_store.transition(rule, RuleStatus.PUBLISHED, "tester", Role.ADMIN)
 
 
 def test_lifecycle_happy_path():
-    rule = Rule(rule_id="L2", name="L2")
+    rule = _rule(rule_id="L2", name="L2")
     rule_store.upsert_rule(rule, "tester")
-    rule = rule_store.transition(rule, RuleStatus.VALIDATED, "tester", Role.RULE_CREATOR)
-    rule = rule_store.transition(rule, RuleStatus.DRY_RUN_COMPLETED, "tester", Role.RULE_CREATOR)
-    rule = rule_store.transition(rule, RuleStatus.PENDING_APPROVAL, "tester", Role.RULE_CREATOR)
-    rule = rule_store.transition(rule, RuleStatus.APPROVED, "approver", Role.APPROVER)
-    rule = rule_store.transition(rule, RuleStatus.PUBLISHED, "approver", Role.APPROVER)
+    rule = rule_store.transition(rule, RuleStatus.VALIDATED, "admin", Role.ADMIN)
+    rule = rule_store.transition(rule, RuleStatus.DRY_RUN_COMPLETED, "admin", Role.ADMIN)
+    rule = rule_store.transition(rule, RuleStatus.PENDING_APPROVAL, "admin", Role.ADMIN)
+    rule = rule_store.transition(rule, RuleStatus.APPROVED, "admin", Role.ADMIN)
+    rule = rule_store.transition(rule, RuleStatus.PUBLISHED, "admin", Role.ADMIN)
     assert rule.status == RuleStatus.PUBLISHED
     assert len(rule.approvals) == 5
 
 
-def test_version_publish_and_rollback_is_additive():
-    rule = Rule(rule_id="V1", name="V1")
+def test_set_enabled_is_independent_of_lifecycle_status():
+    rule = _rule(rule_id="L3", name="L3")
     rule_store.upsert_rule(rule, "tester")
-    v1 = version_service.publish_snapshot("tester", "first", ["V1"])
+    assert rule.enabled is True
+    rule = rule_store.set_enabled(rule, False, "admin")
+    assert rule.enabled is False
+    assert rule.status == RuleStatus.DRAFT  # unaffected
+
+
+def test_version_publish_and_rollback_is_additive():
+    rule = _rule(rule_id="V1", name="V1")
+    rule_store.upsert_rule(rule, "tester")
+    v1 = version_service.publish_snapshot(TEST_PRODUCT, "tester", "first", ["V1"])
     assert v1.version == 1
-    v2 = version_service.rollback_to(1, "admin")
+    v2 = version_service.rollback_to(TEST_PRODUCT, 1, "admin")
     assert v2.version == 2  # rollback creates a new version, never deletes v1
-    assert version_service.get_version(1) is not None
+    assert version_service.get_version(TEST_PRODUCT, 1) is not None
+
+
+def test_versions_are_independent_per_product():
+    product_registry.create_product("OTHERPROD2", "Other 2", "", "tester")
+    rule_store.upsert_rule(_rule(rule_id="VP1", name="VP1"), "tester")
+    rule_store.upsert_rule(_rule(rule_id="VP2", name="VP2", product="OTHERPROD2"), "tester")
+    version_service.publish_snapshot(TEST_PRODUCT, "tester", "d", ["VP1"])
+    version_service.publish_snapshot(TEST_PRODUCT, "tester", "d2", ["VP1"])
+    version_service.publish_snapshot("OTHERPROD2", "tester", "d", ["VP2"])
+    assert version_service.next_version_number(TEST_PRODUCT) == 3
+    assert version_service.next_version_number("OTHERPROD2") == 2
+
+
+# --------------------------------------------------------------------------
+# product_registry
+# --------------------------------------------------------------------------
+
+def test_product_registry_seeded_from_asset_classes():
+    codes = {p.code for p in product_registry.list_products()}
+    assert {"CASH_BONDS", "GFX_CASH", "IRD", "MM"} <= codes
+
+
+def test_product_enable_disable():
+    product_registry.set_enabled(TEST_PRODUCT, False, "admin")
+    assert product_registry.get_product(TEST_PRODUCT).enabled is False
+    product_registry.set_enabled(TEST_PRODUCT, True, "admin")
+    assert product_registry.get_product(TEST_PRODUCT).enabled is True
+
+
+def test_product_create_duplicate_rejected():
+    with pytest.raises(ValueError):
+        product_registry.create_product(TEST_PRODUCT, "dup", "", "tester")
+
+
+# --------------------------------------------------------------------------
+# product_engine — the generic_validator: multi-rule evaluation + fail-safe
+# --------------------------------------------------------------------------
+
+def _pub_rule(rule_id: str, threshold: float, priority: int = 100,
+              conflict: ConflictHandling = ConflictHandling.FIRST_MATCH) -> Rule:
+    rule = _rule(rule_id=rule_id, name=rule_id, priority=priority, conflict_handling=conflict, workflow=Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="cond", type=NodeType.CONDITION, condition=ConditionGroup(operator="AND", children=[
+                Condition(field="deviation", operator=Operator.GT, value=ValueRef(type="static", value=threshold)),
+            ])),
+            WorkflowNode(id="out", type=NodeType.OUTCOME, outcomes=[
+                OutcomeAction(field="Reason", value=ValueRef(type="static", value=rule_id)),
+            ]),
+        ],
+        edges=[WorkflowEdge(source="in", target="cond"), WorkflowEdge(source="cond", target="out")],
+    ))
+    rule_store.upsert_rule(rule, "tester")
+    rule.status = RuleStatus.PUBLISHED
+    return rule_store.upsert_rule(rule, "tester")
+
+
+def _dataset(rows):
+    return dataset_store.put("TEST", {"product_type": TEST_PRODUCT}, rows).id
+
+
+def test_product_engine_fail_safe_when_disabled():
+    _pub_rule("PR1", threshold=5.0)
+    product_registry.set_enabled(TEST_PRODUCT, False, "admin")
+    ds = _dataset([{"id": 1, "deviation": 1.0}, {"id": 2, "deviation": 9.0}])
+    result = product_engine.evaluate_product(TEST_PRODUCT, ds, "tester", record_id_field="id")
+    assert result.summary.fail_safe_triggered is True
+    assert result.summary.matched == 2  # alerts everything
+
+
+def test_product_engine_fail_safe_when_no_active_rules():
+    ds = _dataset([{"id": 1, "deviation": 1.0}])
+    result = product_engine.evaluate_product(TEST_PRODUCT, ds, "tester", record_id_field="id")
+    assert result.summary.fail_safe_triggered is True
+    assert "no active" in result.summary.fail_safe_reason
+
+
+def test_product_engine_first_match_priority_order():
+    _pub_rule("LOW_PRIORITY_NUM_WINS", threshold=1.0, priority=1)   # matches deviation=9 first (evaluated first)
+    _pub_rule("HIGH_PRIORITY_NUM_LOSES", threshold=1.0, priority=50)
+    ds = _dataset([{"id": 1, "deviation": 9.0}])
+    result = product_engine.evaluate_product(TEST_PRODUCT, ds, "tester", record_id_field="id")
+    assert result.summary.fail_safe_triggered is False
+    assert result.records[0].matched_rule_id == "LOW_PRIORITY_NUM_WINS"
+
+
+def test_product_engine_all_matching_merges_outcomes():
+    _pub_rule("RULE_A", threshold=1.0, priority=1, conflict=ConflictHandling.ALL_MATCHING)
+    _pub_rule("RULE_B", threshold=1.0, priority=2, conflict=ConflictHandling.ALL_MATCHING)
+    ds = _dataset([{"id": 1, "deviation": 9.0}])
+    result = product_engine.evaluate_product(TEST_PRODUCT, ds, "tester", record_id_field="id")
+    assert set(result.records[0].matched_rule_ids) == {"RULE_A", "RULE_B"}
+
+
+def test_product_engine_disabled_rule_excluded_from_active_set():
+    rule = _pub_rule("TOGGLE_ME", threshold=1.0)
+    rule_store.set_enabled(rule, False, "admin")
+    ds = _dataset([{"id": 1, "deviation": 9.0}])
+    result = product_engine.evaluate_product(TEST_PRODUCT, ds, "tester", record_id_field="id")
+    assert result.summary.fail_safe_triggered is True  # zero *active* (published+enabled) rules left
 
 
 # --------------------------------------------------------------------------
@@ -374,7 +513,8 @@ def test_version_publish_and_rollback_is_additive():
 # --------------------------------------------------------------------------
 
 def _shadow_rule(threshold: float = 5.0) -> Rule:
-    return Rule(rule_id="SH1", name="Shadow test rule", required_columns=["trade_id", "deviation"], workflow=Workflow(
+    return _rule(rule_id="SH1", name="Shadow test rule", required_columns=["trade_id", "deviation"],
+                 workflow=Workflow(
         nodes=[
             WorkflowNode(id="in", type=NodeType.INPUT),
             WorkflowNode(id="cond", type=NodeType.CONDITION, condition=ConditionGroup(operator="AND", children=[

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   ArrowLeft, Save, CheckCircle2, PlayCircle, Send, ThumbsUp, ThumbsDown, Rocket, Sparkles, Trash2,
+  Power, PowerOff,
 } from "lucide-react";
 import { Card, Loader, ErrorState, ModuleHeader } from "../../../components/ui.jsx";
 import DatasetSelector from "../../../components/DatasetSelector.jsx";
@@ -23,7 +24,7 @@ const TABS = [
 ];
 
 export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
-  const { actor, role } = useActor();
+  const { actor, role, isAdmin } = useActor();
   const [rule, setRule] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -72,7 +73,7 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
     setBusy(true);
     try {
       if (dirty) await save();
-      const v = await rd.validateRule(ruleId, actor);
+      const v = await rd.validateRule(ruleId, actor, role);
       setValidation(v);
       setRule((r) => ({ ...r, status: v.status }));
       setNotice(v.ok ? { kind: "pass", text: "Validation passed." } : { kind: "breach", text: `${v.errors.length} error(s) found.` });
@@ -98,6 +99,16 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
     onDeleted?.();
   }
 
+  async function toggleEnabled() {
+    setBusy(true);
+    try {
+      const updated = await rd.setRuleEnabled(ruleId, actor, role, !rule.enabled);
+      setRule(updated);
+      setNotice({ kind: "pass", text: `Rule ${updated.enabled ? "enabled" : "disabled"}.` });
+    } catch (e) { setNotice({ kind: "breach", text: String(e.message || e) }); }
+    setBusy(false);
+  }
+
   if (loading) return <Loader label="Loading rule…" />;
   if (error) return <ErrorState error={error} />;
   if (!rule) return null;
@@ -118,19 +129,33 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
         description={rule.description || rule.rule_id}
         actions={
           <div className="module-actions" style={{ flexWrap: "wrap" }}>
+            <span className="mono ds-id">{rule.product}</span>
             <span className={`rd-status rd-status--${s.toLowerCase()}`}>{STATUS_LABEL[s] || s}</span>
+            {!rule.enabled && <span className="badge badge--breach">disabled</span>}
             <span className="mono ds-count">v{rule.version}</span>
-            {dirty && <button className="btn" disabled={busy} onClick={save}><Save size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Save</button>}
-            <button className="btn btn--ghost" disabled={busy} onClick={doValidate}><CheckCircle2 size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Validate</button>
-            {canSubmit && <button className="btn btn--ghost" disabled={busy} onClick={() => transition("submit")}><Send size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Submit for approval</button>}
-            {canApprove && <button className="btn btn--ghost" disabled={busy} onClick={() => transition("approve")}><ThumbsUp size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Approve</button>}
-            {canApprove && <button className="btn btn--ghost" disabled={busy} onClick={() => transition("reject")}><ThumbsDown size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Reject</button>}
-            {canPublish && <button className="btn" disabled={busy} onClick={() => transition("publish")}><Rocket size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Publish</button>}
-            <button className="icon-btn" title="Delete rule" onClick={remove}><Trash2 size={16} /></button>
+            {isAdmin && dirty && <button className="btn" disabled={busy} onClick={save}><Save size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Save</button>}
+            {isAdmin && <button className="btn btn--ghost" disabled={busy} onClick={doValidate}><CheckCircle2 size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Validate</button>}
+            {isAdmin && canSubmit && <button className="btn btn--ghost" disabled={busy} onClick={() => transition("submit")}><Send size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Submit for approval</button>}
+            {isAdmin && canApprove && <button className="btn btn--ghost" disabled={busy} onClick={() => transition("approve")}><ThumbsUp size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Approve</button>}
+            {isAdmin && canApprove && <button className="btn btn--ghost" disabled={busy} onClick={() => transition("reject")}><ThumbsDown size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Reject</button>}
+            {isAdmin && canPublish && <button className="btn" disabled={busy} onClick={() => transition("publish")}><Rocket size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Publish</button>}
+            {isAdmin && s === "PUBLISHED" && (
+              <button className="btn btn--ghost" disabled={busy} onClick={toggleEnabled}>
+                {rule.enabled
+                  ? <><PowerOff size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Disable</>
+                  : <><Power size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Enable</>}
+              </button>
+            )}
+            {isAdmin && <button className="icon-btn" title="Delete rule" onClick={remove}><Trash2 size={16} /></button>}
           </div>
         }
       />
 
+      {!isAdmin && (
+        <div className="preview-note" style={{ marginBottom: 14 }}>
+          Viewing as User — you can dry-run and shadow-test this rule; editing, submitting, approving and publishing are Admin-only.
+        </div>
+      )}
       {notice && <div className={notice.kind === "breach" ? "errorbox" : "benefit-note"}>{notice.text}</div>}
       {validation && !validation.ok && (
         <div className="errorbox">
@@ -143,9 +168,10 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
       <Card>
         <div className="controls controls--row">
           <DatasetSelector label="Bound dataset" datasets={datasets} value={datasetId}
-                            onChange={(v) => { setDatasetId(v); setDirty(true); }} />
+                            onChange={(v) => { if (isAdmin) { setDatasetId(v); setDirty(true); } }} />
           <label className="control"><span>Priority</span>
-            <input type="number" value={rule.priority} onChange={(e) => { setRule((r) => ({ ...r, priority: Number(e.target.value) })); setDirty(true); }} />
+            <input type="number" value={rule.priority} disabled={!isAdmin}
+                   onChange={(e) => { setRule((r) => ({ ...r, priority: Number(e.target.value) })); setDirty(true); }} />
           </label>
         </div>
       </Card>

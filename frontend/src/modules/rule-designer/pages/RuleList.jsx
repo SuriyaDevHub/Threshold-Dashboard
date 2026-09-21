@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Plus, Sparkles, MousePointer2 } from "lucide-react";
 import { useAsync } from "../../../lib/useAsync.js";
 import { Card, Loader, ErrorState, ModuleHeader } from "../../../components/ui.jsx";
@@ -11,19 +11,27 @@ function emptyWorkflow() {
 }
 
 export default function RuleList({ onOpenRule }) {
-  const { loading, data, error, reload } = useAsync(useCallback(() => rd.rules(), []), []);
-  const { actor, role } = useActor();
+  const { actor, role, isAdmin } = useActor();
+  const [productFilter, setProductFilter] = useState("");
+  const { loading, data, error, reload } = useAsync(
+    useCallback(() => rd.rules(productFilter || undefined), [productFilter]), [productFilter],
+  );
+  const products = useAsync(useCallback(() => rd.products(), []), []);
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
+  const [newProduct, setNewProduct] = useState("");
   const [mode, setMode] = useState("visual");
   const [createError, setCreateError] = useState(null);
 
+  const productList = products.data?.products || [];
+  useEffect(() => { if (productList.length && !newProduct) setNewProduct(productList[0].code); }, [productList, newProduct]);
+
   async function createRule() {
-    if (!newName.trim()) return;
+    if (!newName.trim() || !newProduct) return;
     setCreateError(null);
     const rule_id = newName.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_|_$/g, "") || `RULE_${Date.now()}`;
     const rule = {
-      rule_id, name: newName.trim(), description: "", priority: 100,
+      rule_id, product: newProduct, name: newName.trim(), description: "", priority: 100,
       authoring_mode: mode, workflow: emptyWorkflow(), required_columns: [],
     };
     try {
@@ -44,9 +52,20 @@ export default function RuleList({ onOpenRule }) {
     <>
       <ModuleHeader
         title="Rules"
-        description="Every rule compiles into the same canonical workflow model, however it was authored."
-        actions={<button className="btn" onClick={() => setCreating(true)}><Plus size={14} style={{ marginRight: 6, verticalAlign: "-2px" }} />New rule</button>}
+        description="Every rule belongs to a product, and compiles into the same canonical workflow model however it was authored."
+        actions={isAdmin ? (
+          <button className="btn" onClick={() => setCreating(true)}><Plus size={14} style={{ marginRight: 6, verticalAlign: "-2px" }} />New rule</button>
+        ) : null}
       />
+
+      <div className="controls controls--row" style={{ marginBottom: 14 }}>
+        <label className="control"><span>Product</span>
+          <select value={productFilter} onChange={(e) => setProductFilter(e.target.value)}>
+            <option value="">all products</option>
+            {productList.map((p) => <option key={p.code} value={p.code}>{p.name}</option>)}
+          </select>
+        </label>
+      </div>
 
       {creating && (
         <Card title="New rule">
@@ -55,6 +74,11 @@ export default function RuleList({ onOpenRule }) {
             <label className="control" style={{ minWidth: 280 }}>
               <span>Name</span>
               <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="e.g. USD FX Deviation — High Risk" />
+            </label>
+            <label className="control"><span>Product</span>
+              <select value={newProduct} onChange={(e) => setNewProduct(e.target.value)}>
+                {productList.map((p) => <option key={p.code} value={p.code}>{p.name}</option>)}
+              </select>
             </label>
             <div className="control">
               <span>Authoring mode</span>
@@ -67,7 +91,7 @@ export default function RuleList({ onOpenRule }) {
                 </button>
               </div>
             </div>
-            <button className="btn" onClick={createRule} disabled={!newName.trim()}>Create</button>
+            <button className="btn" onClick={createRule} disabled={!newName.trim() || !newProduct}>Create</button>
             <button className="btn btn--ghost" onClick={() => setCreating(false)}>Cancel</button>
           </div>
           <p className="empty-hint">
@@ -82,13 +106,14 @@ export default function RuleList({ onOpenRule }) {
           <table className="table">
             <thead>
               <tr>
-                <th>Rule</th><th>Status</th><th>Priority</th><th>Version</th><th>Updated</th>
+                <th>Rule</th><th>Product</th><th>Status</th><th>Priority</th><th>Version</th><th>Updated</th>
               </tr>
             </thead>
             <tbody>
               {rules.map((r) => (
                 <tr key={r.rule_id} className="rd-clickable-row" onClick={() => onOpenRule(r.rule_id)}>
                   <td><div>{r.name}</div><div className="mono ds-id">{r.rule_id}</div></td>
+                  <td className="mono">{r.product}{!r.enabled && <span className="badge badge--breach" style={{ marginLeft: 6 }}>disabled</span>}</td>
                   <td><span className={`rd-status rd-status--${r.status.toLowerCase()}`}>{r.status.replace(/_/g, " ")}</span></td>
                   <td className="mono">{r.priority}</td>
                   <td className="mono">v{r.version}</td>

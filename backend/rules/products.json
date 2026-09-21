@@ -1,0 +1,46 @@
+{
+  "CASH_BONDS": {
+    "code": "CASH_BONDS",
+    "name": "Cash Bonds",
+    "enabled": true,
+    "migration_status": "in_progress",
+    "description": "Seeded from asset_classes \u2014 pct deviation metric.",
+    "created_by": "system",
+    "created_at": 1790029733.8089688,
+    "updated_by": "admin1",
+    "updated_at": 1790029994.5178378
+  },
+  "GFX_CASH": {
+    "code": "GFX_CASH",
+    "name": "GFX Cash",
+    "enabled": true,
+    "migration_status": "not_migrated",
+    "description": "Seeded from asset_classes \u2014 pips deviation metric.",
+    "created_by": "system",
+    "created_at": 1790029733.8090053,
+    "updated_by": "system",
+    "updated_at": 1790029733.8090055
+  },
+  "IRD": {
+    "code": "IRD",
+    "name": "Rates Derivatives (IRD)",
+    "enabled": true,
+    "migration_status": "not_migrated",
+    "description": "Seeded from asset_classes \u2014 bps deviation metric.",
+    "created_by": "system",
+    "created_at": 1790029733.809014,
+    "updated_by": "system",
+    "updated_at": 1790029733.8090143
+  },
+  "MM": {
+    "code": "MM",
+    "name": "Money Markets",
+    "enabled": true,
+    "migration_status": "not_migrated",
+    "description": "Seeded from asset_classes \u2014 bps deviation metric.",
+    "created_by": "system",
+    "created_at": 1790029733.80902,
+    "updated_by": "system",
+    "updated_at": 1790029733.8090205
+  }
+}

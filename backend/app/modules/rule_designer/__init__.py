@@ -3,27 +3,33 @@
 A "Business Rule Studio": visual + free-text rule authoring compiling into
 one canonical Workflow model, pre-processing/enrichment (lookup) design,
 dry-run with record-level explainability, before/after impact analysis,
-review/approval/publish lifecycle, YAML versioning, and a full audit
-trail — all sitting on top of the existing Data Fetch dataset store so
-rules can be tested against real pulled datasets (spec, full document).
+review/approval/publish lifecycle, per-product YAML versioning, and a
+full audit trail — all sitting on top of the existing Data Fetch dataset
+store so rules can be tested against real pulled datasets.
+
+Every rule belongs to a product (spec: rules are authored "based on the
+product"); every product owns its own YAML file, its own version history,
+and an admin-only enable/disable kill switch (spec: "enable or disable
+the complete product's rules"). `product_engine.evaluate_product()` is
+the generic, product-agnostic validator a migrated `{product}_validator.py`
+should end up calling.
 """
 from __future__ import annotations
 
-import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from app.core import store as dataset_store
 from app.modules.rule_designer import (
     audit_service, diff_service, dry_run_service, explain_service, impact_service,
-    nlp_parser, reference_store, rule_store, shadow_test_service, validation_service,
-    version_service, yaml_service,
+    nlp_parser, product_engine, product_registry, reference_store, rule_store, shadow_test_service,
+    validation_service, version_service, yaml_service,
 )
 from app.modules.rule_designer.models import (
-    LEGAL_TRANSITIONS, ROLE_ALLOWED_ACTIONS, ConditionGroup, NodeType, Operator, OPERATORS_BY_TYPE,
-    Role, Rule, RuleStatus, Workflow, FieldType,
+    LEGAL_TRANSITIONS, ROLE_ALLOWED_ACTIONS, ConditionGroup, MigrationStatus, NodeType, Operator,
+    OPERATORS_BY_TYPE, Role, Rule, RuleStatus, FieldType,
 )
 from app.modules.rule_designer.schema import infer_schema, schema_to_wire
 
@@ -38,14 +44,19 @@ router = APIRouter()
 
 
 # --------------------------------------------------------------------------
-# Access control helper (no login system in this app; the caller states who
-# they are and what role they're acting as, matching every other module's
-# no-auth-by-design convention — see spec §34's role list).
+# Access control helper. Two roles (Admin/User), matching the production
+# login. The caller states who they are and what role they're acting as —
+# this app has no login of its own. When this module sits behind the real
+# auth module, replace `Actor` with a FastAPI dependency that derives
+# {actor, role} from the session/JWT server-side instead of trusting the
+# client-supplied value; every endpoint below already takes `actor`/`role`
+# as a single object, so that's a swap at the dependency, not a rewrite of
+# every route.
 # --------------------------------------------------------------------------
 
 class Actor(BaseModel):
     actor: str = "unknown"
-    role: Role = Role.RULE_CREATOR
+    role: Role = Role.USER
 
 
 def _require(actor: Actor, action: str) -> None:
@@ -54,30 +65,127 @@ def _require(actor: Actor, action: str) -> None:
         raise HTTPException(403, f"role '{actor.role.value}' cannot '{action}' (allowed: {allowed})")
 
 
+def _require_product(product: str) -> None:
+    if not product_registry.is_known_product(product):
+        raise HTTPException(404, f"product '{product}' is not registered")
+
+
 # --------------------------------------------------------------------------
 # Dashboard
 # --------------------------------------------------------------------------
 
 @router.get("/dashboard")
-async def dashboard():
-    rules = rule_store.list_rules()
+async def dashboard(product: Optional[str] = None):
+    rules = rule_store.list_rules(product)
     by_status: Dict[str, int] = {}
+    by_product: Dict[str, int] = {}
     for r in rules:
         by_status[r.status.value] = by_status.get(r.status.value, 0) + 1
+        by_product[r.product] = by_product.get(r.product, 0) + 1
     recent = sorted(rules, key=lambda r: r.updated_at, reverse=True)[:8]
     recent_audit = audit_service.query(limit=10)
+    products = product_registry.list_products()
     return {
         "total_rules": len(rules),
         "published": by_status.get("PUBLISHED", 0),
         "draft": by_status.get("DRAFT", 0),
         "pending_approval": by_status.get("PENDING_APPROVAL", 0),
         "by_status": by_status,
-        "recent_rules": [{"rule_id": r.rule_id, "name": r.name, "status": r.status.value,
-                           "updated_at": r.updated_at, "updated_by": r.updated_by} for r in recent],
+        "by_product": by_product,
+        "products": [{"code": p.code, "name": p.name, "enabled": p.enabled,
+                       "migration_status": p.migration_status.value,
+                       "rule_count": by_product.get(p.code, 0)} for p in products],
+        "recent_rules": [{"rule_id": r.rule_id, "product": r.product, "name": r.name,
+                           "status": r.status.value, "updated_at": r.updated_at,
+                           "updated_by": r.updated_by} for r in recent],
         "recent_activity": [e.model_dump() for e in recent_audit],
         "reference_files": len(reference_store.list_files()),
-        "versions_published": len(version_service.list_versions()),
+        "versions_published": len(version_service.list_all_versions()),
     }
+
+
+# --------------------------------------------------------------------------
+# Products — the unit rules are scoped by, and the admin enable/disable
+# kill switch for a whole product's rule set.
+# --------------------------------------------------------------------------
+
+@router.get("/products")
+async def list_products():
+    return {"products": [p.model_dump(mode="json") for p in product_registry.list_products()]}
+
+
+@router.get("/products/{code}")
+async def get_product(code: str):
+    p = product_registry.get_product(code)
+    if p is None:
+        raise HTTPException(404, "product not found")
+    active_rules = product_engine.active_rules_for_product(code)
+    return {**p.model_dump(mode="json"), "active_rule_count": len(active_rules)}
+
+
+class CreateProductBody(Actor):
+    code: str
+    name: str
+    description: str = ""
+
+
+@router.post("/products")
+async def create_product(body: CreateProductBody):
+    _require(body, "manage_products")
+    try:
+        p = product_registry.create_product(body.code, body.name, body.description, body.actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    audit_service.log(body.actor, "CREATE", role=body.role.value, detail=f"created product '{p.code}'")
+    return p.model_dump(mode="json")
+
+
+class ProductEnabledBody(Actor):
+    enabled: bool
+
+
+@router.post("/products/{code}/enabled")
+async def set_product_enabled(code: str, body: ProductEnabledBody):
+    _require(body, "manage_products")
+    try:
+        p = product_registry.set_enabled(code, body.enabled, body.actor)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    audit_service.log(body.actor, "EDIT", role=body.role.value,
+                       detail=f"{'enabled' if body.enabled else 'DISABLED'} product '{code}' "
+                              f"({'fail-safe: all records now alert' if not body.enabled else 'rule engine active'})")
+    return p.model_dump(mode="json")
+
+
+class ProductMigrationBody(Actor):
+    migration_status: MigrationStatus
+
+
+@router.post("/products/{code}/migration-status")
+async def set_product_migration_status(code: str, body: ProductMigrationBody):
+    _require(body, "manage_products")
+    try:
+        p = product_registry.set_migration_status(code, body.migration_status, body.actor)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    return p.model_dump(mode="json")
+
+
+class EvaluateProductBody(Actor):
+    dataset_id: str
+    record_id_field: Optional[str] = None
+
+
+@router.post("/products/{code}/evaluate")
+async def evaluate_product(code: str, body: EvaluateProductBody):
+    """The generic_validator entry point: every active rule for this
+    product, evaluated together, fail-safe if disabled or empty."""
+    _require(body, "dry_run")
+    try:
+        result = product_engine.evaluate_product(code, body.dataset_id, body.actor, body.record_id_field)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return result.model_dump(mode="json")
 
 
 # --------------------------------------------------------------------------
@@ -191,6 +299,7 @@ async def meta():
         "role_actions": {r.value: acts for r, acts in ROLE_ALLOWED_ACTIONS.items()},
         "statuses": [s.value for s in RuleStatus],
         "legal_transitions": {s.value: [t.value for t in ts] for s, ts in LEGAL_TRANSITIONS.items()},
+        "migration_statuses": [m.value for m in MigrationStatus],
     }
 
 
@@ -199,8 +308,8 @@ async def meta():
 # --------------------------------------------------------------------------
 
 @router.get("/rules")
-async def list_rules():
-    return {"rules": [r.model_dump(mode="json") for r in rule_store.list_rules()]}
+async def list_rules(product: Optional[str] = None):
+    return {"rules": [r.model_dump(mode="json") for r in rule_store.list_rules(product)]}
 
 
 @router.get("/rules/{rule_id}")
@@ -218,6 +327,10 @@ class CreateRuleBody(Actor):
 @router.post("/rules")
 async def create_rule(body: CreateRuleBody):
     _require(body, "create")
+    product = body.rule.get("product")
+    if not product:
+        raise HTTPException(400, "rule.product is required")
+    _require_product(product)
     if rule_store.get_rule(body.rule.get("rule_id", "")):
         raise HTTPException(409, "rule_id already exists")
     body.rule.setdefault("created_by", body.actor)
@@ -240,6 +353,9 @@ async def update_rule(rule_id: str, body: UpdateRuleBody):
     if existing is None:
         raise HTTPException(404, "rule not found")
     body.rule["rule_id"] = rule_id
+    body.rule.setdefault("product", existing.product)
+    if body.rule["product"] != existing.product:
+        raise HTTPException(400, "a rule's product cannot be changed after creation")
     prev_version = existing.version
     rule = Rule.model_validate(body.rule)
     if rule.status in (RuleStatus.APPROVED, RuleStatus.PUBLISHED):
@@ -260,12 +376,32 @@ async def delete_rule(rule_id: str, actor: str = "unknown", role: Role = Role.AD
     return {"deleted": True}
 
 
+class EnabledBody(Actor):
+    enabled: bool
+
+
+@router.post("/rules/{rule_id}/enabled")
+async def set_rule_enabled(rule_id: str, body: EnabledBody):
+    """The admin's instant on/off switch for a single published rule —
+    distinct from the draft/publish lifecycle (spec: "enable or disable
+    rule")."""
+    _require(body, "manage_rules")
+    rule = rule_store.get_rule(rule_id)
+    if rule is None:
+        raise HTTPException(404, "rule not found")
+    rule = rule_store.set_enabled(rule, body.enabled, body.actor)
+    audit_service.log(body.actor, "EDIT", role=body.role.value, rule_id=rule_id,
+                       detail=f"{'enabled' if body.enabled else 'disabled'} rule")
+    return rule.model_dump(mode="json")
+
+
 # --------------------------------------------------------------------------
 # Validation
 # --------------------------------------------------------------------------
 
 @router.post("/rules/{rule_id}/validate")
-async def validate_rule_endpoint(rule_id: str, actor: str = "unknown"):
+async def validate_rule_endpoint(rule_id: str, actor: str = "unknown", role: Role = Role.ADMIN):
+    _require(Actor(actor=actor, role=role), "edit")
     rule = rule_store.get_rule(rule_id)
     if rule is None:
         raise HTTPException(404, "rule not found")
@@ -356,6 +492,7 @@ class ImpactBody(Actor):
 
 @router.post("/rules/{rule_id}/impact-analysis")
 async def impact_analysis(rule_id: str, body: ImpactBody):
+    _require(body, "dry_run")
     rule = rule_store.get_rule(rule_id)
     if rule is None:
         raise HTTPException(404, "rule not found")
@@ -384,6 +521,7 @@ class ShadowTestBody(Actor):
 
 @router.post("/rules/{rule_id}/shadow-test")
 async def shadow_test(rule_id: str, body: ShadowTestBody):
+    _require(body, "dry_run")
     rule = rule_store.get_rule(rule_id)
     if rule is None:
         raise HTTPException(404, "rule not found")
@@ -437,12 +575,12 @@ async def rule_diff(rule_id: str, against_version: Optional[int] = None):
         raise HTTPException(404, "rule not found")
     before_rule = None
     before_text = ""
-    versions = [v for v in version_service.list_versions() if rule_id in v.rule_ids_changed]
+    versions = [v for v in version_service.list_versions(rule.product) if rule_id in v.rule_ids_changed]
     target_version = against_version or (versions[-1].version if versions else None)
     if target_version:
-        before_text = version_service.get_version_yaml_text(target_version) or ""
-        before_rule = impact_service._published_rule_from_version(rule_id, target_version)
-    after_text = yaml_service.rules_yaml_text()
+        before_text = version_service.get_version_yaml_text(rule.product, target_version) or ""
+        before_rule = impact_service._published_rule_from_version(rule.product, rule_id, target_version)
+    after_text = yaml_service.rules_yaml_text(rule.product)
     return {
         "against_version": target_version,
         "business_logic": diff_service.business_logic_diff(before_rule, rule),
@@ -539,7 +677,7 @@ async def publish_rule(rule_id: str, body: TransitionBody):
     except ValueError as exc:
         raise HTTPException(409, str(exc))
     snapshot = version_service.publish_snapshot(
-        created_by=body.actor, description=body.comment or f"Publish {rule.name}",
+        product=rule.product, created_by=body.actor, description=body.comment or f"Publish {rule.name}",
         rule_ids_changed=[rule_id], dry_run_dataset_id=rule.dataset_id,
         dry_run_result_id=rule.last_dry_run_id, approved_by=body.actor,
     )
@@ -550,6 +688,7 @@ async def publish_rule(rule_id: str, body: TransitionBody):
 
 
 class RollbackBody(Actor):
+    product: str
     version: int
 
 
@@ -557,37 +696,39 @@ class RollbackBody(Actor):
 async def rollback(body: RollbackBody):
     _require(body, "rollback")
     try:
-        snapshot = version_service.rollback_to(body.version, body.actor)
+        snapshot = version_service.rollback_to(body.product, body.version, body.actor)
     except ValueError as exc:
         raise HTTPException(404, str(exc))
     audit_service.log(body.actor, "ROLLBACK", role=body.role.value,
-                       new_version=snapshot.version, detail=f"rolled back to v{body.version}")
+                       new_version=snapshot.version, detail=f"{body.product} rolled back to v{body.version}")
     return snapshot.model_dump(mode="json")
 
 
 # --------------------------------------------------------------------------
-# Versions
+# Versions (per product, plus a cross-product view)
 # --------------------------------------------------------------------------
 
 @router.get("/versions")
-async def list_versions():
-    return {"versions": [v.model_dump(mode="json") for v in version_service.list_versions()]}
+async def list_versions(product: Optional[str] = None):
+    if product:
+        return {"versions": [v.model_dump(mode="json") for v in version_service.list_versions(product)]}
+    return {"versions": [v.model_dump(mode="json") for v in version_service.list_all_versions()]}
 
 
-@router.get("/versions/{version}")
-async def get_version(version: int):
-    v = version_service.get_version(version)
+@router.get("/products/{product}/versions/{version}")
+async def get_version(product: str, version: int):
+    v = version_service.get_version(product, version)
     if v is None:
         raise HTTPException(404, "version not found")
     return v.model_dump(mode="json")
 
 
-@router.get("/versions/{version}/yaml")
-async def get_version_yaml(version: int):
-    text = version_service.get_version_yaml_text(version)
+@router.get("/products/{product}/versions/{version}/yaml")
+async def get_version_yaml(product: str, version: int):
+    text = version_service.get_version_yaml_text(product, version)
     if text is None:
         raise HTTPException(404, "version not found")
-    return {"version": version, "yaml": text}
+    return {"product": product, "version": version, "yaml": text}
 
 
 # --------------------------------------------------------------------------
@@ -595,13 +736,16 @@ async def get_version_yaml(version: int):
 # --------------------------------------------------------------------------
 
 @router.get("/yaml/inspect")
-async def yaml_inspect():
-    return yaml_service.inspect_yaml()
+async def yaml_inspect(product: Optional[str] = None):
+    if product:
+        return yaml_service.inspect_yaml(product)
+    return {"products": {p.code: yaml_service.inspect_yaml(p.code) for p in product_registry.list_products()}}
 
 
 @router.get("/yaml/current")
-async def yaml_current():
-    return {"yaml": yaml_service.rules_yaml_text()}
+async def yaml_current(product: str):
+    _require_product(product)
+    return {"product": product, "yaml": yaml_service.rules_yaml_text(product)}
 
 
 # --------------------------------------------------------------------------

@@ -9,7 +9,15 @@ const del = (path, params) => api.module(MOD, path, params, { method: "DELETE" }
 
 export const rd = {
   meta: () => get("/meta"),
-  dashboard: () => get("/dashboard"),
+  dashboard: (product) => get("/dashboard", { product }),
+
+  products: () => get("/products"),
+  product: (code) => get(`/products/${code}`),
+  createProduct: (actor, role, code, name, description) => post("/products", { actor, role, code, name, description }),
+  setProductEnabled: (actor, role, code, enabled) => post(`/products/${code}/enabled`, { actor, role, enabled }),
+  setProductMigrationStatus: (actor, role, code, migration_status) =>
+    post(`/products/${code}/migration-status`, { actor, role, migration_status }),
+  evaluateProduct: (code, body) => post(`/products/${code}/evaluate`, body),
 
   datasets: () => get("/datasets"),
   datasetSchema: (id) => get(`/datasets/${id}/schema`),
@@ -22,12 +30,13 @@ export const rd = {
   uploadReference: (actor, role, name, csv_text) => post("/reference-files/upload", { actor, role, name, csv_text }),
   deleteReference: (id, actor) => del(`/reference-files/${id}`, { actor }),
 
-  rules: () => get("/rules"),
+  rules: (product) => get("/rules", { product }),
   rule: (id) => get(`/rules/${id}`),
   createRule: (actor, role, rule) => post("/rules", { actor, role, rule }),
   updateRule: (id, actor, role, rule) => put(`/rules/${id}`, { actor, role, rule }),
   deleteRule: (id, actor, role) => del(`/rules/${id}`, { actor, role }),
-  validateRule: (id, actor) => post(`/rules/${id}/validate?actor=${encodeURIComponent(actor)}`, {}),
+  setRuleEnabled: (id, actor, role, enabled) => post(`/rules/${id}/enabled`, { actor, role, enabled }),
+  validateRule: (id, actor, role) => post(`/rules/${id}/validate?actor=${encodeURIComponent(actor)}&role=${role}`, {}),
 
   dryRun: (id, body) => post(`/rules/${id}/dry-run`, body),
   getDryRun: (id) => get(`/dry-runs/${id}`),
@@ -47,12 +56,12 @@ export const rd = {
   publish: (id, body) => post(`/rules/${id}/publish`, body),
   rollback: (body) => post("/rollback", body),
 
-  versions: () => get("/versions"),
-  version: (v) => get(`/versions/${v}`),
-  versionYaml: (v) => get(`/versions/${v}/yaml`),
+  versions: (product) => get("/versions", { product }),
+  version: (product, v) => get(`/products/${product}/versions/${v}`),
+  versionYaml: (product, v) => get(`/products/${product}/versions/${v}/yaml`),
 
-  yamlInspect: () => get("/yaml/inspect"),
-  yamlCurrent: () => get("/yaml/current"),
+  yamlInspect: (product) => get("/yaml/inspect", { product }),
+  yamlCurrent: (product) => get("/yaml/current", { product }),
 
   audit: (params) => get("/audit", params),
 };

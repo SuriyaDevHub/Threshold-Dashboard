@@ -179,20 +179,22 @@ LEGAL_TRANSITIONS: Dict[RuleStatus, List[RuleStatus]] = {
 
 
 class Role(str, Enum):
-    VIEWER = "VIEWER"
-    RULE_CREATOR = "RULE_CREATOR"
-    REVIEWER = "REVIEWER"
-    APPROVER = "APPROVER"
+    """Mirrors the production login's two account roles. Kept as an enum
+    (rather than a bare bool) so the lifecycle/audit trail always names a
+    role, and so a third role could be added later without touching every
+    call site — but today it's exactly Admin/User, nothing richer."""
     ADMIN = "ADMIN"
+    USER = "USER"
 
 
 ROLE_ALLOWED_ACTIONS: Dict[Role, List[str]] = {
-    Role.VIEWER: ["view"],
-    Role.RULE_CREATOR: ["view", "create", "edit", "dry_run", "submit", "manage_lookups"],
-    Role.REVIEWER: ["view", "dry_run", "comment"],
-    Role.APPROVER: ["view", "dry_run", "approve", "reject", "publish", "rollback"],
+    # Admin: create/edit/test/submit/approve/publish a rule, enable or
+    # disable a single rule, and enable or disable a whole product's rules.
     Role.ADMIN: ["view", "create", "edit", "dry_run", "submit", "approve", "reject",
-                 "publish", "rollback", "delete", "manage_lookups"],
+                 "publish", "rollback", "delete", "manage_lookups", "manage_products", "manage_rules"],
+    # User: view published configs, and dry-run/shadow-test rules still in
+    # draft — never create, edit, or move anything through the lifecycle.
+    Role.USER: ["view", "dry_run"],
 }
 
 
@@ -371,11 +373,48 @@ class ApprovalEvent(BaseModel):
     comment: str = ""
 
 
+class MigrationStatus(str, Enum):
+    """Descriptive only — never gates anything. Lets the Products page show
+    where each product is in the {product}_validator.py -> rule-engine
+    migration without conflating that with the enabled/disabled kill switch."""
+    NOT_MIGRATED = "not_migrated"
+    IN_PROGRESS = "in_progress"
+    MIGRATED = "migrated"
+
+
+class Product(BaseModel):
+    code: str
+    name: str
+    # The kill switch: when False, the product engine treats this product
+    # as having zero active rules and alerts every record (fail-safe,
+    # never silently passes) — see product_engine.py.
+    enabled: bool = True
+    migration_status: MigrationStatus = MigrationStatus.NOT_MIGRATED
+    description: str = ""
+    created_by: str = "system"
+    created_at: float = Field(default_factory=time.time)
+    updated_by: str = "system"
+    updated_at: float = Field(default_factory=time.time)
+
+    @field_validator("code")
+    @classmethod
+    def _check_code(cls, v):
+        if not v or not all(c.isalnum() or c in "_-" for c in v):
+            raise ValueError("product code must be alphanumeric/underscore/hyphen only")
+        return v.upper()
+
+
 class Rule(BaseModel):
     rule_id: str
+    product: str  # which product's rule set this belongs to — see product_registry.py
     name: str
     description: str = ""
     status: RuleStatus = RuleStatus.DRAFT
+    # Independent of `status`/lifecycle: an admin's instant, reversible
+    # on/off switch for a published rule. Disabling doesn't touch version
+    # history or approvals — it's the "enable or disable rule" admin
+    # action, distinct from the draft->...->published workflow.
+    enabled: bool = True
     priority: int = 100
     conflict_handling: ConflictHandling = ConflictHandling.FIRST_MATCH
 
@@ -565,10 +604,51 @@ class ShadowTestResult(BaseModel):
 
 
 # --------------------------------------------------------------------------
+# Product-level evaluation — this IS the generic_validator from the
+# migration plan: every PUBLISHED, enabled rule for a product, evaluated
+# in priority order per that product's conflict_handling. A disabled
+# product or a product with zero active rules alerts every record
+# (fail-safe default — never silently passes, per the non-negotiable
+# requirement), it does not silently no-op.
+# --------------------------------------------------------------------------
+
+class ProductRecordResult(BaseModel):
+    record_id: Any
+    matched: bool
+    matched_rule_id: Optional[str] = None
+    matched_rule_ids: List[str] = Field(default_factory=list)  # when conflict_handling=all_matching
+    outcome: Dict[str, Any] = Field(default_factory=dict)
+    trail: List[RecordTraceStep] = Field(default_factory=list)
+
+
+class ProductEvaluationSummary(BaseModel):
+    product: str
+    product_enabled: bool = True
+    active_rule_count: int = 0
+    total_records: int = 0
+    matched: int = 0
+    not_matched: int = 0
+    match_rate_pct: float = 0.0
+    fail_safe_triggered: bool = False
+    fail_safe_reason: str = ""
+
+
+class ProductEvaluationResult(BaseModel):
+    id: str = Field(default_factory=lambda: _id("producteval"))
+    product: str
+    dataset_id: str
+    created_by: str = "system"
+    created_at: float = Field(default_factory=time.time)
+    summary: ProductEvaluationSummary = Field(default_factory=lambda: ProductEvaluationSummary(product=""))
+    records: List[ProductRecordResult] = Field(default_factory=list)  # capped sample
+
+
+# --------------------------------------------------------------------------
 # Versioning + audit
 # --------------------------------------------------------------------------
 
 class RuleSetVersion(BaseModel):
+    product: str
     version: int
     file: str
     created_by: str

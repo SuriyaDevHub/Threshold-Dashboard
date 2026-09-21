@@ -1,0 +1,15 @@
+{
+  "product": "CASH_BONDS",
+  "version": 1,
+  "file": "rules_v001.yml",
+  "created_by": "admin1",
+  "created_at": 1790029753.0503926,
+  "description": "Publish USD FX Deviation — High Risk",
+  "rule_ids_changed": [
+    "FX_DEVIATION_HIGH_RISK"
+  ],
+  "dry_run_dataset_id": "ds_da67dd25a9",
+  "dry_run_result_id": "dryrun_63c87682dd",
+  "approved_by": "admin1",
+  "published_at": 1790029753.0503757
+}

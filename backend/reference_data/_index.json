@@ -1,11 +1,11 @@
 {
-  "ref_66b4447129": {
+  "ref_0688be3b1d": {
     "name": "currency_reference",
     "versions": [
       {
         "version": 1,
         "uploaded_by": "seed_script",
-        "uploaded_at": 1790026272.2714655,
+        "uploaded_at": 1790029733.809958,
         "records": 6,
         "columns": [
           "Currency",
@@ -19,7 +19,7 @@
           "Threshold": "numeric",
           "Market_Region": "string"
         },
-        "file_path": "ref_66b4447129/v1.json",
+        "file_path": "ref_0688be3b1d/v1.json",
         "status": "active"
       }
     ]

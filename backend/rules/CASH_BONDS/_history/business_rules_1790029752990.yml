@@ -1,9 +1,12 @@
 schema_version: 1
+product: CASH_BONDS
 rules:
   - rule_id: FX_DEVIATION_HIGH_RISK
+    product: CASH_BONDS
     name: USD FX Deviation — High Risk
     description: USD trades whose booked price deviates from the market reference price by more than the currency's applicable threshold (looked up from the currency reference file) are classified as HIGH risk, provided notional exceeds 1,000,000.
-    status: DRAFT
+    status: APPROVED
+    enabled: true
     priority: 10
     conflict_handling: first_match
     authoring_mode: visual
@@ -50,7 +53,7 @@ rules:
           filter:
           lookup:
             lookup_type: exact
-            reference_file_id: ref_66b4447129
+            reference_file_id: ref_0688be3b1d
             reference_version:
             join_keys:
               - source: currency
@@ -111,11 +114,11 @@ rules:
           calculate:
           condition:
             kind: group
-            id: grp_6f2ed753e5
+            id: grp_a482cd436c
             operator: AND
             children:
               - kind: condition
-                id: cond_a781fff704
+                id: cond_5bd1530220
                 field: currency
                 operator: eq
                 value:
@@ -125,7 +128,7 @@ rules:
                 value2:
                 values:
               - kind: condition
-                id: cond_37fb1f9628
+                id: cond_d7717b0008
                 field: Deviation_Pct
                 operator: gt
                 value:
@@ -135,7 +138,7 @@ rules:
                 value2:
                 values:
               - kind: condition
-                id: cond_7dee21c177
+                id: cond_75e75ef751
                 field: notional
                 operator: gt
                 value:
@@ -176,22 +179,22 @@ rules:
           transform:
           validation:
       edges:
-        - id: edge_5ede61f139
+        - id: edge_3675ccbb0e
           source: n_input
           target: n_calc_dev
-        - id: edge_7f8a9a6c49
+        - id: edge_48d8e1a85a
           source: n_calc_dev
           target: n_lookup_ccy
-        - id: edge_32826de740
+        - id: edge_e5ca354f50
           source: n_lookup_ccy
           target: n_calc_adj
-        - id: edge_1a64167b61
+        - id: edge_2a20a19d7f
           source: n_calc_adj
           target: n_condition
-        - id: edge_fe8bd48934
+        - id: edge_b09bb26acd
           source: n_condition
           target: n_outcome
-    dataset_id:
+    dataset_id: ds_da67dd25a9
     required_columns:
       - trade_id
       - currency
@@ -200,12 +203,22 @@ rules:
       - notional
     version: 1
     created_by: seed_script
-    created_at: 1790026272.2721386
-    updated_by: seed_script
-    updated_at: 1790026272.272165
+    created_at: 1790029733.8104439
+    updated_by: admin1
+    updated_at: 1790029752.8790553
     notes: Seeded worked example — see scripts/seed_rule_designer.py.
-    last_dry_run_id:
-    approvals: []
+    last_dry_run_id: dryrun_63c87682dd
+    approvals:
+      - actor: admin1
+        role: ADMIN
+        action: PENDING_APPROVAL
+        timestamp: 1790029752.796626
+        comment: ''
+      - actor: admin1
+        role: ADMIN
+        action: APPROVED
+        timestamp: 1790029752.8790495
+        comment: ''
     depends_on: []
-last_updated_at: 1790026272.272381
-last_updated_by: seed_script
+last_updated_at: 1790029752.9079754
+last_updated_by: admin1
