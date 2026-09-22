@@ -21,7 +21,7 @@ _OP_TEXT = {
 def _value_text(v: ValueRef) -> str:
     if v is None:
         return ""
-    if v.type == "static":
+    if v.type in ("static", "template"):
         return str(v.value)
     if v.type == "lookup":
         return f"the looked-up '{v.name}'"

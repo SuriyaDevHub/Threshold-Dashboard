@@ -397,6 +397,15 @@ body {
 .rd-explanation { font-size: 13px; line-height: 1.6; white-space: pre-wrap; font-family: var(--font-ui); }
 
 @media (max-width: 900px) {
-  .rd-panel { width: 100%; }
   .rd-diff-cols { grid-template-columns: 1fr; }
+}
+
+/* .rd-panel is position:fixed and covers the workflow canvas underneath
+   while open — full-width is the right call on a true phone screen (there
+   is nothing else to show), but 900px is also a completely normal width
+   for a snapped/half desktop window, where it would hide the canvas and
+   palette entirely behind an opaque overlay. Keep the narrow-screen
+   full-width behavior only below a genuinely small (phone-class) width. */
+@media (max-width: 640px) {
+  .rd-panel { width: 100%; }
 }

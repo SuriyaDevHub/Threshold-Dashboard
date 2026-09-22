@@ -38,7 +38,12 @@ function newNode(type, index) {
     };
   }
   if (type === "calculate") base.calculate = { output_field: "", expression: "", output_type: "numeric" };
-  if (type === "outcome") base.outcomes = [];
+  // Seeded with an explicit Alert=true action — the Outcome tab's Status
+  // dropdown shows "Alert" as its default for a node with none yet, but
+  // that default must actually be written into `outcomes`, or a rule
+  // whose author only touches Reason/Commentary saves with no Status at
+  // all (what the UI shows would silently not be what got saved).
+  if (type === "outcome") base.outcomes = [{ field: "Alert", value: { type: "static", value: true } }];
   if (type === "transform") base.transform = { field: "", op: "round" };
   if (type === "validation") base.validation = { required_columns: [] };
   return base;

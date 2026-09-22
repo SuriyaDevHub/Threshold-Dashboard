@@ -13,8 +13,9 @@ import pytest
 
 from app.core import store as dataset_store
 from app.modules.rule_designer import (
-    condition_engine, expr_engine, lookup_engine, product_engine, product_registry, reference_store,
-    rule_store, shadow_test_service, validation_service, version_service, workflow_engine, yaml_service,
+    condition_engine, explain_service, expr_engine, lookup_engine, product_engine, product_registry,
+    reference_store, rule_store, shadow_test_service, validation_service, version_service, workflow_engine,
+    yaml_service,
 )
 from app.modules.rule_designer.models import (
     Condition, ConditionGroup, ConflictHandling, DeriveSpec, LookupConfig, LookupFieldMap, LookupType,
@@ -580,6 +581,33 @@ def test_outcome_template_value_renders_against_record():
     )
     records, _, _ = workflow_engine.run_workflow(workflow, [{"region": "EMEA"}], lambda *_: None)
     assert records[0].outcome["Commentary"] == "Region EMEA breached."
+
+
+# --------------------------------------------------------------------------
+# explain_service — business-friendly explanation must reflect template
+# outcome values (Reason/Commentary authored via the Outcome tab), not
+# render them as the literal string "None"
+# --------------------------------------------------------------------------
+
+def test_explanation_renders_template_outcome_values_not_none():
+    rule = _rule(
+        rule_id="EXPLAIN1", name="Explain template outcome",
+        workflow=Workflow(
+            nodes=[
+                WorkflowNode(id="in", type=NodeType.INPUT),
+                WorkflowNode(id="out", type=NodeType.OUTCOME, outcomes=[
+                    OutcomeAction(field="Alert", value=ValueRef(type="static", value=True)),
+                    OutcomeAction(field="Reason", value=ValueRef(type="template", value="OAR-TEST-001")),
+                    OutcomeAction(field="Commentary", value=ValueRef(type="template", value="Region {region} breached.")),
+                ]),
+            ],
+            edges=[WorkflowEdge(source="in", target="out")],
+        ),
+    )
+    text = explain_service.generate_explanation(rule)
+    assert "Reason = OAR-TEST-001" in text
+    assert "Commentary = Region {region} breached." in text
+    assert "None" not in text
 
 
 # --------------------------------------------------------------------------
