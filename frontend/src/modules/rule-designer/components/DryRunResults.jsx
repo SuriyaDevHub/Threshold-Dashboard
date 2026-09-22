@@ -32,8 +32,20 @@ function RecordRow({ record }) {
           ))}
           {record.matched && Object.keys(record.outcome || {}).length > 0 && (
             <div className="rd-trail-outcome">
-              <strong>Outcome:</strong>{" "}
-              {Object.entries(record.outcome).map(([k, v]) => `${k} = ${v}`).join(", ")}
+              {"Alert" in record.outcome && (
+                <span className={`badge ${record.outcome.Alert ? "badge--breach" : "badge--pass"}`}>
+                  {record.outcome.Alert ? "ALERT" : "CLEAR"}
+                </span>
+              )}
+              {record.outcome.Reason && <span className="mono" style={{ marginLeft: 8 }}>{record.outcome.Reason}</span>}
+              {record.outcome.Commentary && <div className="rd-trail-detail">{record.outcome.Commentary}</div>}
+              {Object.entries(record.outcome).filter(([k]) => !["Alert", "Reason", "Commentary"].includes(k)).length > 0 && (
+                <div className="rd-trail-detail mono">
+                  {Object.entries(record.outcome)
+                    .filter(([k]) => !["Alert", "Reason", "Commentary"].includes(k))
+                    .map(([k, v]) => `${k} = ${v}`).join(", ")}
+                </div>
+              )}
             </div>
           )}
         </div>

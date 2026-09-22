@@ -9,17 +9,71 @@ const NODE_TYPE_LABEL = {
   group: "Condition group", transform: "Transform", outcome: "Outcome", validation: "Validation",
 };
 
+// Every OUTCOME node reads/writes these three fields through dedicated
+// controls (spec: the rule author decides "if this rule passes, what
+// commentary/reason code gets populated and whether it's alert/clear" —
+// not a generic key=value list). Any other outcome field (e.g. a legacy
+// rule's custom Risk_Level) still goes through the generic editor below.
+const STATUS_FIELD = "Alert";
+const REASON_FIELD = "Reason";
+const COMMENTARY_FIELD = "Commentary";
+const RESERVED_OUTCOME_FIELDS = [STATUS_FIELD, REASON_FIELD, COMMENTARY_FIELD];
+
 function OutcomeEditor({ outcomes, onChange, fields }) {
   const actions = outcomes || [];
+  const statusAction = actions.find((a) => a.field === STATUS_FIELD);
+  const reasonAction = actions.find((a) => a.field === REASON_FIELD);
+  const commentaryAction = actions.find((a) => a.field === COMMENTARY_FIELD);
+  // No Alert action yet (a brand-new outcome node) defaults to "alert" —
+  // a rule whose conditions matched is an alert unless the author
+  // explicitly chooses Clear (e.g. an allow-list/exception rule).
+  const status = !statusAction || statusAction.value?.value !== false ? "alert" : "clear";
+
+  function upsertReserved(field, value) {
+    const rest = actions.filter((a) => a.field !== field);
+    onChange(value === null ? rest : [...rest, { field, value }]);
+  }
+  function setStatus(next) { upsertReserved(STATUS_FIELD, { type: "static", value: next === "alert" }); }
+  function setReason(text) { upsertReserved(REASON_FIELD, text ? { type: "template", value: text } : null); }
+  function setCommentary(text) { upsertReserved(COMMENTARY_FIELD, text ? { type: "template", value: text } : null); }
+
   function update(i, patch) { const a = [...actions]; a[i] = { ...a[i], ...patch }; onChange(a); }
   function add() { onChange([...actions, { field: "", value: { type: "static", value: "" } }]); }
   function remove(i) { onChange(actions.filter((_, idx) => idx !== i)); }
+
   return (
     <div className="lk-block">
-      <div className="lk-block-title">Outcome actions</div>
-      {actions.map((a, i) => (
+      <div className="lk-block-title">Outcome when this rule matches</div>
+      <label className="control">
+        <span>Status</span>
+        <select value={status} onChange={(e) => setStatus(e.target.value)}>
+          <option value="alert">Alert</option>
+          <option value="clear">Clear</option>
+        </select>
+      </label>
+      <label className="control">
+        <span>Reason code</span>
+        <input className="mono" placeholder="e.g. OAR-PM-001" value={reasonAction?.value?.value ?? ""}
+               onChange={(e) => setReason(e.target.value)} />
+      </label>
+      <label className="control">
+        <span>Commentary</span>
+        <textarea rows={3} placeholder="e.g. Deviation for {currency} exceeds the applicable threshold."
+                   value={commentaryAction?.value?.value ?? ""}
+                   onChange={(e) => setCommentary(e.target.value)} />
+      </label>
+      <p className="empty-hint">
+        Reason code and commentary support {"{field}"} placeholders resolved against the record when the rule
+        matches (e.g. "Region {"{region}"} breached."). Plain text with no placeholders works unchanged.
+        Available fields at this stage: {fields.map((f) => f.field).join(", ") || "(none yet)"}.
+      </p>
+
+      {actions.some((a) => !RESERVED_OUTCOME_FIELDS.includes(a.field)) && (
+        <div className="lk-block-title" style={{ marginTop: 12 }}>Additional outcome fields</div>
+      )}
+      {actions.map((a, i) => RESERVED_OUTCOME_FIELDS.includes(a.field) ? null : (
         <div className="lk-row" key={i}>
-          <input placeholder="field (e.g. Alert, Risk_Level)" value={a.field}
+          <input placeholder="field (e.g. Risk_Level)" value={a.field}
                  onChange={(e) => update(i, { field: e.target.value })} />
           <span className="mono">=</span>
           <select value={a.value?.type === "column" ? "field" : "static"}
@@ -41,7 +95,7 @@ function OutcomeEditor({ outcomes, onChange, fields }) {
           <button className="icon-btn" onClick={() => remove(i)}><Trash2 size={13} /></button>
         </div>
       ))}
-      <button className="btn btn--ghost btn--xs" onClick={add}><Plus size={13} /> Add outcome</button>
+      <button className="btn btn--ghost btn--xs" onClick={add}><Plus size={13} /> Add custom outcome field</button>
     </div>
   );
 }
