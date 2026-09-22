@@ -193,6 +193,40 @@ def test_lookup_composite_key():
     assert out.fields_added["Threshold"] == 4.0
 
 
+def test_lookup_field_transform_applied_to_looked_up_value():
+    ref_rows = [{"Currency": "USD", "Threshold": 2.0, "Desk": "  ny_rates  "}]
+    cfg = _cfg(fields=[
+        LookupFieldMap(source_column="Threshold", output_field="Threshold"),
+        LookupFieldMap(source_column="Desk", output_field="Desk", transform={"op": "trim"}),
+    ])
+    idx = lookup_engine.build_index(ref_rows, cfg)
+    out = lookup_engine.apply_lookup({"currency": "USD"}, idx)
+    assert out.fields_added["Threshold"] == 2.0  # untouched — no transform configured
+    assert out.fields_added["Desk"] == "ny_rates"  # trimmed
+
+
+def test_lookup_field_transform_split_and_upper():
+    ref_rows = [{"Currency": "USD", "Book": "hkfxo_052"}]
+    cfg = _cfg(fields=[LookupFieldMap(
+        source_column="Book", output_field="BookSuffix",
+        transform={"op": "split", "delimiter": "_", "index": 1},
+    )])
+    idx = lookup_engine.build_index(ref_rows, cfg)
+    out = lookup_engine.apply_lookup({"currency": "USD"}, idx)
+    assert out.fields_added["BookSuffix"] == "052"
+
+
+def test_lookup_field_transform_error_falls_back_to_raw_value():
+    ref_rows = [{"Currency": "USD", "Threshold": "not-a-number"}]
+    cfg = _cfg(fields=[LookupFieldMap(
+        source_column="Threshold", output_field="Threshold", transform={"op": "cast_numeric"},
+    )])
+    idx = lookup_engine.build_index(ref_rows, cfg)
+    out = lookup_engine.apply_lookup({"currency": "USD"}, idx)
+    assert out.status == "matched"
+    assert out.fields_added["Threshold"] == "not-a-number"  # transform failed, raw value kept
+
+
 def test_lookup_range():
     ref_rows = [{"Risk_Group": "LOW", "Min": 0, "Max": 2}, {"Risk_Group": "MEDIUM", "Min": 2, "Max": 5},
                 {"Risk_Group": "HIGH", "Min": 5, "Max": 100}]

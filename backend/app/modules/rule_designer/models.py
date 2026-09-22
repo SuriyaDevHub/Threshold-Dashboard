@@ -307,6 +307,12 @@ class DeriveSpec(BaseModel):
 class LookupFieldMap(BaseModel):
     source_column: str
     output_field: str
+    # Optional — same {op, ...params} shape as a TRANSFORM node's own
+    # config (see transform_ops.apply_transform_op), applied to the raw
+    # value pulled from the reference file before it's written to
+    # output_field. None/absent means write the looked-up value through
+    # unchanged, matching the prior (and still default) behavior.
+    transform: Optional[Dict[str, Any]] = None
 
 
 class LookupConfig(BaseModel):

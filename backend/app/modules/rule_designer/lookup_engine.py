@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.modules.rule_designer.models import (
     LookupConfig, LookupType, MissingLookupStrategy, PriorityStrategy,
 )
+from app.modules.rule_designer.transform_ops import apply_transform_op
 
 
 def _key_tuple(row: dict, cols: List[str]) -> Tuple[Any, ...]:
@@ -137,7 +138,15 @@ def apply_lookup(record: dict, idx: LookupIndex,
 
     if matched:
         chosen = _select_by_priority(candidates, config)
-        fields = {fm.output_field: chosen.get(fm.source_column) for fm in config.fields}
+        fields = {}
+        for fm in config.fields:
+            raw = chosen.get(fm.source_column)
+            if fm.transform:
+                try:
+                    raw = apply_transform_op(fm.transform.get("op"), raw, fm.transform)
+                except (TypeError, ValueError, IndexError):
+                    pass  # keep the raw looked-up value rather than fail the whole lookup
+            fields[fm.output_field] = raw
         return LookupOutcome("matched", fields, f"matched {len(candidates)} candidate(s)")
 
     strategy = config.missing_strategy

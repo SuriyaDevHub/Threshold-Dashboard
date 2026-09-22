@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { rd } from "../api.js";
+import TransformOpFields, { transformHint } from "./TransformOpFields.jsx";
 
 // Visual lookup/enrichment designer (spec §11-15, §29): exact / composite /
 // range / date lookups, join type, missing-match handling, duplicate-key
@@ -139,14 +140,21 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields }) {
       <div className="lk-block">
         <div className="lk-block-title">Fields to enrich with</div>
         {(lookup.fields || []).map((fm, i) => (
-          <div className="lk-row" key={i}>
-            <select value={fm.source_column} onChange={(e) => updateFieldMap(i, { source_column: e.target.value })}>
-              {refColumns.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
-            <span className="mono">→</span>
-            <input placeholder="output field name" value={fm.output_field}
-                   onChange={(e) => updateFieldMap(i, { output_field: e.target.value })} />
-            <button className="icon-btn" onClick={() => removeFieldMap(i)}><Trash2 size={13} /></button>
+          <div key={i} style={{ border: "1px solid var(--line)", borderRadius: 7, padding: 8, marginBottom: 8 }}>
+            <div className="lk-row" style={{ marginBottom: 0 }}>
+              <select value={fm.source_column} onChange={(e) => updateFieldMap(i, { source_column: e.target.value })}>
+                {refColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <span className="mono">→</span>
+              <input placeholder="output field name" value={fm.output_field}
+                     onChange={(e) => updateFieldMap(i, { output_field: e.target.value })} />
+              <button className="icon-btn" onClick={() => removeFieldMap(i)}><Trash2 size={13} /></button>
+            </div>
+            <div className="lk-row" style={{ marginTop: 6, marginBottom: 0 }}>
+              <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>transform</span>
+              <TransformOpFields transform={fm.transform} onChange={(t) => updateFieldMap(i, { transform: t })} allowNone />
+            </div>
+            {transformHint(fm.transform?.op) && <p className="empty-hint" style={{ marginTop: 4 }}>{transformHint(fm.transform?.op)}</p>}
           </div>
         ))}
         <button className="btn btn--ghost btn--xs" onClick={addFieldMap}><Plus size={13} /> Add field</button>

@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { Plus, Trash2, X } from "lucide-react";
 import ConditionBuilder, { newGroup } from "./ConditionBuilder.jsx";
 import LookupConfigForm from "./LookupConfigForm.jsx";
+import TransformOpFields, { transformHint } from "./TransformOpFields.jsx";
 
 const NODE_TYPE_LABEL = {
   input: "Input dataset", filter: "Filter", lookup: "Lookup / Enrichment",
@@ -173,70 +174,11 @@ export default function NodeConfigPanel({ node, fields, meta, onChange, onClose,
                 <option value="" disabled>field…</option>
                 {fields.map((f) => <option key={f.field} value={f.field}>{f.field}</option>)}
               </select>
-              <select value={node.transform?.op || "round"} onChange={(e) => set({ transform: { ...node.transform, op: e.target.value } })}>
-                <option value="round">round</option>
-                <option value="upper">upper</option>
-                <option value="lower">lower</option>
-                <option value="trim">trim</option>
-                <option value="substring">substring</option>
-                <option value="split">split</option>
-                <option value="replace">find &amp; replace</option>
-                <option value="cast_numeric">cast to number</option>
-                <option value="cast_string">cast to text</option>
-              </select>
+              <TransformOpFields transform={node.transform} onChange={(t) => set({ transform: t })} />
               <input placeholder="output field (optional)" value={node.transform?.output_field || ""}
                      onChange={(e) => set({ transform: { ...node.transform, output_field: e.target.value } })} />
             </div>
-
-            {node.transform?.op === "round" && (
-              <div className="lk-row">
-                <label className="control"><span>Decimal places</span>
-                  <input type="number" min="0" value={node.transform?.precision ?? 2}
-                         onChange={(e) => set({ transform: { ...node.transform, precision: e.target.value } })} />
-                </label>
-              </div>
-            )}
-
-            {node.transform?.op === "substring" && (
-              <div className="lk-row">
-                <label className="control"><span>Start index</span>
-                  <input type="number" value={node.transform?.start ?? 0}
-                         onChange={(e) => set({ transform: { ...node.transform, start: e.target.value } })} />
-                </label>
-                <label className="control"><span>End index (optional)</span>
-                  <input type="number" value={node.transform?.end ?? ""}
-                         onChange={(e) => set({ transform: { ...node.transform, end: e.target.value } })} />
-                </label>
-                <p className="empty-hint">e.g. start 0, end 3 keeps the first 3 characters. Leave end blank to go to the end of the text.</p>
-              </div>
-            )}
-
-            {node.transform?.op === "split" && (
-              <div className="lk-row">
-                <label className="control"><span>Delimiter</span>
-                  <input value={node.transform?.delimiter ?? ","}
-                         onChange={(e) => set({ transform: { ...node.transform, delimiter: e.target.value } })} />
-                </label>
-                <label className="control"><span>Segment index</span>
-                  <input type="number" value={node.transform?.index ?? 0}
-                         onChange={(e) => set({ transform: { ...node.transform, index: e.target.value } })} />
-                </label>
-                <p className="empty-hint">e.g. splitting "HKFXO_052" on "_" at index 1 gives "052".</p>
-              </div>
-            )}
-
-            {node.transform?.op === "replace" && (
-              <div className="lk-row">
-                <label className="control"><span>Find</span>
-                  <input value={node.transform?.find ?? ""}
-                         onChange={(e) => set({ transform: { ...node.transform, find: e.target.value } })} />
-                </label>
-                <label className="control"><span>Replace with</span>
-                  <input value={node.transform?.replace_with ?? ""}
-                         onChange={(e) => set({ transform: { ...node.transform, replace_with: e.target.value } })} />
-                </label>
-              </div>
-            )}
+            {transformHint(node.transform?.op) && <p className="empty-hint">{transformHint(node.transform?.op)}</p>}
           </div>
         )}
 
