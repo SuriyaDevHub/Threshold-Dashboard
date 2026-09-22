@@ -42,5 +42,19 @@
     "created_at": 1790029733.80902,
     "updated_by": "system",
     "updated_at": 1790029733.8090205
+  },
+  "PM": {
+    "code": "PM",
+    "name": "PM",
+    "enabled": true,
+    "migration_status": "in_progress",
+    "description": "Migrated from the legacy pm_validator.py \u2014 see migrate_pm_validator.py.",
+    "on_no_match": "alert",
+    "unmatched_reason_code": "PM-UNMATCHED",
+    "disabled_reason_code": "PM-DISABLED",
+    "created_by": "migrate_pm_validator",
+    "created_at": 1790061348.665296,
+    "updated_by": "migrate_pm_validator",
+    "updated_at": 1790061348.666011
   }
 }

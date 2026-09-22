@@ -1,0 +1,628 @@
+schema_version: 1
+product: PM
+rules:
+  - rule_id: OAR-PM-001
+    product: PM
+    name: PM — Zero deal-level value
+    description: Migrated from PmValidator.validate_trade() OAR-PM-001. CONFIRM exact params against source.
+    status: PUBLISHED
+    enabled: true
+    priority: 10
+    conflict_handling: first_match
+    authoring_mode: visual
+    source_text:
+    interpretation_notes: []
+    workflow:
+      nodes:
+        - id: n_input
+          type: input
+          label: PM trade
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_resolve_deal_level
+          type: transform
+          label: Resolve deal_level (deal_level / epe_deal_level)
+          position:
+            x: 0.0
+            y: 120.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: coalesce
+            output_field: deal_level
+            fields:
+              - deal_level
+              - epe_deal_level
+          validation:
+        - id: n_condition
+          type: condition
+          label: Zero deal-level value
+          position:
+            x: 0.0
+            y: 240.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+            kind: group
+            id: grp_e8b7d57f85
+            operator: AND
+            children:
+              - kind: condition
+                id: cond_fcc70c8aaf
+                field: deal_level
+                operator: eq
+                value:
+                  type: static
+                  value: 0
+                  name:
+                value2:
+                values:
+          outcomes:
+          transform:
+          validation:
+        - id: n_outcome
+          type: outcome
+          label: Flag zero deal-level value
+          position:
+            x: 0.0
+            y: 360.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+            - field: Alert
+              value:
+                type: static
+                value: true
+                name:
+            - field: Reason
+              value:
+                type: static
+                value: OAR-PM-001
+                name:
+            - field: Commentary
+              value:
+                type: static
+                value: Deal level value is zero.
+                name:
+          transform:
+          validation:
+      edges:
+        - id: edge_2a91beefec
+          source: n_input
+          target: n_resolve_deal_level
+        - id: edge_18bf9c47eb
+          source: n_resolve_deal_level
+          target: n_condition
+        - id: edge_2916779986
+          source: n_condition
+          target: n_outcome
+    dataset_id:
+    required_columns:
+      - deal_level
+      - epe_deal_level
+    version: 1
+    created_by: migrate_pm_validator
+    created_at: 1790061348.6664124
+    updated_by: migrate_pm_validator
+    updated_at: 1790061348.7872968
+    notes: STRUCTURAL TEMPLATE — see migrate_pm_validator.py header before publishing live.
+    last_dry_run_id:
+    approvals:
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: VALIDATED
+        timestamp: 1790061348.6781125
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: DRY_RUN_COMPLETED
+        timestamp: 1790061348.7087429
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: PENDING_APPROVAL
+        timestamp: 1790061348.7333758
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: APPROVED
+        timestamp: 1790061348.7593036
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: PUBLISHED
+        timestamp: 1790061348.787291
+        comment: migrate_pm_validator.py
+    depends_on: []
+  - rule_id: OAR-PM-002
+    product: PM
+    name: PM — Product type pattern match
+    description: Migrated from PmValidator.validate_trade() OAR-PM-002. CONFIRM exact params against source.
+    status: PUBLISHED
+    enabled: true
+    priority: 20
+    conflict_handling: first_match
+    authoring_mode: visual
+    source_text:
+    interpretation_notes: []
+    workflow:
+      nodes:
+        - id: n_input
+          type: input
+          label: PM trade
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_resolve_region
+          type: transform
+          label: Resolve region (region / epe_region)
+          position:
+            x: 0.0
+            y: 120.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: coalesce
+            output_field: region
+            fields:
+              - region
+              - epe_region
+          validation:
+        - id: n_condition
+          type: condition
+          label: Product type matches pattern
+          position:
+            x: 0.0
+            y: 240.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+            kind: group
+            id: grp_17580f0c2a
+            operator: AND
+            children:
+              - kind: condition
+                id: cond_ca2a6ff362
+                field: product_type
+                operator: matches_pattern
+                value:
+                  type: static
+                  value: '*SWAP*'
+                  name:
+                value2:
+                values:
+          outcomes:
+          transform:
+          validation:
+        - id: n_outcome
+          type: outcome
+          label: Flag pattern match
+          position:
+            x: 0.0
+            y: 360.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+            - field: Alert
+              value:
+                type: static
+                value: true
+                name:
+            - field: Reason
+              value:
+                type: static
+                value: OAR-PM-002
+                name:
+            - field: Commentary
+              value:
+                type: template
+                value: Product type flagged for region {region}.
+                name:
+          transform:
+          validation:
+      edges:
+        - id: edge_7c3de4cc2e
+          source: n_input
+          target: n_resolve_region
+        - id: edge_3c47e27519
+          source: n_resolve_region
+          target: n_condition
+        - id: edge_412e5c0d8b
+          source: n_condition
+          target: n_outcome
+    dataset_id:
+    required_columns:
+      - product_type
+      - region
+      - epe_region
+    version: 1
+    created_by: migrate_pm_validator
+    created_at: 1790061348.816077
+    updated_by: migrate_pm_validator
+    updated_at: 1790061349.0549803
+    notes: STRUCTURAL TEMPLATE — see migrate_pm_validator.py header before publishing live.
+    last_dry_run_id:
+    approvals:
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: VALIDATED
+        timestamp: 1790061348.8532379
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: DRY_RUN_COMPLETED
+        timestamp: 1790061348.9031918
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: PENDING_APPROVAL
+        timestamp: 1790061348.9564018
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: APPROVED
+        timestamp: 1790061349.005398
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: PUBLISHED
+        timestamp: 1790061349.0549755
+        comment: migrate_pm_validator.py
+    depends_on: []
+  - rule_id: OAR-PM-003
+    product: PM
+    name: PM — LN/NY leg threshold breach
+    description: Migrated from PmValidator.validate_trade() OAR-PM-003. CONFIRM exact params against source.
+    status: PUBLISHED
+    enabled: true
+    priority: 30
+    conflict_handling: first_match
+    authoring_mode: visual
+    source_text:
+    interpretation_notes: []
+    workflow:
+      nodes:
+        - id: n_input
+          type: input
+          label: PM trade
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_condition
+          type: condition
+          label: LN or NY leg threshold breach
+          position:
+            x: 0.0
+            y: 120.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+            kind: group
+            id: grp_80a18ffe01
+            operator: OR
+            children:
+              - kind: group
+                id: grp_ebfb01c83a
+                operator: AND
+                children:
+                  - kind: condition
+                    id: cond_6837e9a989
+                    field: booking_location
+                    operator: eq
+                    value:
+                      type: static
+                      value: LN
+                      name:
+                    value2:
+                    values:
+                  - kind: condition
+                    id: cond_24cd6004d8
+                    field: notional
+                    operator: gt
+                    value:
+                      type: static
+                      value: 1000000
+                      name:
+                    value2:
+                    values:
+              - kind: group
+                id: grp_c21e0c73ac
+                operator: AND
+                children:
+                  - kind: condition
+                    id: cond_ba3a2854e0
+                    field: booking_location
+                    operator: eq
+                    value:
+                      type: static
+                      value: NY
+                      name:
+                    value2:
+                    values:
+                  - kind: condition
+                    id: cond_6568f09e39
+                    field: notional
+                    operator: gt
+                    value:
+                      type: static
+                      value: 2000000
+                      name:
+                    value2:
+                    values:
+          outcomes:
+          transform:
+          validation:
+        - id: n_outcome
+          type: outcome
+          label: Flag leg threshold breach
+          position:
+            x: 0.0
+            y: 240.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+            - field: Alert
+              value:
+                type: static
+                value: true
+                name:
+            - field: Reason
+              value:
+                type: static
+                value: OAR-PM-003
+                name:
+            - field: Commentary
+              value:
+                type: static
+                value: Notional exceeds the booking location's threshold.
+                name:
+          transform:
+          validation:
+      edges:
+        - id: edge_a831650bd2
+          source: n_input
+          target: n_condition
+        - id: edge_979d83a4a2
+          source: n_condition
+          target: n_outcome
+    dataset_id:
+    required_columns:
+      - booking_location
+      - notional
+    version: 1
+    created_by: migrate_pm_validator
+    created_at: 1790061349.106573
+    updated_by: migrate_pm_validator
+    updated_at: 1790061349.4931955
+    notes: STRUCTURAL TEMPLATE — see migrate_pm_validator.py header before publishing live.
+    last_dry_run_id:
+    approvals:
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: VALIDATED
+        timestamp: 1790061349.1672573
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: DRY_RUN_COMPLETED
+        timestamp: 1790061349.2489858
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: PENDING_APPROVAL
+        timestamp: 1790061349.3323193
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: APPROVED
+        timestamp: 1790061349.4113133
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: PUBLISHED
+        timestamp: 1790061349.493189
+        comment: migrate_pm_validator.py
+    depends_on: []
+  - rule_id: OAR-PM-004
+    product: PM
+    name: PM — Combined pattern/threshold breach
+    description: Migrated from PmValidator.validate_trade() OAR-PM-004. CONFIRM exact params against source.
+    status: APPROVED
+    enabled: true
+    priority: 40
+    conflict_handling: first_match
+    authoring_mode: visual
+    source_text:
+    interpretation_notes: []
+    workflow:
+      nodes:
+        - id: n_input
+          type: input
+          label: PM trade
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_resolve_deal_level
+          type: transform
+          label: Resolve deal_level (deal_level / epe_deal_level)
+          position:
+            x: 0.0
+            y: 120.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: coalesce
+            output_field: deal_level
+            fields:
+              - deal_level
+              - epe_deal_level
+          validation:
+        - id: n_condition
+          type: condition
+          label: Pattern + non-zero + threshold
+          position:
+            x: 0.0
+            y: 240.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+            kind: group
+            id: grp_7461c415a6
+            operator: AND
+            children:
+              - kind: condition
+                id: cond_b3e16aba8e
+                field: product_type
+                operator: matches_pattern
+                value:
+                  type: static
+                  value: '*OPTION*'
+                  name:
+                value2:
+                values:
+              - kind: condition
+                id: cond_6a6e8c0912
+                field: deal_level
+                operator: ne
+                value:
+                  type: static
+                  value: 0
+                  name:
+                value2:
+                values:
+              - kind: condition
+                id: cond_587fd48503
+                field: notional
+                operator: gt
+                value:
+                  type: static
+                  value: 500000
+                  name:
+                value2:
+                values:
+          outcomes:
+          transform:
+          validation:
+        - id: n_outcome
+          type: outcome
+          label: Flag combined breach
+          position:
+            x: 0.0
+            y: 360.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+            - field: Alert
+              value:
+                type: static
+                value: true
+                name:
+            - field: Reason
+              value:
+                type: static
+                value: OAR-PM-004
+                name:
+            - field: Commentary
+              value:
+                type: static
+                value: Combined pattern/threshold breach.
+                name:
+          transform:
+          validation:
+      edges:
+        - id: edge_4cc11213c6
+          source: n_input
+          target: n_resolve_deal_level
+        - id: edge_4adbceb515
+          source: n_resolve_deal_level
+          target: n_condition
+        - id: edge_070f99ecc6
+          source: n_condition
+          target: n_outcome
+    dataset_id:
+    required_columns:
+      - product_type
+      - deal_level
+      - epe_deal_level
+      - notional
+    version: 1
+    created_by: migrate_pm_validator
+    created_at: 1790061349.5737822
+    updated_by: migrate_pm_validator
+    updated_at: 1790061350.0011327
+    notes: STRUCTURAL TEMPLATE — see migrate_pm_validator.py header before publishing live.
+    last_dry_run_id:
+    approvals:
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: VALIDATED
+        timestamp: 1790061349.6656952
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: DRY_RUN_COMPLETED
+        timestamp: 1790061349.7700799
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: PENDING_APPROVAL
+        timestamp: 1790061349.8932652
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: APPROVED
+        timestamp: 1790061350.0011275
+        comment: migrate_pm_validator.py
+    depends_on: []
+last_updated_at: 1790061350.0713918
+last_updated_by: migrate_pm_validator

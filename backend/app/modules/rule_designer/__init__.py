@@ -188,6 +188,44 @@ async def evaluate_product(code: str, body: EvaluateProductBody):
     return result.model_dump(mode="json")
 
 
+class EvaluateRecordBody(Actor):
+    record: Dict[str, Any]
+
+
+@router.post("/products/{code}/evaluate-record")
+async def evaluate_record(code: str, body: EvaluateRecordBody):
+    """The per-trade entry point a migrated `{product}_validator.py`
+    wrapper calls in place of its own hardcoded branches — one record in,
+    one matched/outcome result out, same rule set and fail-safe posture
+    as `evaluate_product`."""
+    _require(body, "dry_run")
+    try:
+        result = product_engine.evaluate_record(code, body.record, body.actor)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return result.model_dump(mode="json")
+
+
+class ProductFailSafeBody(Actor):
+    on_no_match: str = "clear"
+    unmatched_reason_code: Optional[str] = None
+    disabled_reason_code: Optional[str] = None
+
+
+@router.post("/products/{code}/fail-safe")
+async def set_product_fail_safe(code: str, body: ProductFailSafeBody):
+    """Admin config for a migrated product's exact ALERT/reason-code
+    contract — separate from the enabled kill switch and migration
+    status so setting it never touches those."""
+    _require(body, "manage_products")
+    try:
+        p = product_registry.configure_fail_safe(code, body.on_no_match, body.unmatched_reason_code,
+                                                   body.disabled_reason_code, body.actor)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    return p.model_dump(mode="json")
+
+
 # --------------------------------------------------------------------------
 # Datasets (reuses the app-wide dataset store Data Fetch already writes to)
 # --------------------------------------------------------------------------

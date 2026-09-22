@@ -1,0 +1,147 @@
+schema_version: 1
+product: PM
+rules:
+  - rule_id: OAR-PM-001
+    product: PM
+    name: PM — Zero deal-level value
+    description: Migrated from PmValidator.validate_trade() OAR-PM-001. CONFIRM exact params against source.
+    status: APPROVED
+    enabled: true
+    priority: 10
+    conflict_handling: first_match
+    authoring_mode: visual
+    source_text:
+    interpretation_notes: []
+    workflow:
+      nodes:
+        - id: n_input
+          type: input
+          label: PM trade
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_resolve_deal_level
+          type: transform
+          label: Resolve deal_level (deal_level / epe_deal_level)
+          position:
+            x: 0.0
+            y: 120.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: coalesce
+            output_field: deal_level
+            fields:
+              - deal_level
+              - epe_deal_level
+          validation:
+        - id: n_condition
+          type: condition
+          label: Zero deal-level value
+          position:
+            x: 0.0
+            y: 240.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+            kind: group
+            id: grp_e8b7d57f85
+            operator: AND
+            children:
+              - kind: condition
+                id: cond_fcc70c8aaf
+                field: deal_level
+                operator: eq
+                value:
+                  type: static
+                  value: 0
+                  name:
+                value2:
+                values:
+          outcomes:
+          transform:
+          validation:
+        - id: n_outcome
+          type: outcome
+          label: Flag zero deal-level value
+          position:
+            x: 0.0
+            y: 360.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+            - field: Alert
+              value:
+                type: static
+                value: true
+                name:
+            - field: Reason
+              value:
+                type: static
+                value: OAR-PM-001
+                name:
+            - field: Commentary
+              value:
+                type: static
+                value: Deal level value is zero.
+                name:
+          transform:
+          validation:
+      edges:
+        - id: edge_2a91beefec
+          source: n_input
+          target: n_resolve_deal_level
+        - id: edge_18bf9c47eb
+          source: n_resolve_deal_level
+          target: n_condition
+        - id: edge_2916779986
+          source: n_condition
+          target: n_outcome
+    dataset_id:
+    required_columns:
+      - deal_level
+      - epe_deal_level
+    version: 1
+    created_by: migrate_pm_validator
+    created_at: 1790061348.6664124
+    updated_by: migrate_pm_validator
+    updated_at: 1790061348.7593117
+    notes: STRUCTURAL TEMPLATE — see migrate_pm_validator.py header before publishing live.
+    last_dry_run_id:
+    approvals:
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: VALIDATED
+        timestamp: 1790061348.6781125
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: DRY_RUN_COMPLETED
+        timestamp: 1790061348.7087429
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: PENDING_APPROVAL
+        timestamp: 1790061348.7333758
+        comment: migrate_pm_validator.py
+      - actor: migrate_pm_validator
+        role: ADMIN
+        action: APPROVED
+        timestamp: 1790061348.7593036
+        comment: migrate_pm_validator.py
+    depends_on: []
+last_updated_at: 1790061348.7773438
+last_updated_by: migrate_pm_validator

@@ -82,15 +82,38 @@ def is_known_product(code: str) -> bool:
     return code.upper() in _load()
 
 
-def create_product(code: str, name: str, description: str, actor: str) -> Product:
+def create_product(code: str, name: str, description: str, actor: str,
+                    on_no_match: str = "clear", unmatched_reason_code: Optional[str] = None,
+                    disabled_reason_code: Optional[str] = None) -> Product:
     data = _load()
     code = code.upper()
     if code in data:
         raise ValueError(f"product '{code}' already exists")
-    product = Product(code=code, name=name, description=description, created_by=actor, updated_by=actor)
+    product = Product(code=code, name=name, description=description, created_by=actor, updated_by=actor,
+                       on_no_match=on_no_match, unmatched_reason_code=unmatched_reason_code,
+                       disabled_reason_code=disabled_reason_code)
     data[code] = product.model_dump(mode="json")
     _save(data)
     return product
+
+
+def configure_fail_safe(code: str, on_no_match: str, unmatched_reason_code: Optional[str],
+                         disabled_reason_code: Optional[str], actor: str) -> Product:
+    """Sets the per-record fail-safe posture (spec: preserve a migrated
+    legacy validator's exact ALERT/UNMATCHED/DISABLED reason-code
+    contract) without touching the enabled kill switch or migration
+    status."""
+    data = _load()
+    code = code.upper()
+    if code not in data:
+        raise ValueError(f"product '{code}' not found")
+    data[code]["on_no_match"] = on_no_match
+    data[code]["unmatched_reason_code"] = unmatched_reason_code
+    data[code]["disabled_reason_code"] = disabled_reason_code
+    data[code]["updated_by"] = actor
+    data[code]["updated_at"] = time.time()
+    _save(data)
+    return Product.model_validate(data[code])
 
 
 def set_enabled(code: str, enabled: bool, actor: str) -> Product:

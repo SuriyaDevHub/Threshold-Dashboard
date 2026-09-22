@@ -509,6 +509,114 @@ def test_product_engine_disabled_rule_excluded_from_active_set():
 
 
 # --------------------------------------------------------------------------
+# condition_engine — MATCHES_PATTERN (legacy _match_pattern/fnmatch parity)
+# --------------------------------------------------------------------------
+
+def test_matches_pattern_glob_is_case_sensitive():
+    cond = Condition(field="product_type", operator=Operator.MATCHES_PATTERN, value=ValueRef(type="static", value="*SWAP*"))
+    assert condition_engine.eval_condition(cond, {"product_type": "IR_SWAP"}).result is True
+    assert condition_engine.eval_condition(cond, {"product_type": "ir_swap"}).result is False
+    assert condition_engine.eval_condition(cond, {"product_type": "BOND"}).result is False
+
+
+# --------------------------------------------------------------------------
+# workflow_engine — coalesce transform (legacy _pick canonical/raw fallback)
+# --------------------------------------------------------------------------
+
+def test_coalesce_transform_prefers_canonical_then_falls_back():
+    node = WorkflowNode(id="n", type=NodeType.TRANSFORM,
+                         transform={"op": "coalesce", "output_field": "deal_level",
+                                    "fields": ["deal_level", "epe_deal_level"]})
+    status, fields = workflow_engine._apply_transform(node, {"deal_level": None, "epe_deal_level": 7})
+    assert status == "ok" and fields == {"deal_level": 7}
+
+    status, fields = workflow_engine._apply_transform(node, {"deal_level": 0, "epe_deal_level": 7})
+    assert fields == {"deal_level": 0}  # 0 is a real value, not treated as missing
+
+    status, fields = workflow_engine._apply_transform(node, {})
+    assert fields == {"deal_level": None}
+
+
+# --------------------------------------------------------------------------
+# ValueRef.type=="template" — outcome commentary rendering
+# --------------------------------------------------------------------------
+
+def test_outcome_template_value_renders_against_record():
+    workflow = Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="out", type=NodeType.OUTCOME, outcomes=[
+                OutcomeAction(field="Commentary", value=ValueRef(type="template", value="Region {region} breached.")),
+            ]),
+        ],
+        edges=[WorkflowEdge(source="in", target="out")],
+    )
+    records, _, _ = workflow_engine.run_workflow(workflow, [{"region": "EMEA"}], lambda *_: None)
+    assert records[0].outcome["Commentary"] == "Region EMEA breached."
+
+
+# --------------------------------------------------------------------------
+# product_engine — on_no_match fail-closed posture + evaluate_record
+# (the {product}_validator.py migration contract: legacy validators alert
+# a fully-unmatched record rather than silently clearing it)
+# --------------------------------------------------------------------------
+
+def test_on_no_match_alert_flags_unmatched_records_with_configured_reason_code():
+    product_registry.configure_fail_safe(TEST_PRODUCT, on_no_match="alert",
+                                          unmatched_reason_code="TP-UNMATCHED",
+                                          disabled_reason_code="TP-DISABLED", actor="admin")
+    _pub_rule("PR1", threshold=5.0)
+    ds = _dataset([{"id": 1, "deviation": 1.0}])  # does not breach threshold -> no rule matches
+    result = product_engine.evaluate_product(TEST_PRODUCT, ds, "tester", record_id_field="id")
+    assert result.summary.fail_safe_triggered is False  # rules WERE active — this isn't the empty-ruleset fail-safe
+    assert result.records[0].matched is True
+    assert result.records[0].outcome == {"Alert": True, "Reason": "TP-UNMATCHED"}
+
+
+def test_on_no_match_clear_is_the_default_and_leaves_unmatched_silent():
+    _pub_rule("PR1", threshold=5.0)
+    ds = _dataset([{"id": 1, "deviation": 1.0}])
+    result = product_engine.evaluate_product(TEST_PRODUCT, ds, "tester", record_id_field="id")
+    assert result.records[0].matched is False
+    assert result.records[0].outcome == {}
+
+
+def test_disabled_reason_code_used_in_fail_safe_result():
+    product_registry.configure_fail_safe(TEST_PRODUCT, on_no_match="alert",
+                                          unmatched_reason_code="TP-UNMATCHED",
+                                          disabled_reason_code="TP-DISABLED", actor="admin")
+    _pub_rule("PR1", threshold=5.0)
+    product_registry.set_enabled(TEST_PRODUCT, False, "admin")
+    ds = _dataset([{"id": 1, "deviation": 9.0}])
+    result = product_engine.evaluate_product(TEST_PRODUCT, ds, "tester", record_id_field="id")
+    assert result.records[0].outcome["Reason"] == "TP-DISABLED"
+
+
+def test_evaluate_record_single_trade_matches_a_rule():
+    _pub_rule("PR1", threshold=5.0)
+    result = product_engine.evaluate_record(TEST_PRODUCT, {"deviation": 9.0}, "tester")
+    assert result.matched is True
+    assert result.matched_rule_id == "PR1"
+
+
+def test_evaluate_record_fail_safe_when_product_disabled():
+    product_registry.configure_fail_safe(TEST_PRODUCT, on_no_match="clear",
+                                          unmatched_reason_code=None, disabled_reason_code="TP-DISABLED",
+                                          actor="admin")
+    _pub_rule("PR1", threshold=5.0)
+    product_registry.set_enabled(TEST_PRODUCT, False, "admin")
+    result = product_engine.evaluate_record(TEST_PRODUCT, {"deviation": 9.0}, "tester")
+    assert result.matched is True
+    assert result.outcome == {"Alert": True, "Reason": "TP-DISABLED"}
+
+
+def test_evaluate_record_no_match_respects_on_no_match_clear():
+    _pub_rule("PR1", threshold=5.0)
+    result = product_engine.evaluate_record(TEST_PRODUCT, {"deviation": 1.0}, "tester")
+    assert result.matched is False
+
+
+# --------------------------------------------------------------------------
 # shadow_test_service — new engine vs. legacy validator output
 # --------------------------------------------------------------------------
 

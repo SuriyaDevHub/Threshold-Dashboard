@@ -109,12 +109,26 @@ def _resolve_value(value: Optional[ValueRef], record: dict) -> Any:
         return None
     if value.type == "static":
         return value.value
+    if value.type == "template":
+        return expr_engine.render_template(str(value.value), record)
     return record.get(value.name)
 
 
 def _apply_transform(node: WorkflowNode, record: dict) -> Tuple[str, Dict[str, Any]]:
     cfg = node.transform or {}
     op = cfg.get("op")
+
+    if op == "coalesce":
+        # Ordered fallback across candidate fields — generalizes the legacy
+        # `_pick(trade, canonical_key, epe_raw_key)` helper to any number of
+        # fallback keys, not just a canonical/raw pair.
+        out = cfg.get("output_field")
+        for candidate in cfg.get("fields", []):
+            v = record.get(candidate)
+            if v is not None and v != "":
+                return "ok", {out: v}
+        return "ok", {out: None}
+
     src = cfg.get("field")
     out = cfg.get("output_field", src)
     val = record.get(src)

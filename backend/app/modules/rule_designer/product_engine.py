@@ -42,13 +42,15 @@ def evaluate_product(product: str, dataset_id: str, actor: str,
     total = len(rows)
 
     if not prod.enabled:
-        return _fail_safe_result(product, dataset_id, actor, rows, record_id_field,
-                                  record_sample_cap, reason="product is disabled")
+        return _fail_safe_result(product, dataset_id, actor, rows, record_id_field, record_sample_cap,
+                                  reason="product is disabled",
+                                  reason_code=prod.disabled_reason_code or f"{product.upper()}-DISABLED")
 
     active_rules = active_rules_for_product(product)
     if not active_rules:
-        return _fail_safe_result(product, dataset_id, actor, rows, record_id_field,
-                                  record_sample_cap, reason="no active (published, enabled) rules for product")
+        return _fail_safe_result(product, dataset_id, actor, rows, record_id_field, record_sample_cap,
+                                  reason="no active (published, enabled) rules for product",
+                                  reason_code=prod.disabled_reason_code or f"{product.upper()}-DISABLED")
 
     per_rule_by_record: Dict[str, Dict[str, object]] = {}
     for rule in active_rules:
@@ -72,7 +74,18 @@ def evaluate_product(product: str, dataset_id: str, actor: str,
                 matches.append((rule, rec))
 
         if not matches:
-            if i < record_sample_cap:
+            if prod.on_no_match == "alert":
+                # Fail-closed posture, carried over from every legacy
+                # validator seen so far: a record no rule explicitly
+                # matched is still an ALERT with an UNMATCHED reason, not
+                # a silent clear.
+                matched_ct += 1
+                if i < record_sample_cap:
+                    results.append(ProductRecordResult(
+                        record_id=rid, matched=True,
+                        outcome={"Alert": True, "Reason": prod.unmatched_reason_code or f"{product.upper()}-UNMATCHED"},
+                    ))
+            elif i < record_sample_cap:
                 results.append(ProductRecordResult(record_id=rid, matched=False))
             continue
 
@@ -109,12 +122,13 @@ def evaluate_product(product: str, dataset_id: str, actor: str,
 
 
 def _fail_safe_result(product: str, dataset_id: str, actor: str, rows: List[dict],
-                       record_id_field: Optional[str], record_sample_cap: int, reason: str) -> ProductEvaluationResult:
+                       record_id_field: Optional[str], record_sample_cap: int, reason: str,
+                       reason_code: str) -> ProductEvaluationResult:
     total = len(rows)
     results = []
     for i, raw_row in enumerate(rows[:record_sample_cap]):
         rid = raw_row.get(record_id_field) if record_id_field else i
-        results.append(ProductRecordResult(record_id=rid, matched=True, outcome={"Alert": True, "Reason": reason}))
+        results.append(ProductRecordResult(record_id=rid, matched=True, outcome={"Alert": True, "Reason": reason_code}))
     summary = ProductEvaluationSummary(
         product=product.upper(), product_enabled=False if "disabled" in reason else True,
         active_rule_count=0, total_records=total, matched=total, not_matched=0,
@@ -123,3 +137,52 @@ def _fail_safe_result(product: str, dataset_id: str, actor: str, rows: List[dict
     return ProductEvaluationResult(
         product=product.upper(), dataset_id=dataset_id, created_by=actor, summary=summary, records=results,
     )
+
+
+def evaluate_record(product: str, record: dict, actor: str) -> ProductRecordResult:
+    """Single-record synchronous entry point — what a thin
+    `{product}_validator.py` wrapper actually needs (legacy validators are
+    called per-trade, e.g. `validate_trade(trade)`, not per-dataset). Runs
+    the exact same rule set and fail-safe/on_no_match posture as
+    `evaluate_product`, just against one in-memory record instead of a
+    stored dataset."""
+    prod = product_registry.get_product(product)
+    if prod is None:
+        raise ValueError(f"product '{product}' is not registered")
+
+    if not prod.enabled:
+        return ProductRecordResult(record_id=None, matched=True, outcome={
+            "Alert": True, "Reason": prod.disabled_reason_code or f"{product.upper()}-DISABLED",
+        })
+
+    active_rules = active_rules_for_product(product)
+    if not active_rules:
+        return ProductRecordResult(record_id=None, matched=True, outcome={
+            "Alert": True, "Reason": prod.disabled_reason_code or f"{product.upper()}-DISABLED",
+        })
+
+    matches = []  # [(rule, RecordResult)] in priority order
+    for rule in active_rules:
+        records, _, _ = workflow_engine.run_workflow(rule.workflow, [record], reference_store.reference_loader)
+        rec = records[0] if records else None
+        if rec is not None and rec.matched:
+            matches.append((rule, rec))
+
+    if not matches:
+        if prod.on_no_match == "alert":
+            return ProductRecordResult(record_id=None, matched=True, outcome={
+                "Alert": True, "Reason": prod.unmatched_reason_code or f"{product.upper()}-UNMATCHED",
+            })
+        return ProductRecordResult(record_id=None, matched=False)
+
+    conflict = active_rules[0].conflict_handling
+    if conflict == ConflictHandling.ALL_MATCHING:
+        outcome: Dict = {}
+        for _, rec in matches:
+            outcome.update(rec.outcome)
+        return ProductRecordResult(record_id=None, matched=True, matched_rule_id=matches[0][0].rule_id,
+                                    matched_rule_ids=[r.rule_id for r, _ in matches],
+                                    outcome=outcome, trail=matches[0][1].trail)
+    rule, rec = matches[-1] if conflict == ConflictHandling.LAST_MATCH else matches[0]
+    return ProductRecordResult(record_id=None, matched=True, matched_rule_id=rule.rule_id,
+                                matched_rule_ids=[rule.rule_id], outcome=rec.outcome, trail=rec.trail)

@@ -9,6 +9,7 @@ per-record explainability (spec §24): "Deviation = 6.2 > Threshold = 5 -> ✓".
 from __future__ import annotations
 
 import datetime as _dt
+import fnmatch
 import re
 from dataclasses import dataclass, field
 from typing import Any, List
@@ -113,6 +114,10 @@ def eval_condition(cond: Condition, record: dict) -> ConditionExplain:
             result = str(actual).endswith(str(expected))
         elif op == Operator.REGEX:
             result = re.search(str(expected), str(actual)) is not None
+        elif op == Operator.MATCHES_PATTERN:
+            # fnmatch.fnmatchcase glob ("PM*", "*_SWAP"), case-sensitive —
+            # matches the legacy `_match_pattern()` helper exactly.
+            result = fnmatch.fnmatchcase(str(actual), str(expected))
         elif op == Operator.BEFORE:
             result = _to_date(actual) < _to_date(expected)
         elif op == Operator.AFTER:

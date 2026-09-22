@@ -62,6 +62,7 @@ class Operator(str, Enum):
     IN = "in"
     NOT_IN = "not_in"
     REGEX = "regex"
+    MATCHES_PATTERN = "matches_pattern"
     IS_NULL = "is_null"
     IS_NOT_NULL = "is_not_null"
     BEFORE = "before"
@@ -78,7 +79,7 @@ class Operator(str, Enum):
             Operator.CONTAINS: "string", Operator.NOT_CONTAINS: "string",
             Operator.STARTS_WITH: "string", Operator.ENDS_WITH: "string",
             Operator.IN: "any", Operator.NOT_IN: "any",
-            Operator.REGEX: "string",
+            Operator.REGEX: "string", Operator.MATCHES_PATTERN: "string",
             Operator.IS_NULL: "any", Operator.IS_NOT_NULL: "any",
             Operator.BEFORE: "date", Operator.AFTER: "date", Operator.ON: "date",
         }[self]
@@ -101,12 +102,12 @@ OPERATORS_BY_TYPE: Dict[FieldType, List[Operator]] = {
                          Operator.IN, Operator.NOT_IN, Operator.IS_NULL, Operator.IS_NOT_NULL],
     FieldType.STRING: [Operator.EQ, Operator.NE, Operator.CONTAINS, Operator.NOT_CONTAINS,
                         Operator.STARTS_WITH, Operator.ENDS_WITH, Operator.IN, Operator.NOT_IN,
-                        Operator.REGEX, Operator.IS_NULL, Operator.IS_NOT_NULL],
+                        Operator.REGEX, Operator.MATCHES_PATTERN, Operator.IS_NULL, Operator.IS_NOT_NULL],
     FieldType.DATE: [Operator.BEFORE, Operator.AFTER, Operator.ON, Operator.BETWEEN,
                       Operator.NOT_BETWEEN, Operator.IS_NULL, Operator.IS_NOT_NULL],
     FieldType.BOOLEAN: [Operator.EQ, Operator.NE, Operator.IS_NULL, Operator.IS_NOT_NULL],
     FieldType.IDENTIFIER: [Operator.EQ, Operator.NE, Operator.IN, Operator.NOT_IN,
-                            Operator.IS_NULL, Operator.IS_NOT_NULL],
+                            Operator.MATCHES_PATTERN, Operator.IS_NULL, Operator.IS_NOT_NULL],
 }
 
 
@@ -216,15 +217,17 @@ class AuthoringMode(str, Enum):
 
 class ValueRef(BaseModel):
     """A typed operand: a literal, or a reference to a column produced
-    anywhere in the pipeline (base, enriched, derived, or another lookup)."""
-    type: str = "static"  # static | column | derived | lookup | expression
-    value: Any = None      # for type=static
+    anywhere in the pipeline (base, enriched, derived, or another lookup),
+    or a `{field}`-interpolated text template (outcome values only — e.g.
+    reproducing a legacy `commentary_template.format(**fmt)`)."""
+    type: str = "static"  # static | column | derived | lookup | expression | template
+    value: Any = None      # for type=static|template (template holds the format string)
     name: Optional[str] = None  # for type=column|derived|lookup: the field name
 
     @field_validator("type")
     @classmethod
     def _check_type(cls, v):
-        if v not in {"static", "column", "derived", "lookup", "expression"}:
+        if v not in {"static", "column", "derived", "lookup", "expression", "template"}:
             raise ValueError(f"Unknown ValueRef.type '{v}'")
         return v
 
@@ -235,6 +238,18 @@ def literal(value: Any) -> ValueRef:
 
 def column(name: str) -> ValueRef:
     return ValueRef(type="column", name=name)
+
+
+def template(text: str) -> ValueRef:
+    """A `{field}` placeholder string, rendered against the record at
+    outcome time — the canonical model's equivalent of a legacy
+    `commentary_template.format(**fmt)`. Prefer `literal()` when a rule's
+    config carries a static commentary string: legacy validators always
+    let a static `commentary` win over `commentary_template` when both are
+    present, and that priority is simply which of these two helpers the
+    rule's OutcomeAction is built with — the engine needs no extra
+    priority logic for it."""
+    return ValueRef(type="template", value=text)
 
 
 # --------------------------------------------------------------------------
@@ -391,10 +406,26 @@ class Product(BaseModel):
     enabled: bool = True
     migration_status: MigrationStatus = MigrationStatus.NOT_MIGRATED
     description: str = ""
+    # Per-record fail-safe posture when NO published/enabled rule matches a
+    # record: "clear" (default — matches this app's own demo products, no
+    # outcome emitted) or "alert" (matches every legacy {product}_validator.py
+    # seen so far: an unmatched trade is still ALERT with an UNMATCHED
+    # reason, never silently clear). Set to "alert" when migrating a legacy
+    # validator so its fail-closed contract carries over exactly.
+    on_no_match: str = "clear"
+    unmatched_reason_code: Optional[str] = None  # e.g. "PM-UNMATCHED"
+    disabled_reason_code: Optional[str] = None    # e.g. "PM-DISABLED"
     created_by: str = "system"
     created_at: float = Field(default_factory=time.time)
     updated_by: str = "system"
     updated_at: float = Field(default_factory=time.time)
+
+    @field_validator("on_no_match")
+    @classmethod
+    def _check_on_no_match(cls, v):
+        if v not in {"clear", "alert"}:
+            raise ValueError("on_no_match must be 'clear' or 'alert'")
+        return v
 
     @field_validator("code")
     @classmethod
