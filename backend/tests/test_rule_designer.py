@@ -565,6 +565,52 @@ def test_coalesce_transform_prefers_canonical_then_falls_back():
     assert fields == {"deal_level": None}
 
 
+def _transform_node(**cfg):
+    return WorkflowNode(id="n", type=NodeType.TRANSFORM, transform=cfg)
+
+
+def test_trim_transform_strips_whitespace():
+    node = _transform_node(op="trim", field="book", output_field="book")
+    status, fields = workflow_engine._apply_transform(node, {"book": "  HKFXO_052  "})
+    assert status == "ok" and fields == {"book": "HKFXO_052"}
+
+
+def test_substring_transform_start_and_end():
+    node = _transform_node(op="substring", field="book", output_field="prefix", start=0, end=3)
+    status, fields = workflow_engine._apply_transform(node, {"book": "HKFXO_052"})
+    assert fields == {"prefix": "HKF"}
+
+
+def test_substring_transform_open_ended_when_no_end():
+    node = _transform_node(op="substring", field="book", output_field="suffix", start=6)
+    status, fields = workflow_engine._apply_transform(node, {"book": "HKFXO_052"})
+    assert fields == {"suffix": "052"}
+
+
+def test_split_transform_picks_segment_by_index():
+    node = _transform_node(op="split", field="book", output_field="suffix", delimiter="_", index=1)
+    status, fields = workflow_engine._apply_transform(node, {"book": "HKFXO_052"})
+    assert fields == {"suffix": "052"}
+
+
+def test_split_transform_out_of_range_index_yields_none_not_error():
+    node = _transform_node(op="split", field="book", output_field="suffix", delimiter="_", index=5)
+    status, fields = workflow_engine._apply_transform(node, {"book": "HKFXO_052"})
+    assert status == "ok" and fields == {"suffix": None}
+
+
+def test_replace_transform():
+    node = _transform_node(op="replace", field="book", output_field="book", find="_", replace_with="-")
+    status, fields = workflow_engine._apply_transform(node, {"book": "HKFXO_052"})
+    assert fields == {"book": "HKFXO-052"}
+
+
+def test_round_transform_precision_falls_back_when_blank():
+    node = _transform_node(op="round", field="pct", output_field="pct", precision="")
+    status, fields = workflow_engine._apply_transform(node, {"pct": 2.34567})
+    assert status == "ok" and fields == {"pct": 2.35}
+
+
 # --------------------------------------------------------------------------
 # ValueRef.type=="template" — outcome commentary rendering
 # --------------------------------------------------------------------------

@@ -134,17 +134,35 @@ def _apply_transform(node: WorkflowNode, record: dict) -> Tuple[str, Dict[str, A
     val = record.get(src)
     try:
         if op == "round" and val is not None:
-            val = round(float(val), int(cfg.get("precision", 2)))
+            val = round(float(val), int(cfg.get("precision") or 2))
         elif op == "upper" and val is not None:
             val = str(val).upper()
         elif op == "lower" and val is not None:
             val = str(val).lower()
+        elif op == "trim" and val is not None:
+            val = str(val).strip()
+        elif op == "substring" and val is not None:
+            s = str(val)
+            start = int(cfg.get("start") or 0)
+            end_raw = cfg.get("end")
+            end = int(end_raw) if end_raw not in (None, "") else None
+            val = s[start:end]
+        elif op == "split" and val is not None:
+            s = str(val)
+            delimiter = cfg.get("delimiter") or ","
+            idx = int(cfg.get("index") or 0)
+            parts = s.split(delimiter)
+            val = parts[idx] if -len(parts) <= idx < len(parts) else None
+        elif op == "replace" and val is not None:
+            s = str(val)
+            find = cfg.get("find") or ""
+            val = s.replace(find, cfg.get("replace_with") or "") if find else s
         elif op == "cast_numeric" and val is not None:
             val = float(str(val).replace(",", ""))
         elif op == "cast_string" and val is not None:
             val = str(val)
         return "ok", {out: val}
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, IndexError) as exc:
         return "error", {}
 
 

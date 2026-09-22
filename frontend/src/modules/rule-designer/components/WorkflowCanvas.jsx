@@ -1,12 +1,40 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import ReactFlow, {
-  Background, Controls, MiniMap, Handle, Position, addEdge, applyNodeChanges, applyEdgeChanges, MarkerType,
+  Background, BaseEdge, Controls, EdgeLabelRenderer, Handle, MarkerType, MiniMap, Position,
+  addEdge, applyEdgeChanges, applyNodeChanges, getBezierPath, reconnectEdge,
 } from "reactflow";
 import "reactflow/dist/style.css";
 import {
-  Database, Filter, Link2, Calculator, GitBranch, Layers, Wand2, Flag, ShieldCheck, Plus,
+  Database, Filter, Link2, Calculator, GitBranch, Layers, Wand2, Flag, ShieldCheck, Plus, X,
 } from "lucide-react";
 import NodeConfigPanel from "./NodeConfigPanel.jsx";
+
+// A visible delete button on every edge — deleting a connection
+// shouldn't require knowing (or being able to use) a keyboard shortcut.
+function DeletableEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, style, markerEnd, data }) {
+  const [edgePath, labelX, labelY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
+  return (
+    <>
+      <BaseEdge id={id} path={edgePath} style={style} markerEnd={markerEnd} />
+      <EdgeLabelRenderer>
+        <button
+          className="rd-edge-delete"
+          style={{
+            position: "absolute", transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,
+            pointerEvents: "all", width: 16, height: 16, borderRadius: "50%", border: "1px solid #c0392b",
+            background: "#ffffff", color: "#c0392b", display: "flex", alignItems: "center", justifyContent: "center",
+            cursor: "pointer", fontSize: 0, padding: 0,
+          }}
+          onClick={(e) => { e.stopPropagation(); data?.onDelete?.(); }}
+          title="Delete connection"
+        >
+          <X size={10} strokeWidth={3} />
+        </button>
+      </EdgeLabelRenderer>
+    </>
+  );
+}
+const edgeTypes = { rd: DeletableEdge };
 
 const NODE_ICONS = {
   input: Database, filter: Filter, lookup: Link2, enrichment: Link2, calculate: Calculator,
@@ -138,10 +166,17 @@ export default function WorkflowCanvas({ workflow, onChange, baseFields, meta })
     };
   }), [workflow.nodes, selectedId]);
 
+  function removeEdge(id) {
+    onChange({ ...workflow, edges: workflow.edges.filter((e) => e.id !== id) });
+  }
+
   const rfEdges = useMemo(() => workflow.edges.map((e) => ({
-    id: e.id, source: e.source, target: e.target, markerEnd: { type: MarkerType.ArrowClosed },
-    style: { stroke: "#98a4b3" },
-  })), [workflow.edges]);
+    id: e.id, source: e.source, target: e.target, type: "rd", markerEnd: { type: MarkerType.ArrowClosed },
+    style: { stroke: "#98a4b3" }, data: { onDelete: () => removeEdge(e.id) },
+    // Depends on the whole workflow/onChange (not just workflow.edges) so
+    // removeEdge's closure is never stale — matches onConnect/onEdgesChange
+    // below, which depend on the full workflow object for the same reason.
+  })), [workflow, onChange]);
 
   const onNodesChange = useCallback((changes) => {
     for (const c of changes) {
@@ -160,6 +195,13 @@ export default function WorkflowCanvas({ workflow, onChange, baseFields, meta })
 
   const onConnect = useCallback((conn) => {
     const next = addEdge({ ...conn, id: uid("edge") }, rfEdges);
+    onChange({ ...workflow, edges: next.map((e) => ({ id: e.id, source: e.source, target: e.target })) });
+  }, [rfEdges, workflow, onChange]);
+
+  // Dragging an edge's endpoint to a different node — without this handler
+  // the drag interaction shows but nothing actually happens on drop.
+  const onReconnect = useCallback((oldEdge, newConnection) => {
+    const next = reconnectEdge(oldEdge, newConnection, rfEdges);
     onChange({ ...workflow, edges: next.map((e) => ({ id: e.id, source: e.source, target: e.target })) });
   }, [rfEdges, workflow, onChange]);
 
@@ -212,9 +254,12 @@ export default function WorkflowCanvas({ workflow, onChange, baseFields, meta })
           nodes={rfNodes}
           edges={rfEdges}
           nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
           onNodesChange={onNodesChange}
           onEdgesChange={onEdgesChange}
           onConnect={onConnect}
+          onReconnect={onReconnect}
+          deleteKeyCode={["Backspace", "Delete"]}
           onNodeClick={(_, n) => setSelectedId(n.id)}
           onPaneClick={() => setSelectedId(null)}
           fitView
