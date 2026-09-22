@@ -145,9 +145,15 @@ def run_workflow(
     rows: List[dict],
     reference_loader: ReferenceLoader,
     record_id_field: Optional[str] = None,
-    explain_sample_cap: int = 500,
+    explain_sample_cap: Optional[int] = None,
 ) -> Tuple[List[RecordResult], List[EnrichmentDiagnostic], DryRunSummary]:
     started = time.time()
+    # No cap by default: datasets here are cached server-side and mock/sample
+    # scale (see module docstring), so keeping every record's trace is cheap
+    # and is what lets a reviewer actually validate a dry run's results
+    # end-to-end rather than spot-checking whatever fell inside a sample. A
+    # caller can still pass an explicit cap for an unusually large pull.
+    cap = explain_sample_cap if explain_sample_cap is not None else len(rows)
     order = topo_order(workflow)
     indexes = _build_indexes(workflow, reference_loader)
     has_outcome_node = any(n.type == NodeType.OUTCOME for n in workflow.nodes)
@@ -301,13 +307,13 @@ def run_workflow(
         # explainability list even though the summary counts them —
         # exactly the failure mode that makes "N matched" in the summary
         # disagree with what the record-level drill-down actually shows.
-        if is_matched and matched_kept < explain_sample_cap:
+        if is_matched and matched_kept < cap:
             matched_kept += 1
             results.append(RecordResult(
                 record_id=rid, matched=is_matched, trail=trail,
                 outcome=outcome_out, final_record=wr, error=error,
             ))
-        elif not is_matched and not_matched_kept < explain_sample_cap:
+        elif not is_matched and not_matched_kept < cap:
             not_matched_kept += 1
             results.append(RecordResult(
                 record_id=rid, matched=is_matched, trail=trail,

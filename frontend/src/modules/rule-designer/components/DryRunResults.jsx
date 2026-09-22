@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ChevronDown, ChevronRight, Check, X, AlertTriangle } from "lucide-react";
 import { Stat, Card } from "../../../components/ui.jsx";
 
@@ -54,23 +54,28 @@ function RecordRow({ record }) {
   );
 }
 
+const INITIAL_PAGE = 200;
+
 export default function DryRunResults({ result }) {
   const [filter, setFilter] = useState("all"); // all | matched | not_matched
+  const [visibleCount, setVisibleCount] = useState(INITIAL_PAGE);
+  useEffect(() => { setVisibleCount(INITIAL_PAGE); }, [filter, result]);
+
   if (!result) return null;
   const s = result.summary;
+  // The backend now keeps a trace for every record by default (this app's
+  // datasets are cached server-side, mock/sample scale — see
+  // workflow_engine's run_workflow docstring), so `records` is the complete
+  // set unless a caller explicitly capped it server-side. Either way, never
+  // hard-truncate what's rendered without giving the user a way to see the
+  // rest: that's what silently made "82 matched" and "42 shown" both true
+  // at once before.
   const records = (result.records || []).filter((r) =>
     filter === "all" ? true : filter === "matched" ? r.matched : !r.matched);
-  const RENDER_CAP = 200;
-  const displayedRecords = records.slice(0, RENDER_CAP);
-
-  // `records` only ever carries a capped trace per bucket (matched_shown /
-  // not_matched_shown out of the true matched / not_matched totals) — never
-  // claim it's the complete set when the cap was hit, so a sparse match
-  // scattered past the cap doesn't silently read as "nothing matched". The
-  // list is then rendered through its own RENDER_CAP on top of that, so
-  // "shown" always reflects what's actually on screen, whichever cap bit.
   const totalForFilter = filter === "matched" ? s.matched : filter === "not_matched" ? s.not_matched : s.matched + s.not_matched;
-  const isTruncated = displayedRecords.length < totalForFilter;
+  const backendTruncated = records.length < totalForFilter;
+  const displayedRecords = records.slice(0, visibleCount);
+  const morePending = records.length - displayedRecords.length;
 
   return (
     <>
@@ -112,7 +117,7 @@ export default function DryRunResults({ result }) {
         </Card>
       )}
 
-      <Card title={`Record-level explainability (${isTruncated ? `${displayedRecords.length} of ${totalForFilter}` : `${displayedRecords.length}`} shown)`}>
+      <Card title={`Record-level explainability (${displayedRecords.length.toLocaleString()} of ${totalForFilter.toLocaleString()} shown)`}>
         <div className="tabs" style={{ marginBottom: 12 }}>
           {["all", "matched", "not_matched"].map((f) => (
             <button key={f} className={`tab ${filter === f ? "active" : ""}`} onClick={() => setFilter(f)}>
@@ -120,14 +125,27 @@ export default function DryRunResults({ result }) {
             </button>
           ))}
         </div>
-        {isTruncated && (
+        {backendTruncated && (
           <div className="preview-note" style={{ marginBottom: 8 }}>
-            Only the first {displayedRecords.length.toLocaleString()} of {totalForFilter.toLocaleString()} {filter === "all" ? "records" : filter.replace("_", " ")} get a per-record trace kept for a dry run this size — the totals above still cover every record. Narrow the sample (e.g. Specific IDs) to inspect ones outside this list.
+            This dry run kept a trace for {records.length.toLocaleString()} of the {totalForFilter.toLocaleString()} {filter === "all" ? "records" : filter.replace("_", " ")} — the totals above still cover every record. Narrow the sample (e.g. Specific IDs) to inspect ones outside this list.
           </div>
         )}
         <div className="rd-record-list">
           {displayedRecords.map((r, i) => <RecordRow record={r} key={i} />)}
         </div>
+        {morePending > 0 && (
+          <div style={{ marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
+            <button className="btn btn--ghost btn--xs" onClick={() => setVisibleCount((v) => v + INITIAL_PAGE)}>
+              Show {Math.min(morePending, INITIAL_PAGE).toLocaleString()} more
+            </button>
+            <button className="btn btn--ghost btn--xs" onClick={() => setVisibleCount(records.length)}>
+              Show all {records.length.toLocaleString()}
+            </button>
+            <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>
+              ({morePending.toLocaleString()} remaining)
+            </span>
+          </div>
+        )}
       </Card>
     </>
   );
