@@ -60,6 +60,17 @@ export default function DryRunResults({ result }) {
   const s = result.summary;
   const records = (result.records || []).filter((r) =>
     filter === "all" ? true : filter === "matched" ? r.matched : !r.matched);
+  const RENDER_CAP = 200;
+  const displayedRecords = records.slice(0, RENDER_CAP);
+
+  // `records` only ever carries a capped trace per bucket (matched_shown /
+  // not_matched_shown out of the true matched / not_matched totals) — never
+  // claim it's the complete set when the cap was hit, so a sparse match
+  // scattered past the cap doesn't silently read as "nothing matched". The
+  // list is then rendered through its own RENDER_CAP on top of that, so
+  // "shown" always reflects what's actually on screen, whichever cap bit.
+  const totalForFilter = filter === "matched" ? s.matched : filter === "not_matched" ? s.not_matched : s.matched + s.not_matched;
+  const isTruncated = displayedRecords.length < totalForFilter;
 
   return (
     <>
@@ -101,7 +112,7 @@ export default function DryRunResults({ result }) {
         </Card>
       )}
 
-      <Card title={`Record-level explainability (${records.length} shown)`}>
+      <Card title={`Record-level explainability (${isTruncated ? `${displayedRecords.length} of ${totalForFilter}` : `${displayedRecords.length}`} shown)`}>
         <div className="tabs" style={{ marginBottom: 12 }}>
           {["all", "matched", "not_matched"].map((f) => (
             <button key={f} className={`tab ${filter === f ? "active" : ""}`} onClick={() => setFilter(f)}>
@@ -109,8 +120,13 @@ export default function DryRunResults({ result }) {
             </button>
           ))}
         </div>
+        {isTruncated && (
+          <div className="preview-note" style={{ marginBottom: 8 }}>
+            Only the first {displayedRecords.length.toLocaleString()} of {totalForFilter.toLocaleString()} {filter === "all" ? "records" : filter.replace("_", " ")} get a per-record trace kept for a dry run this size — the totals above still cover every record. Narrow the sample (e.g. Specific IDs) to inspect ones outside this list.
+          </div>
+        )}
         <div className="rd-record-list">
-          {records.slice(0, 200).map((r, i) => <RecordRow record={r} key={i} />)}
+          {displayedRecords.map((r, i) => <RecordRow record={r} key={i} />)}
         </div>
       </Card>
     </>

@@ -324,6 +324,35 @@ def test_workflow_engine_end_to_end(tmp_path):
     assert diagnostics[0].lookup_failures == 1
 
 
+def test_dry_run_explainability_keeps_matches_past_the_sample_cap():
+    # Regression: matched/not-matched record traces used to be kept only for
+    # the first `explain_sample_cap` rows BY RAW DATASET POSITION. On a
+    # dataset where every match happens to fall past that position (common
+    # once a filter/lookup thins a large dataset down to a handful of real
+    # matches), the explainability list would show zero matched records even
+    # though the summary correctly counted them — exactly the "3 matched but
+    # only 1 shown" symptom reported against a 1,479-row dry run. Matched and
+    # not-matched traces must now be capped independently so a match is never
+    # crowded out by not-matched rows that merely appear earlier.
+    ref = reference_store.upload_version(
+        "ccy_ref2", [{"Currency": "USD", "Threshold": 2.0}], "tester")
+    rows = (
+        [{"trade_id": i, "currency": "USD", "Deviation": 1.0} for i in range(6)]  # 6 non-matches first
+        + [{"trade_id": 100 + i, "currency": "USD", "Deviation": 6.0} for i in range(2)]  # 2 matches, past the cap
+    )
+    wf = _demo_workflow(ref.id)
+    results, _, summary = workflow_engine.run_workflow(
+        wf, rows, reference_store.reference_loader, record_id_field="trade_id", explain_sample_cap=3,
+    )
+    assert summary.total_records == 8
+    assert summary.matched == 2
+    assert summary.matched_shown == 2  # neither dropped, despite both landing past index 3
+    matched_ids = {r.record_id for r in results if r.matched}
+    assert matched_ids == {100, 101}
+    assert summary.not_matched == 6
+    assert summary.not_matched_shown == 3  # not-matched bucket capped independently
+
+
 def test_workflow_topo_order_falls_back_on_cycle():
     nodes = [WorkflowNode(id="a", type=NodeType.INPUT), WorkflowNode(id="b", type=NodeType.INPUT)]
     edges = [WorkflowEdge(source="a", target="b"), WorkflowEdge(source="b", target="a")]

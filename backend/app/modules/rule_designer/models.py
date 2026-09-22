@@ -528,6 +528,12 @@ class DryRunSummary(BaseModel):
     errors: int = 0
     execution_time_s: float = 0.0
     match_rate_pct: float = 0.0
+    # How many of `matched`/`not_matched` actually got a per-record trace
+    # kept in `records` (each capped independently — see workflow_engine's
+    # `explain_sample_cap`). Lets the UI say "500 of 1,476 shown" instead of
+    # silently displaying a partial list as if it were the complete one.
+    matched_shown: int = 0
+    not_matched_shown: int = 0
 
 
 class EnrichmentDiagnostic(BaseModel):

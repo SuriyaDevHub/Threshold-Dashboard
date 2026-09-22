@@ -159,6 +159,7 @@ def run_workflow(
 
     results: List[RecordResult] = []
     total = matched_ct = not_matched_ct = lookup_failure_ct = error_ct = 0
+    matched_kept = not_matched_kept = 0
 
     for i, raw_record in enumerate(rows):
         total += 1
@@ -292,10 +293,25 @@ def run_workflow(
                     if action.field in wr:
                         outcome_out[action.field] = wr[action.field]
 
-        if i < explain_sample_cap:
+        # Cap matched and not-matched traces independently, rather than
+        # keeping only the first `explain_sample_cap` rows by raw dataset
+        # position: on a large dataset where matches (or lookup failures)
+        # are sparse and happen to fall past that position, an index-based
+        # cap could silently exclude every one of them from the
+        # explainability list even though the summary counts them —
+        # exactly the failure mode that makes "N matched" in the summary
+        # disagree with what the record-level drill-down actually shows.
+        if is_matched and matched_kept < explain_sample_cap:
+            matched_kept += 1
             results.append(RecordResult(
                 record_id=rid, matched=is_matched, trail=trail,
-                outcome=outcome_out if is_matched else {}, final_record=wr, error=error,
+                outcome=outcome_out, final_record=wr, error=error,
+            ))
+        elif not is_matched and not_matched_kept < explain_sample_cap:
+            not_matched_kept += 1
+            results.append(RecordResult(
+                record_id=rid, matched=is_matched, trail=trail,
+                outcome={}, final_record=wr, error=error,
             ))
 
     elapsed = time.time() - started
@@ -303,6 +319,7 @@ def run_workflow(
         total_records=total, matched=matched_ct, not_matched=not_matched_ct,
         lookup_failures=lookup_failure_ct, errors=error_ct, execution_time_s=round(elapsed, 4),
         match_rate_pct=round((matched_ct / total * 100.0), 4) if total else 0.0,
+        matched_shown=matched_kept, not_matched_shown=not_matched_kept,
     )
 
     diagnostics: List[EnrichmentDiagnostic] = []
