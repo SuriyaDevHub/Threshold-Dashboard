@@ -75,16 +75,29 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields }) {
         <div className="lk-block">
           <div className="lk-block-title">Join keys</div>
           {(lookup.join_keys || []).map((jk, i) => (
-            <div className="lk-row" key={i}>
-              <span className="mono">source</span>
-              <select value={jk.source} onChange={(e) => updateJoinKey(i, { source: e.target.value })}>
-                {sourceFields.map((f) => <option key={f.field} value={f.field}>{f.field}</option>)}
-              </select>
-              <span className="mono">=</span>
-              <select value={jk.reference} onChange={(e) => updateJoinKey(i, { reference: e.target.value })}>
-                {refColumns.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
-              <button className="icon-btn" onClick={() => removeJoinKey(i)}><Trash2 size={13} /></button>
+            <div key={i} style={{ border: "1px solid var(--line)", borderRadius: 7, padding: 8, marginBottom: 8 }}>
+              <div className="lk-row" style={{ marginBottom: 0 }}>
+                <span className="mono">source</span>
+                <select value={jk.source} onChange={(e) => updateJoinKey(i, { source: e.target.value })}>
+                  {sourceFields.map((f) => <option key={f.field} value={f.field}>{f.field}</option>)}
+                </select>
+                <span className="mono">=</span>
+                <select value={jk.reference} onChange={(e) => updateJoinKey(i, { reference: e.target.value })}>
+                  {refColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <button className="icon-btn" onClick={() => removeJoinKey(i)}><Trash2 size={13} /></button>
+              </div>
+              <div className="lk-row" style={{ marginTop: 6, marginBottom: 0 }}>
+                <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>transform</span>
+                <TransformOpFields transform={jk.transform} onChange={(t) => updateJoinKey(i, { transform: t })} allowNone />
+              </div>
+              {jk.transform?.op && (
+                <p className="empty-hint" style={{ marginTop: 4 }}>
+                  Applied to both the source and reference values before matching — e.g. "upper" lets a
+                  lowercase source value match an uppercase reference key.
+                  {transformHint(jk.transform.op) ? ` ${transformHint(jk.transform.op)}` : ""}
+                </p>
+              )}
             </div>
           ))}
           <button className="btn btn--ghost btn--xs" onClick={addJoinKey}><Plus size={13} /> Add join key</button>

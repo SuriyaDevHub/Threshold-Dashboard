@@ -19,8 +19,25 @@ from app.modules.rule_designer.models import (
 from app.modules.rule_designer.transform_ops import apply_transform_op
 
 
-def _key_tuple(row: dict, cols: List[str]) -> Tuple[Any, ...]:
-    return tuple(str(row.get(c)) for c in cols)
+def _key_tuple(row: dict, join_keys: List[Dict[str, Any]], side: str) -> Tuple[Any, ...]:
+    """side: "source" or "reference" — which column name each join key
+    entry supplies to pull the raw value out of `row`. A join key's
+    optional `transform` is applied on BOTH sides (building the
+    reference index and matching an incoming record) so the two stay
+    comparable however the source/reference values are normalized —
+    e.g. an "upper" transform makes "hkfxo_052" match "HKFXO_052"
+    regardless of which side is actually in mixed case."""
+    vals = []
+    for jk in join_keys:
+        raw = row.get(jk[side])
+        transform = jk.get("transform")
+        if transform:
+            try:
+                raw = apply_transform_op(transform.get("op"), raw, transform)
+            except (TypeError, ValueError, IndexError):
+                pass  # keep the raw value rather than fail the whole lookup
+        vals.append(str(raw))
+    return tuple(vals)
 
 
 def _to_num(v: Any) -> Optional[float]:
@@ -54,9 +71,8 @@ class LookupIndex:
 def build_index(reference_rows: List[dict], config: LookupConfig) -> LookupIndex:
     idx = LookupIndex(config=config, reference_rows=reference_rows)
     if idx.is_keyed:
-        ref_cols = [jk["reference"] for jk in config.join_keys]
         for row in reference_rows:
-            k = _key_tuple(row, ref_cols)
+            k = _key_tuple(row, config.join_keys, "reference")
             idx.exact_index.setdefault(k, []).append(row)
         idx.duplicate_keys = {
             " · ".join(k): len(v) for k, v in idx.exact_index.items() if len(v) > 1
@@ -87,7 +103,7 @@ def lookup_one(record: dict, idx: LookupIndex) -> Tuple[bool, List[dict], str]:
     config = idx.config
     if config.lookup_type in (LookupType.EXACT, LookupType.COMPOSITE):
         src_cols = [jk["source"] for jk in config.join_keys]
-        k = _key_tuple(record, src_cols)
+        k = _key_tuple(record, config.join_keys, "source")
         candidates = idx.exact_index.get(k, [])
         if not candidates:
             return False, [], f"no reference row for key {dict(zip(src_cols, [record.get(c) for c in src_cols]))}"

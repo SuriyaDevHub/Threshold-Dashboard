@@ -320,8 +320,14 @@ class LookupConfig(BaseModel):
     reference_file_id: str
     reference_version: Optional[int] = None  # pinned version; None = latest at publish time
 
-    # exact / composite: list of (source_field, reference_field) join pairs
-    join_keys: List[Dict[str, str]] = Field(default_factory=list)  # [{source, reference}]
+    # exact / composite: list of (source_field, reference_field) join pairs.
+    # Each entry may also carry an optional "transform" ({op, ...params},
+    # same shape as a TRANSFORM node's config) applied to BOTH the source
+    # record's value and the reference file's value before they're
+    # compared — e.g. an "upper" transform lets "hkfxo_052" on the record
+    # match "HKFXO_052" in the reference file. Dict[str, Any] rather than
+    # Dict[str, str] specifically to allow that nested transform object.
+    join_keys: List[Dict[str, Any]] = Field(default_factory=list)  # [{source, reference, transform?}]
 
     # range lookup: source_field falls between reference low/high columns
     range_field: Optional[str] = None

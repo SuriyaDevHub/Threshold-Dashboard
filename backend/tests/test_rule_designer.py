@@ -227,6 +227,35 @@ def test_lookup_field_transform_error_falls_back_to_raw_value():
     assert out.fields_added["Threshold"] == "not-a-number"  # transform failed, raw value kept
 
 
+def test_join_key_transform_normalizes_case_mismatch():
+    # Record has lowercase currency, reference file has uppercase — an
+    # "upper" join-key transform should make them match even though
+    # neither side is in the other's native case.
+    ref_rows = [{"Currency": "USD", "Threshold": 2.0}]
+    cfg = _cfg(join_keys=[{"source": "currency", "reference": "Currency", "transform": {"op": "upper"}}])
+    idx = lookup_engine.build_index(ref_rows, cfg)
+    out = lookup_engine.apply_lookup({"currency": "usd"}, idx)
+    assert out.status == "matched" and out.fields_added["Threshold"] == 2.0
+
+
+def test_join_key_transform_applies_to_reference_side_too():
+    # Reference file has whitespace-padded keys — a "trim" transform
+    # applied when building the index (not just when matching a record)
+    # is what makes this resolve.
+    ref_rows = [{"Currency": "  USD  ", "Threshold": 2.0}]
+    cfg = _cfg(join_keys=[{"source": "currency", "reference": "Currency", "transform": {"op": "trim"}}])
+    idx = lookup_engine.build_index(ref_rows, cfg)
+    out = lookup_engine.apply_lookup({"currency": "USD"}, idx)
+    assert out.status == "matched" and out.fields_added["Threshold"] == 2.0
+
+
+def test_join_key_without_transform_is_unaffected():
+    ref_rows = [{"Currency": "USD", "Threshold": 2.0}]
+    idx = lookup_engine.build_index(ref_rows, _cfg())  # no transform on the join key
+    out = lookup_engine.apply_lookup({"currency": "usd"}, idx)
+    assert out.status == "missing_null"  # case mismatch, no transform configured -> no match
+
+
 def test_lookup_range():
     ref_rows = [{"Risk_Group": "LOW", "Min": 0, "Max": 2}, {"Risk_Group": "MEDIUM", "Min": 2, "Max": 5},
                 {"Risk_Group": "HIGH", "Min": 5, "Max": 100}]
