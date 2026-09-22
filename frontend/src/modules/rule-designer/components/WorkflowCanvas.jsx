@@ -179,7 +179,14 @@ export default function WorkflowCanvas({ workflow, onChange, baseFields, meta })
           );
         })}
       </div>
-      <div className="rd-canvas">
+      {/* Inline height alongside the CSS class: ReactFlow measures its
+          parent synchronously on mount and logs "parent container needs a
+          width and a height" (error#004) if that measurement happens
+          before the external stylesheet has applied — an inline style is
+          guaranteed to be present from the very first paint, independent
+          of stylesheet load order/timing in whatever environment this
+          runs in. */}
+      <div className="rd-canvas" style={{ height: 480, width: "100%" }}>
         <ReactFlow
           nodes={rfNodes}
           edges={rfEdges}
