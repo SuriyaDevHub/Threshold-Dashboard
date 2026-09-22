@@ -78,18 +78,37 @@ export function fieldsBeforeNode(nodes, nodeId, baseFields) {
   return out;
 }
 
+// Inline (not class-based) so the box, border, shadow and text always
+// render correctly the instant the DOM node paints — independent of
+// whether/when any external stylesheet (ours or ReactFlow's own) has
+// loaded in whatever environment this runs in. Literal color values
+// here, not var(--token) references, for the same reason: a CSS custom
+// property is only resolvable once its defining stylesheet has applied.
+const NODE_BOX_STYLE = {
+  display: "flex", alignItems: "center", gap: 8, background: "#ffffff",
+  border: "1px solid #e4e8ee", borderLeftWidth: 3, borderLeftStyle: "solid",
+  borderRadius: 8, padding: "8px 12px", minWidth: 160,
+  boxShadow: "0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06)",
+  fontFamily: "inherit", boxSizing: "border-box",
+};
+const HANDLE_STYLE = {
+  width: 8, height: 8, background: "#5b6775", border: "1px solid #ffffff", borderRadius: "50%",
+};
+
 function RFNode({ data }) {
   const Icon = NODE_ICONS[data.nodeType] || Database;
   const color = NODE_COLORS[data.nodeType] || "#5b6775";
   return (
-    <div className="rd-node" style={{ borderLeftColor: color }}>
-      <Handle type="target" position={Position.Top} />
-      <div className="rd-node-icon" style={{ color }}><Icon size={15} /></div>
+    <div className="rd-node" style={{ ...NODE_BOX_STYLE, borderLeftColor: color }}>
+      <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
+      <div className="rd-node-icon" style={{ color, flexShrink: 0, display: "flex" }}><Icon size={15} /></div>
       <div>
-        <div className="rd-node-type">{data.nodeType}</div>
-        <div className="rd-node-label">{data.label}</div>
+        <div className="rd-node-type" style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.04em", color: "#5b6775" }}>
+          {data.nodeType}
+        </div>
+        <div className="rd-node-label" style={{ fontSize: 12.5, fontWeight: 600, color: "#16202b" }}>{data.label}</div>
       </div>
-      <Handle type="source" position={Position.Bottom} />
+      <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
     </div>
   );
 }
@@ -186,7 +205,9 @@ export default function WorkflowCanvas({ workflow, onChange, baseFields, meta })
           guaranteed to be present from the very first paint, independent
           of stylesheet load order/timing in whatever environment this
           runs in. */}
-      <div className="rd-canvas" style={{ height: 480, width: "100%" }}>
+      <div className="rd-canvas" style={{
+        height: 480, width: "100%", border: "1px solid #e4e8ee", borderRadius: 8, overflow: "hidden",
+      }}>
         <ReactFlow
           nodes={rfNodes}
           edges={rfEdges}
