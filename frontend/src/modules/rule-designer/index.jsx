@@ -1,4 +1,8 @@
 import { useState } from "react";
+// Module-scoped styles — self-contained, see styles.css's own header
+// comment. This is the only wiring this module's CSS needs; nothing is
+// written into the host app's global stylesheet.
+import "./styles.css";
 import { ModuleHeader } from "../../components/ui.jsx";
 import { RoleProvider } from "./RoleContext.jsx";
 import RoleBar from "./components/RoleBar.jsx";
