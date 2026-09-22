@@ -389,6 +389,33 @@ def test_lifecycle_happy_path():
     assert len(rule.approvals) == 5
 
 
+def test_next_rule_id_starts_at_001_for_a_fresh_product():
+    assert rule_store.next_rule_id(TEST_PRODUCT) == f"OAR-{TEST_PRODUCT}-001"
+
+
+def test_next_rule_id_ignores_draft_rules():
+    rule = _rule(rule_id=f"OAR-{TEST_PRODUCT}-001", name="draft only")
+    rule_store.upsert_rule(rule, "tester")  # stays DRAFT — never approved
+    assert rule_store.next_rule_id(TEST_PRODUCT) == f"OAR-{TEST_PRODUCT}-001"
+
+
+def test_next_rule_id_increments_past_approved_and_published_rules():
+    r1 = _rule(rule_id=f"OAR-{TEST_PRODUCT}-001", name="one")
+    rule_store.upsert_rule(r1, "tester")
+    r1 = rule_store.transition(r1, RuleStatus.VALIDATED, "admin", Role.ADMIN)
+    r1 = rule_store.transition(r1, RuleStatus.DRY_RUN_COMPLETED, "admin", Role.ADMIN)
+    r1 = rule_store.transition(r1, RuleStatus.PENDING_APPROVAL, "admin", Role.ADMIN)
+    r1 = rule_store.transition(r1, RuleStatus.APPROVED, "admin", Role.ADMIN)  # approved, not yet published
+    assert rule_store.next_rule_id(TEST_PRODUCT) == f"OAR-{TEST_PRODUCT}-002"
+
+    r1 = rule_store.transition(r1, RuleStatus.PUBLISHED, "admin", Role.ADMIN)
+    assert rule_store.next_rule_id(TEST_PRODUCT) == f"OAR-{TEST_PRODUCT}-002"  # unchanged by publish itself
+
+    r2 = _rule(rule_id=f"OAR-{TEST_PRODUCT}-002", name="two", status=RuleStatus.PUBLISHED)
+    rule_store.upsert_rule(r2, "tester")
+    assert rule_store.next_rule_id(TEST_PRODUCT) == f"OAR-{TEST_PRODUCT}-003"
+
+
 def test_set_enabled_is_independent_of_lifecycle_status():
     rule = _rule(rule_id="L3", name="L3")
     rule_store.upsert_rule(rule, "tester")

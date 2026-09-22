@@ -7,7 +7,11 @@ import { useActor } from "../RoleContext.jsx";
 import { fmtDate } from "../format.js";
 
 function emptyWorkflow() {
-  return { nodes: [{ id: "n_input", type: "input", label: "Input dataset", position: { x: 0, y: 0 } }], edges: [] };
+  // Starts with zero nodes — a workflow needs no INPUT/Filter/Lookup/etc.
+  // to be valid; a rule can be built from just a Condition + Outcome node
+  // (or even a bare Condition, for a dry-run-only check). The palette
+  // below lets the author add exactly the steps this rule needs.
+  return { nodes: [], edges: [] };
 }
 
 export default function RuleList({ onOpenRule }) {
@@ -20,18 +24,29 @@ export default function RuleList({ onOpenRule }) {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [newProduct, setNewProduct] = useState("");
+  const [nextRuleId, setNextRuleId] = useState("");
   const [mode, setMode] = useState("visual");
   const [createError, setCreateError] = useState(null);
 
   const productList = products.data?.products || [];
   useEffect(() => { if (productList.length && !newProduct) setNewProduct(productList[0].code); }, [productList, newProduct]);
 
+  // The rule's identifier is never hand-typed — it's OAR-{PRODUCT}-NNN,
+  // computed server-side from that product's APPROVED/PUBLISHED rule
+  // count, so it stays in the same namespace as migrated {product}_validator.py
+  // rules (e.g. OAR-PM-001). Re-fetched whenever the product changes.
+  useEffect(() => {
+    if (!newProduct) { setNextRuleId(""); return; }
+    let cancelled = false;
+    rd.nextRuleId(newProduct).then((r) => { if (!cancelled) setNextRuleId(r.rule_id); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [newProduct]);
+
   async function createRule() {
-    if (!newName.trim() || !newProduct) return;
+    if (!newName.trim() || !newProduct || !nextRuleId) return;
     setCreateError(null);
-    const rule_id = newName.trim().toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_|_$/g, "") || `RULE_${Date.now()}`;
     const rule = {
-      rule_id, product: newProduct, name: newName.trim(), description: "", priority: 100,
+      rule_id: nextRuleId, product: newProduct, name: newName.trim(), description: "", priority: 100,
       authoring_mode: mode, workflow: emptyWorkflow(), required_columns: [],
     };
     try {
@@ -41,6 +56,9 @@ export default function RuleList({ onOpenRule }) {
       onOpenRule(created.rule_id);
     } catch (e) {
       setCreateError(String(e.message || e));
+      // The computed id can go stale if another admin published a rule in
+      // between — refresh it so the next attempt uses a fresh number.
+      rd.nextRuleId(newProduct).then((r) => setNextRuleId(r.rule_id)).catch(() => {});
     }
   }
 
@@ -71,14 +89,17 @@ export default function RuleList({ onOpenRule }) {
         <Card title="New rule">
           {createError && <div className="errorbox">{createError}</div>}
           <div className="controls controls--row">
-            <label className="control" style={{ minWidth: 280 }}>
-              <span>Name</span>
-              <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="e.g. USD FX Deviation — High Risk" />
-            </label>
             <label className="control"><span>Product</span>
               <select value={newProduct} onChange={(e) => setNewProduct(e.target.value)}>
                 {productList.map((p) => <option key={p.code} value={p.code}>{p.name}</option>)}
               </select>
+            </label>
+            <label className="control"><span>Rule ID</span>
+              <input className="mono" value={nextRuleId || "…"} disabled readOnly title="Auto-assigned from this product's approved rule count" />
+            </label>
+            <label className="control" style={{ minWidth: 280 }}>
+              <span>Name</span>
+              <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="e.g. USD FX Deviation — High Risk" />
             </label>
             <div className="control">
               <span>Authoring mode</span>
@@ -91,12 +112,13 @@ export default function RuleList({ onOpenRule }) {
                 </button>
               </div>
             </div>
-            <button className="btn" onClick={createRule} disabled={!newName.trim() || !newProduct}>Create</button>
+            <button className="btn" onClick={createRule} disabled={!newName.trim() || !newProduct || !nextRuleId}>Create</button>
             <button className="btn btn--ghost" onClick={() => setCreating(false)}>Cancel</button>
           </div>
           <p className="empty-hint">
-            Either mode produces the same rule — the AI Builder interprets your text into this same visual workflow,
-            which you review and edit before anything runs.
+            The rule ID is assigned automatically from the selected product — OAR-{"{PRODUCT}"}-NNN, counting only
+            that product's approved/published rules. Either authoring mode produces the same rule — the AI Builder
+            interprets your text into this same visual workflow, which you review and edit before anything runs.
           </p>
         </Card>
       )}

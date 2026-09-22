@@ -7,11 +7,34 @@ either takes a product explicitly or resolves it via yaml_service's
 rule_id index."""
 from __future__ import annotations
 
+import re
 import time
 from typing import List, Optional
 
 from app.modules.rule_designer import product_registry, yaml_service
 from app.modules.rule_designer.models import LEGAL_TRANSITIONS, Rule, RuleStatus
+
+# A rule counts toward the next auto-generated id only once it has passed
+# approval — a draft nobody ever finishes (or a rejected one) shouldn't
+# permanently burn a number, matching the product's real approved rule
+# count rather than every scratch attempt.
+_COUNTED_ID_STATUSES = {RuleStatus.APPROVED, RuleStatus.PUBLISHED}
+
+
+def next_rule_id(product: str) -> str:
+    """OAR-{PRODUCT}-NNN, NNN = 1 + the highest existing suffix among this
+    product's APPROVED/PUBLISHED rules matching that pattern (draft-only
+    rules and other naming conventions don't affect the count)."""
+    product = product.upper()
+    pattern = re.compile(rf"^OAR-{re.escape(product)}-(\d+)$", re.IGNORECASE)
+    highest = 0
+    for r in list_rules(product):
+        if r.status not in _COUNTED_ID_STATUSES:
+            continue
+        m = pattern.match(r.rule_id)
+        if m:
+            highest = max(highest, int(m.group(1)))
+    return f"OAR-{product}-{highest + 1:03d}"
 
 
 def list_rules(product: Optional[str] = None) -> List[Rule]:

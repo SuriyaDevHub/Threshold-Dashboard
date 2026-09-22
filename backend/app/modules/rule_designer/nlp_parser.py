@@ -57,10 +57,16 @@ _OP_PATTERNS: List[Tuple[str, Operator]] = [
 
 _OUTCOME_ANCHORS = [
     r"then\s+(?:the\s+system\s+should\s+)?(.+)$",
+    # Object-word forms ("classify the trade as", "mark it as") and the
+    # equally natural bare form ("classify as", "mark as", "flag as") —
+    # both must be covered or a bare-form sentence falls through to no
+    # outcome match at all, leaving its tail stuck in the condition text.
     r"classify\s+(?:the\s+trade|it|them|the\s+trades)\s+as\s+(.+)$",
-    r"mark\s+(?:the\s+trade|it|them)?\s*as\s+(.+)$",
-    r"mark\s+them\s+as\s+(.+)$",
-    r"flag\s+(?:it|them)?\s*as\s+(.+)$",
+    r"classify\s+as\s+(.+)$",
+    r"mark\s+(?:the\s+trade|it|them)\s+as\s+(.+)$",
+    r"mark\s+as\s+(.+)$",
+    r"flag\s+(?:it|them)\s+as\s+(.+)$",
+    r"flag\s+as\s+(.+)$",
 ]
 
 _LOOKUP_HINT_RE = re.compile(
@@ -134,7 +140,13 @@ def _extract_lookup_hint(text: str) -> Tuple[str, Optional[Dict[str, str]]]:
 def _parse_condition_clause(clause: str, columns: List[str], schema: Dict[str, FieldType],
                              derived_fields: List[str], notes: List[str]) -> Optional[Condition]:
     clause = clause.strip()
-    clause = re.sub(r"^(where|for|if)\s+", "", clause, flags=re.IGNORECASE)
+    # Strip everything up to and including a leading "where" even when it's
+    # preceded by filler ("For trades where X is Y", "records where X is Y")
+    # — the field-name match below only looks at what comes right before the
+    # operator, so leftover filler words drag its similarity score down and
+    # a perfectly matchable clause gets reported as unresolved.
+    clause = re.sub(r"^.*?\bwhere\b\s+", "", clause, flags=re.IGNORECASE)
+    clause = re.sub(r"^(for|if|when)\s+", "", clause, flags=re.IGNORECASE)
     clause = re.sub(r"^(the|a|an)\s+", "", clause, flags=re.IGNORECASE)
 
     for pattern, op in _OP_PATTERNS:

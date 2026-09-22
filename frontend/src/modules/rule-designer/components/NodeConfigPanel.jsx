@@ -119,9 +119,10 @@ export default function NodeConfigPanel({ node, fields, meta, onChange, onClose,
           <input className="rd-panel-label" value={node.label} onChange={(e) => set({ label: e.target.value })} />
         </div>
         <div className="rd-panel-head-actions">
-          {node.type !== "input" && (
-            <button className="icon-btn" title="Delete node" onClick={onDelete}><Trash2 size={15} /></button>
-          )}
+          {/* Every node type is optional and deletable, including INPUT —
+              a workflow needs no fixed shape; the engine treats a missing
+              INPUT node as an implicit start (see validation_service.py). */}
+          <button className="icon-btn" title="Delete node" onClick={onDelete}><Trash2 size={15} /></button>
           <button className="icon-btn" title="Close" onClick={onClose}><X size={16} /></button>
         </div>
       </div>

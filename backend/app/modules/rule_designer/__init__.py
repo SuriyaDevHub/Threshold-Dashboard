@@ -206,6 +206,16 @@ async def evaluate_record(code: str, body: EvaluateRecordBody):
     return result.model_dump(mode="json")
 
 
+@router.get("/products/{code}/next-rule-id")
+async def next_rule_id(code: str):
+    """OAR-{PRODUCT}-NNN for the new-rule form — never hand-typed, so ids
+    stay in the same namespace the migrated {product}_validator.py rules
+    already use. NNN counts only APPROVED/PUBLISHED rules for this
+    product, so abandoned drafts don't burn a number."""
+    _require_product(code)
+    return {"rule_id": rule_store.next_rule_id(code)}
+
+
 class ProductFailSafeBody(Actor):
     on_no_match: str = "clear"
     unmatched_reason_code: Optional[str] = None

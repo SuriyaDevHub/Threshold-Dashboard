@@ -18,6 +18,7 @@ export const rd = {
   setProductMigrationStatus: (actor, role, code, migration_status) =>
     post(`/products/${code}/migration-status`, { actor, role, migration_status }),
   evaluateProduct: (code, body) => post(`/products/${code}/evaluate`, body),
+  nextRuleId: (code) => get(`/products/${code}/next-rule-id`),
 
   datasets: () => get("/datasets"),
   datasetSchema: (id) => get(`/datasets/${id}/schema`),
