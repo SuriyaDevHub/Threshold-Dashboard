@@ -13,7 +13,7 @@ import pytest
 
 from app.core import store as dataset_store
 from app.modules.rule_designer import (
-    condition_engine, explain_service, expr_engine, lookup_engine, product_engine, product_registry,
+    calc_ops, condition_engine, explain_service, lookup_engine, product_engine, product_registry,
     reference_store, rule_store, shadow_test_service, validation_service, version_service, workflow_engine,
     yaml_service,
 )
@@ -56,36 +56,79 @@ def _rule(**kw) -> Rule:
 
 
 # --------------------------------------------------------------------------
-# expr_engine — safety + correctness
+# calc_ops — CALCULATE nodes' structured formula tree (field/constant/
+# operation, never free text) — safety + correctness
 # --------------------------------------------------------------------------
 
-def test_expr_engine_basic_arithmetic():
-    expr = expr_engine.parse("Notional * Price")
-    assert expr.evaluate({"Notional": 10, "Price": 2.5}) == 25.0
+def _field(name):
+    return {"kind": "field", "field": name}
 
 
-def test_expr_engine_abs_and_division():
-    expr = expr_engine.parse("abs(booked - ref) / ref * 100")
-    assert round(expr.evaluate({"booked": 98, "ref": 100}), 4) == 2.0
+def _const(value):
+    return {"kind": "constant", "value": value}
 
 
-def test_expr_engine_rejects_unsafe_constructs():
-    for bad in ["__import__('os').system('ls')", "open('x')", "[].__class__",
-                "a.b", "lambda: 1", "1; 2"]:
-        with pytest.raises(expr_engine.ExpressionError):
-            expr_engine.parse(bad)
+def _op(op, operands, precision=None):
+    node = {"kind": "operation", "op": op, "operands": operands}
+    if precision is not None:
+        node["precision"] = precision
+    return node
 
 
-def test_expr_engine_division_by_zero_is_an_expression_error():
-    expr = expr_engine.parse("a / b")
-    with pytest.raises(expr_engine.ExpressionError):
-        expr.evaluate({"a": 1, "b": 0})
+def test_calc_ops_basic_arithmetic():
+    formula = _op("multiply", [_field("Notional"), _field("Price")])
+    assert calc_ops.evaluate_formula(formula, {"Notional": 10, "Price": 2.5}) == 25.0
 
 
-def test_expr_engine_missing_field_raises_expression_error_not_crash():
-    expr = expr_engine.parse("a + b")
-    with pytest.raises(expr_engine.ExpressionError):
-        expr.evaluate({"a": 1})
+def test_calc_ops_nested_abs_and_division():
+    # abs(booked - ref) / ref * 100
+    formula = _op("multiply", [
+        _op("divide", [_op("abs", [_op("subtract", [_field("booked"), _field("ref")])]), _field("ref")]),
+        _const(100),
+    ])
+    assert round(calc_ops.evaluate_formula(formula, {"booked": 98, "ref": 100}), 4) == 2.0
+
+
+def test_calc_ops_division_by_zero_is_a_calc_error():
+    formula = _op("divide", [_field("a"), _field("b")])
+    with pytest.raises(calc_ops.CalcError):
+        calc_ops.evaluate_formula(formula, {"a": 1, "b": 0})
+
+
+def test_calc_ops_missing_field_raises_calc_error_not_crash():
+    formula = _op("add", [_field("a"), _field("b")])
+    with pytest.raises(calc_ops.CalcError):
+        calc_ops.evaluate_formula(formula, {"a": 1})
+
+
+def test_calc_ops_unknown_op_raises_calc_error():
+    with pytest.raises(calc_ops.CalcError):
+        calc_ops.evaluate_formula(_op("frobnicate", [_field("a")]), {"a": 1})
+
+
+def test_calc_ops_round_uses_precision():
+    formula = _op("round", [_field("x")], precision=1)
+    assert calc_ops.evaluate_formula(formula, {"x": 1.2345}) == 1.2
+
+
+def test_calc_ops_validate_formula_catches_arity_errors():
+    # subtract needs >= 2 operands, abs needs exactly 1
+    assert calc_ops.validate_formula(_op("subtract", [_field("a")]))
+    assert calc_ops.validate_formula(_op("abs", [_field("a"), _field("b")]))
+    assert calc_ops.validate_formula(_op("divide", [_field("a"), _field("b")])) == []
+
+
+def test_calc_ops_fields_referenced_recurses_into_nested_operations():
+    formula = _op("multiply", [
+        _op("divide", [_op("abs", [_op("subtract", [_field("booked"), _field("ref")])]), _field("ref")]),
+        _const(100),
+    ])
+    assert calc_ops.fields_referenced(formula) == {"booked", "ref"}
+
+
+def test_calc_ops_describe_formula_renders_readable_text():
+    formula = _op("divide", [_field("Deviation_Pct"), _field("Threshold")])
+    assert calc_ops.describe_formula(formula) == "(Deviation_Pct / Threshold)"
 
 
 # --------------------------------------------------------------------------
@@ -292,7 +335,7 @@ def _demo_workflow(ref_id: str) -> Workflow:
             missing_strategy=MissingLookupStrategy.DEFAULT, default_values={"Threshold": 5.0},
         )),
         WorkflowNode(id="calc", type=NodeType.CALCULATE,
-                     calculate=DeriveSpec(output_field="Ratio", expression="Deviation / Threshold")),
+                     calculate=DeriveSpec(output_field="Ratio", formula=_op("divide", [_field("Deviation"), _field("Threshold")]))),
         WorkflowNode(id="cond", type=NodeType.CONDITION, condition=ConditionGroup(operator="AND", children=[
             Condition(field="Deviation", operator=Operator.GT, value=ValueRef(type="column", name="Threshold")),
         ])),

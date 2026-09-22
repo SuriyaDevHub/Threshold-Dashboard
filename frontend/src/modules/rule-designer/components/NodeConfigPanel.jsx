@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { Plus, Trash2, X } from "lucide-react";
+import CalcBuilder from "./CalcBuilder.jsx";
 import ConditionBuilder, { newGroup } from "./ConditionBuilder.jsx";
 import LookupConfigForm from "./LookupConfigForm.jsx";
 import TransformOpFields, { transformHint } from "./TransformOpFields.jsx";
@@ -147,14 +148,12 @@ export default function NodeConfigPanel({ node, fields, meta, onChange, onClose,
               <input value={node.calculate?.output_field || ""}
                      onChange={(e) => set({ calculate: { ...node.calculate, output_field: e.target.value } })} />
             </label>
-            <label className="control"><span>Expression</span>
-              <input className="mono" placeholder="e.g. Notional * Price, or abs(a - b) / b * 100"
-                     value={node.calculate?.expression || ""}
-                     onChange={(e) => set({ calculate: { ...node.calculate, expression: e.target.value } })} />
-            </label>
-            <p className="empty-hint">
+            <div className="lk-block-title" style={{ marginTop: 4 }}>Formula</div>
+            <CalcBuilder formula={node.calculate?.formula}
+                         onChange={(f) => set({ calculate: { ...node.calculate, formula: f } })}
+                         fields={fields} />
+            <p className="empty-hint" style={{ marginTop: 8 }}>
               Available fields at this stage: {fields.map((f) => f.field).join(", ") || "(none yet)"}.
-              Only +, -, *, /, %, **, comparisons and abs/round/min/max/sqrt/len are allowed — never arbitrary code.
             </p>
           </div>
         )}

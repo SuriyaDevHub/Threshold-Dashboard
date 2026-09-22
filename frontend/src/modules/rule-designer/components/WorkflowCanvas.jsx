@@ -65,7 +65,9 @@ function newNode(type, index) {
       priority_strategy: "first_match", priority_field: null,
     };
   }
-  if (type === "calculate") base.calculate = { output_field: "", expression: "", output_type: "numeric" };
+  if (type === "calculate") {
+    base.calculate = { output_field: "", formula: { kind: "operation", op: "add", operands: [] }, output_type: "numeric" };
+  }
   // Seeded with an explicit Alert=true action — the Outcome tab's Status
   // dropdown shows "Alert" as its default for a node with none yet, but
   // that default must actually be written into `outcomes`, or a rule

@@ -18,7 +18,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from app.modules.rule_designer import condition_engine, expr_engine, lookup_engine
+from app.modules.rule_designer import calc_ops, condition_engine, expr_engine, lookup_engine
 from app.modules.rule_designer.transform_ops import apply_transform_op
 from app.modules.rule_designer.models import (
     DryRunSummary, EnrichmentDiagnostic, NodeType, RecordResult, RecordTraceStep,
@@ -226,19 +226,18 @@ def run_workflow(
 
             if node.type == NodeType.CALCULATE and node.calculate:
                 try:
-                    expr = expr_engine.parse(node.calculate.expression)
-                    value = expr.evaluate(wr)
+                    value = calc_ops.evaluate_formula(node.calculate.formula, wr)
                     wr[node.calculate.output_field] = value
                     trail.append(RecordTraceStep(node_id=node.id, node_type=node.type,
                                                   label=node.label or node.calculate.output_field,
                                                   status="ok",
-                                                  detail=f"{node.calculate.output_field} = {node.calculate.expression} = {value}",
+                                                  detail=f"{node.calculate.output_field} = "
+                                                         f"{calc_ops.describe_formula(node.calculate.formula)} = {value}",
                                                   fields_added={node.calculate.output_field: value}))
-                except expr_engine.ExpressionError as exc:
-                    error_ct_local = str(exc)
+                except calc_ops.CalcError as exc:
                     trail.append(RecordTraceStep(node_id=node.id, node_type=node.type,
                                                   label=node.label or node.calculate.output_field,
-                                                  status="error", detail=error_ct_local))
+                                                  status="error", detail=str(exc)))
                 continue
 
             if node.type == NodeType.CONDITION and node.condition:

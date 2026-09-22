@@ -16,9 +16,10 @@ Design notes:
     value, another column, a derived column, or a lookup-enriched column
     without special-casing each case downstream.
   * No node, condition or derive spec ever carries a code string that gets
-    eval()'d. Expressions (CALCULATE nodes) are parsed into a restricted
-    AST by expr_engine.py and only a small whitelist of operators/
-    functions is ever executed.
+    eval()'d or parsed from free text. A CALCULATE node's `formula` is a
+    small operand tree (see calc_ops.py) built entirely by selecting
+    fields/constants/operations — the same "pick, don't type" shape as a
+    condition or a lookup join key.
 """
 from __future__ import annotations
 
@@ -290,12 +291,14 @@ ConditionGroup.model_rebuild()
 # --------------------------------------------------------------------------
 
 class DeriveSpec(BaseModel):
-    """A calculated column. `expression` is a small arithmetic expression
-    over already-available fields (e.g. "Notional * Price" or
-    "Deviation / Threshold"), parsed into a restricted AST by expr_engine —
-    never eval()'d. `output_type` is inferred but may be pinned."""
+    """A calculated column. `formula` is an operand tree built by
+    selecting fields/constants/operations — see calc_ops.py for its shape
+    and evaluation (e.g. {"kind": "operation", "op": "divide", "operands":
+    [{"kind": "field", "field": "Notional"}, {"kind": "field", "field":
+    "Price"}]} for "Notional / Price"). `output_type` is inferred but may
+    be pinned."""
     output_field: str
-    expression: str
+    formula: Dict[str, Any] = Field(default_factory=dict)
     output_type: FieldType = FieldType.NUMERIC
     description: Optional[str] = None
 

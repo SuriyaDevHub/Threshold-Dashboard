@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import List
 
-from app.modules.rule_designer import reference_store
+from app.modules.rule_designer import calc_ops, reference_store
 from app.modules.rule_designer.models import Condition, ConditionGroup, NodeType, Rule, ValueRef
 
 _OP_TEXT = {
@@ -78,7 +78,8 @@ def generate_explanation(rule: Rule) -> str:
             )
             step_no += 1
         elif node.type == NodeType.CALCULATE and node.calculate:
-            steps.append(f"{step_no}. Calculate {node.calculate.output_field} = {node.calculate.expression}.")
+            steps.append(f"{step_no}. Calculate {node.calculate.output_field} = "
+                         f"{calc_ops.describe_formula(node.calculate.formula)}.")
             step_no += 1
         elif node.type in (NodeType.FILTER, NodeType.GROUP) and (node.filter or node.condition):
             steps.append(f"{step_no}. Keep only records where {_condition_text(node.filter or node.condition)}.")

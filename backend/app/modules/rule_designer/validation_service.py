@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Set
 
-from app.modules.rule_designer import expr_engine, reference_store, workflow_engine
+from app.modules.rule_designer import calc_ops, reference_store, workflow_engine
 from app.modules.rule_designer.models import (
     Condition, ConditionGroup, FieldType, NodeType, OPERATORS_BY_TYPE, Rule, ValueRef, Workflow,
 )
@@ -195,14 +195,13 @@ def validate_workflow(rule: Rule, dataset_schema: Optional[Dict[str, FieldType]]
                 output_seen[fm.output_field] = label
 
         elif node.type == NodeType.CALCULATE and node.calculate:
-            try:
-                expr = expr_engine.parse(node.calculate.expression)
-                if base_fields:
-                    missing = expr.fields_referenced - available
-                    if missing:
-                        result.errors.append(f"{label}: expression references unavailable field(s) {sorted(missing)}")
-            except expr_engine.ExpressionError as exc:
-                result.errors.append(f"{label}: invalid expression — {exc}")
+            formula_errors = calc_ops.validate_formula(node.calculate.formula)
+            for err in formula_errors:
+                result.errors.append(f"{label}: {err}")
+            if not formula_errors and base_fields:
+                missing = calc_ops.fields_referenced(node.calculate.formula) - available
+                if missing:
+                    result.errors.append(f"{label}: formula references unavailable field(s) {sorted(missing)}")
             if node.calculate.output_field in output_seen:
                 result.errors.append(
                     f"{label}: output field '{node.calculate.output_field}' duplicates output from "

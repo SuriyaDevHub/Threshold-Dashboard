@@ -37,7 +37,27 @@ rules:
           lookup:
           calculate:
             output_field: Deviation_Pct
-            expression: abs(booked_price - reference_price) / reference_price * 100
+            formula:
+              kind: operation
+              op: multiply
+              operands:
+                - kind: operation
+                  op: divide
+                  operands:
+                    - kind: operation
+                      op: abs
+                      operands:
+                        - kind: operation
+                          op: subtract
+                          operands:
+                            - kind: field
+                              field: booked_price
+                            - kind: field
+                              field: reference_price
+                    - kind: field
+                      field: reference_price
+                - kind: constant
+                  value: 100
             output_type: numeric
             description: Booked vs. reference price deviation, as a percentage.
           condition:
@@ -96,7 +116,14 @@ rules:
           lookup:
           calculate:
             output_field: Adjusted_Deviation
-            expression: Deviation_Pct / Threshold
+            formula:
+              kind: operation
+              op: divide
+              operands:
+                - kind: field
+                  field: Deviation_Pct
+                - kind: field
+                  field: Threshold
             output_type: numeric
             description:
           condition:
