@@ -673,6 +673,48 @@ def test_structural_diff_fields_catches_a_logic_change():
     assert "conflict_handling" in rule_store.structural_diff_fields(before, after)
 
 
+def test_structural_diff_fields_priority_only_edit_on_self_group_rule():
+    # Regression: structural_diff_fields does a full model_dump JSON diff on
+    # the whole Rule, treating `workflow` as one opaque blob — it was never
+    # node-type-specific, so a rule built from the newer primitives (self-
+    # group LOOKUP with an aggregate, multi-step CALCULATE) needs no special
+    # handling here. Confirms that stays true as those primitives get used
+    # by the next round of product migrations.
+    lookup = LookupConfig(
+        lookup_type=LookupType.SELF_GROUP, group_by_field="structure_id",
+        fields=[
+            LookupFieldMap(source_column="pnl", output_field="total_pnl", aggregate="sum"),
+            LookupFieldMap(source_column="threshold", output_field="max_threshold", aggregate="max"),
+        ],
+    )
+    workflow = Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup),
+            WorkflowNode(id="abs", type=NodeType.CALCULATE, calculate=DeriveSpec(
+                output_field="pnl_abs",
+                formula={"kind": "operation", "op": "abs", "operands": [{"kind": "field", "field": "total_pnl"}]})),
+            WorkflowNode(id="cond", type=NodeType.CONDITION, condition=ConditionGroup(operator="AND", children=[
+                Condition(field="pnl_abs", operator=Operator.LTE, value=ValueRef(type="column", name="max_threshold")),
+            ])),
+            WorkflowNode(id="out", type=NodeType.OUTCOME, outcomes=[
+                OutcomeAction(field="Reason", value=ValueRef(type="static", value="SG-FT")),
+            ]),
+        ],
+        edges=[WorkflowEdge(source="in", target="lk"), WorkflowEdge(source="lk", target="abs"),
+               WorkflowEdge(source="abs", target="cond"), WorkflowEdge(source="cond", target="out")],
+    )
+    before = _rule(rule_id="FTSG1", name="FTSG1", priority=50, workflow=workflow)
+    after = before.model_copy(deep=True)
+    after.priority = 10  # priority-only edit
+    assert rule_store.structural_diff_fields(before, after) == set()
+
+    # A real edit inside the self-group LOOKUP's aggregate is still caught.
+    after2 = before.model_copy(deep=True)
+    after2.workflow.nodes[1].lookup.fields[1].aggregate = "min"
+    assert "workflow" in rule_store.structural_diff_fields(before, after2)
+
+
 def test_fast_track_submit_rejected_without_eligibility():
     rule = _rule(rule_id="FT3", name="FT3", status=RuleStatus.DRAFT, fast_track_eligible=False)
     rule_store.upsert_rule(rule, "tester")

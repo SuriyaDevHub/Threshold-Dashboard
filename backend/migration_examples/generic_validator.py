@@ -66,6 +66,10 @@ import requests
 RULE_ENGINE_BASE_URL = os.environ.get("RULE_ENGINE_BASE_URL", "http://localhost:8000/api/modules/rule-designer")
 RULE_ENGINE_ACTOR = os.environ.get("RULE_ENGINE_ACTOR", "generic_validator")
 RULE_ENGINE_TIMEOUT_S = float(os.environ.get("RULE_ENGINE_TIMEOUT_S", "5"))
+# A whole-dataset pass (validate_dataset) reads and evaluates far more rows
+# than a single validate_trade() call — separate, longer timeout so a big
+# batch doesn't get cut off at the per-trade default.
+RULE_ENGINE_DATASET_TIMEOUT_S = float(os.environ.get("RULE_ENGINE_DATASET_TIMEOUT_S", "120"))
 
 log = logging.getLogger("generic_validator.parallel")
 
@@ -145,6 +149,88 @@ class GenericValidator:
                         self.product, exc)
             self._group_key_fields = []
         return self._group_key_fields
+
+    def validate_dataset(self, dataset_id: str, record_id_field: Optional[str] = None) -> Dict[str, "ValidationResult"]:
+        """The fast path for a batch that's already a dataset — e.g. one
+        pulled via Data Fetch — instead of looping validate_trade() (one
+        HTTP call per row) over it. Makes ONE call to
+        product_engine.evaluate_product(), which evaluates every active
+        rule once across the whole dataset in-process, rather than N calls
+        each re-running every rule for a single row; for self-group LOOKUP
+        rules (grouping by structure/dealref, etc.) this also groups
+        correctly over the entire dataset in one pass, with none of
+        validate_trade()'s per-call context_rows plumbing needed at all.
+
+        Returns {record_id: ValidationResult}, one entry per dataset row
+        (keys are strings — the record_id_field's value, or the row index
+        when record_id_field is omitted, matching how the dataset's own
+        rows are ordered).
+
+        Shadow mode still applies, just computed differently: if
+        legacy_validate was supplied, it's called once per row — a local
+        Python call, not a network round trip, so batching it doesn't cost
+        what batching calls to the NEW engine did — purely to log AGREE/
+        DISAGREE and to decide which result each row actually returns,
+        the same shadow-vs-cutover rule validate_trade() uses."""
+        rows = self._fetch_dataset_rows(dataset_id)
+        try:
+            resp = requests.post(
+                f"{RULE_ENGINE_BASE_URL}/products/{self.product}/evaluate",
+                json={"actor": RULE_ENGINE_ACTOR, "role": "USER", "dataset_id": dataset_id,
+                      "record_id_field": record_id_field, "record_sample_cap": len(rows)},
+                timeout=RULE_ENGINE_DATASET_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise GenericValidatorEngineError(f"rule engine dataset evaluation failed for {self.product}: {exc}") from exc
+
+        # --- in-process alternative (preferred where available — see
+        # _fetch_dataset_rows's own in-process note below) ---
+        # from app.modules.rule_designer import product_engine
+        # result = product_engine.evaluate_product(self.product, dataset_id, RULE_ENGINE_ACTOR,
+        #                                           record_id_field, record_sample_cap=len(rows))
+        # records_json = [r.model_dump(mode="json") for r in result.records]  # then map same as below
+
+        new_by_id: Dict[str, ValidationResult] = {}
+        for rec in resp.json().get("records", []):
+            outcome = rec.get("outcome") or {}
+            status = "ALERT" if (rec.get("matched") and outcome.get("Alert")) else "CLEAR"
+            new_by_id[str(rec.get("record_id"))] = ValidationResult(
+                status=status, rule_id=rec.get("matched_rule_id"),
+                reason_code=outcome.get("Reason"), commentary=outcome.get("Commentary"),
+            )
+
+        if self._legacy_validate is None:
+            if self.mode == "shadow":
+                log.warning(
+                    "GenericValidator(%s).validate_dataset: shadow mode with no legacy_validate — "
+                    "nothing to compare against, returning the new engine's results.", self.product,
+                )
+            return new_by_id
+
+        results: Dict[str, ValidationResult] = {}
+        for i, row in enumerate(rows):
+            rid = str(row.get(record_id_field)) if record_id_field else str(i)
+            new_result = new_by_id.get(rid)
+            legacy_result = self._legacy_validate(row)
+            self._log_comparison(row, new_result, None, legacy_result)
+            results[rid] = new_result if (self.mode == "cutover" and new_result is not None) else legacy_result
+        return results
+
+    def _fetch_dataset_rows(self, dataset_id: str) -> List[dict]:
+        try:
+            resp = requests.get(f"{RULE_ENGINE_BASE_URL}/datasets/{dataset_id}/preview",
+                                 params={"limit": 10_000_000}, timeout=RULE_ENGINE_DATASET_TIMEOUT_S)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise GenericValidatorEngineError(f"could not read dataset {dataset_id}: {exc}") from exc
+        return resp.json().get("rows", [])
+
+        # --- in-process alternative (same Python env as Threshold-Dashboard —
+        # the natural fit, since tcfc_omrc's exception_analysis/data_fetch/
+        # rule_designer all run inside the same PyInstaller-packaged process) ---
+        # from app.core import store as dataset_store
+        # return dataset_store.get_rows(dataset_id) or []
 
     def validate_batch(self, trades: List[dict]) -> List["ValidationResult"]:
         """Convenience entry point for a whole day's trade file: groups by

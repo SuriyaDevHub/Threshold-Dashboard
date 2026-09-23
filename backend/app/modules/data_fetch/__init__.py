@@ -20,6 +20,7 @@ from app.core.data_filters import (
     PRODUCT_TYPES,
     SOURCE_SYSTEMS,
     filter_config,
+    live_product_types,
 )
 
 META = {
@@ -35,7 +36,7 @@ PREVIEW = 200  # rows returned inline; full set stays in the store
 
 
 class FetchFilters(BaseModel):
-    product_type: str = Field(default=PRODUCT_TYPES[0])
+    product_type: str = Field(default_factory=lambda: (live_product_types() or PRODUCT_TYPES)[0])
     legal_entities: List[str] = Field(default_factory=lambda: [LEGAL_ENTITIES[0]])
     source_systems: List[str] = Field(default_factory=lambda: [SOURCE_SYSTEMS[0]])
     start_date: str = Field(default="2024-01-01")

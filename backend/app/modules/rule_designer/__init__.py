@@ -174,15 +174,24 @@ async def set_product_migration_status(code: str, body: ProductMigrationBody):
 class EvaluateProductBody(Actor):
     dataset_id: str
     record_id_field: Optional[str] = None
+    record_sample_cap: Optional[int] = None
 
 
 @router.post("/products/{code}/evaluate")
 async def evaluate_product(code: str, body: EvaluateProductBody):
     """The generic_validator entry point: every active rule for this
-    product, evaluated together, fail-safe if disabled or empty."""
+    product, evaluated together, fail-safe if disabled or empty.
+    `record_sample_cap` defaults to evaluate_product()'s own 500 (a UI
+    preview-sized default) when omitted — a caller validating a full batch
+    (e.g. GenericValidator.validate_dataset()) should pass the dataset's
+    actual row count so every record gets an individual result instead of
+    being silently dropped past the default cap."""
     _require(body, "dry_run")
+    kwargs = {}
+    if body.record_sample_cap is not None:
+        kwargs["record_sample_cap"] = body.record_sample_cap
     try:
-        result = product_engine.evaluate_product(code, body.dataset_id, body.actor, body.record_id_field)
+        result = product_engine.evaluate_product(code, body.dataset_id, body.actor, body.record_id_field, **kwargs)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return result.model_dump(mode="json")
