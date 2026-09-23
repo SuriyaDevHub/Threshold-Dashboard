@@ -137,6 +137,12 @@ class LookupType(str, Enum):
     COMPOSITE = "composite"
     RANGE = "range"
     DATE = "date"
+    # Groups the INPUT dataset itself by `group_by_field` (rather than
+    # joining against an uploaded reference file), picks one representative
+    # row per group via `selector`, and enriches every row in that group
+    # with the representative's fields — e.g. broadcasting a deal's parent
+    # leg's PnL/threshold onto every child row sharing its deal reference.
+    SELF_GROUP = "self_group"
 
 
 class MissingLookupStrategy(str, Enum):
@@ -325,8 +331,17 @@ class LookupFieldMap(BaseModel):
 
 class LookupConfig(BaseModel):
     lookup_type: LookupType = LookupType.EXACT
-    reference_file_id: str
+    # Required for exact/composite/range/date; unused (None) for self_group,
+    # which reads the input dataset itself instead of an uploaded file.
+    reference_file_id: Optional[str] = None
     reference_version: Optional[int] = None  # pinned version; None = latest at publish time
+
+    # self_group only: which field groups input rows together (e.g. a deal
+    # reference or exception id), and which row within each group is the
+    # representative one to enrich every group member from (e.g. "the row
+    # flagged as parent"). None/empty selector = the group's first row.
+    group_by_field: Optional[str] = None
+    selector: Optional[ConditionGroup] = None
 
     # exact / composite: list of (source_field, reference_field) join pairs.
     # Each entry may also carry an optional "transform" ({op, ...params},

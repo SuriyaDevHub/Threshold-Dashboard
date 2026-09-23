@@ -89,7 +89,31 @@ def validate_dataset(rows: List[dict], required_columns: List[str]) -> Validatio
     return result
 
 
-def validate_lookup_config(node_label: str, lookup_cfg, result: ValidationResult) -> None:
+def validate_lookup_config(node_label: str, lookup_cfg, result: ValidationResult,
+                            available: Optional[Set[str]] = None) -> None:
+    if lookup_cfg.lookup_type.value == "self_group":
+        # No reference file to check — this mode groups the input dataset
+        # itself. Its join key IS group_by_field (auto-derived at run
+        # time), so there are no user-configured join_keys to validate
+        # here; "fields to enrich with" are checked against the fields
+        # available at this pipeline stage instead of a reference file's
+        # columns, since a representative row shares the source schema.
+        if not lookup_cfg.group_by_field:
+            result.errors.append(f"{node_label}: self-group lookup has no group-by field defined")
+        if available is not None:
+            for fm in lookup_cfg.fields:
+                if fm.source_column not in available:
+                    result.errors.append(f"{node_label}: field '{fm.source_column}' is not available to enrich with")
+        if lookup_cfg.missing_strategy.value == "default":
+            missing = [fm.output_field for fm in lookup_cfg.fields if fm.output_field not in lookup_cfg.default_values]
+            if missing:
+                result.warnings.append(f"{node_label}: no default value configured for {missing}")
+        if lookup_cfg.missing_strategy.value == "flag" and not lookup_cfg.flag_field:
+            result.errors.append(f"{node_label}: missing_strategy=flag requires flag_field")
+        if lookup_cfg.missing_strategy.value == "fallback" and not lookup_cfg.fallback_reference_file_id:
+            result.errors.append(f"{node_label}: missing_strategy=fallback requires fallback_reference_file_id")
+        return
+
     ref = reference_store.get_file(lookup_cfg.reference_file_id)
     if ref is None or not ref.versions:
         result.errors.append(f"{node_label}: reference file '{lookup_cfg.reference_file_id}' does not exist")
@@ -186,7 +210,11 @@ def validate_workflow(rule: Rule, dataset_schema: Optional[Dict[str, FieldType]]
                 result.errors.append(f"{label}: source field '{node.lookup.range_field}' not available at this stage")
             if node.lookup.date_field and base_fields and node.lookup.date_field not in available:
                 result.errors.append(f"{label}: source field '{node.lookup.date_field}' not available at this stage")
-            validate_lookup_config(label, node.lookup, result)
+            if node.lookup.group_by_field and base_fields and node.lookup.group_by_field not in available:
+                result.errors.append(f"{label}: group-by field '{node.lookup.group_by_field}' not available at this stage")
+            if node.lookup.selector and base_fields:
+                _validate_condition_tree(node.lookup.selector, available, f"{label} selector", result)
+            validate_lookup_config(label, node.lookup, result, available=available)
             for fm in node.lookup.fields:
                 if fm.output_field in output_seen:
                     result.errors.append(

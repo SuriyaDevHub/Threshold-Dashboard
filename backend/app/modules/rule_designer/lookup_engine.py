@@ -65,7 +65,7 @@ class LookupIndex:
 
     @property
     def is_keyed(self) -> bool:
-        return self.config.lookup_type in (LookupType.EXACT, LookupType.COMPOSITE)
+        return self.config.lookup_type in (LookupType.EXACT, LookupType.COMPOSITE, LookupType.SELF_GROUP)
 
 
 def build_index(reference_rows: List[dict], config: LookupConfig) -> LookupIndex:
@@ -101,7 +101,7 @@ def _select_by_priority(candidates: List[dict], config: LookupConfig) -> dict:
 def lookup_one(record: dict, idx: LookupIndex) -> Tuple[bool, List[dict], str]:
     """Return (matched, candidate_rows, reason_if_no_match)."""
     config = idx.config
-    if config.lookup_type in (LookupType.EXACT, LookupType.COMPOSITE):
+    if config.lookup_type in (LookupType.EXACT, LookupType.COMPOSITE, LookupType.SELF_GROUP):
         src_cols = [jk["source"] for jk in config.join_keys]
         k = _key_tuple(record, config.join_keys, "source")
         candidates = idx.exact_index.get(k, [])

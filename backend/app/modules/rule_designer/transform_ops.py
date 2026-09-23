@@ -1,5 +1,5 @@
 """Shared value-transform vocabulary — round/upper/lower/trim/substring/
-split/replace/cast_numeric/cast_string.
+split/replace/cast_numeric/cast_string/value_map.
 
 Factored out of workflow_engine.py so it has exactly one implementation,
 used by both:
@@ -53,4 +53,16 @@ def apply_transform_op(op: Optional[str], val: Any, cfg: Dict[str, Any]) -> Any:
         return float(str(val).replace(",", ""))
     if op == "cast_string":
         return str(val)
+    if op == "value_map":
+        # Free-text -> code normalization: "LONDON (LN)" -> "LN". First
+        # matching rule wins (checked in configured order), falling back to
+        # `default` when given, else the original value — never raises, so
+        # an unmapped value degrades to a no-op rather than breaking the
+        # pipeline. cfg["rules"] is [{"contains": str, "value": str}, ...].
+        s = str(val).upper()
+        for rule in cfg.get("rules") or []:
+            needle = str(rule.get("contains") or "").upper()
+            if needle and needle in s:
+                return rule.get("value")
+        return cfg.get("default") or val
     return val

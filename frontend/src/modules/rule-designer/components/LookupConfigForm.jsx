@@ -1,15 +1,20 @@
 import { useEffect, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { rd } from "../api.js";
+import ConditionBuilder, { newGroup } from "./ConditionBuilder.jsx";
 import TransformOpFields, { transformHint } from "./TransformOpFields.jsx";
 
 // Visual lookup/enrichment designer (spec §11-15, §29): exact / composite /
-// range / date lookups, join type, missing-match handling, duplicate-key
-// resolution strategy.
+// range / date lookups against an uploaded reference file, plus self_group
+// (spec extension) which groups the INPUT dataset by a field and broadcasts
+// one representative row's values to every row sharing that group key —
+// no reference file involved. Join type, missing-match handling and
+// duplicate-key resolution strategy round out every mode.
 
-export default function LookupConfigForm({ lookup, onChange, sourceFields }) {
+export default function LookupConfigForm({ lookup, onChange, sourceFields, meta }) {
   const [refFiles, setRefFiles] = useState([]);
   const [refDetail, setRefDetail] = useState(null);
+  const isSelfGroup = lookup.lookup_type === "self_group";
 
   useEffect(() => { rd.referenceFiles().then((d) => setRefFiles(d.files || [])); }, []);
   useEffect(() => {
@@ -21,6 +26,10 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields }) {
   }, [lookup.reference_file_id]);
 
   const refColumns = refDetail?.versions?.[refDetail.versions.length - 1]?.columns || [];
+  // self_group has no reference file — a representative row shares the
+  // source dataset's own schema, so "fields to enrich with" and "priority
+  // field" pick from sourceFields instead of a reference file's columns.
+  const enrichColumns = isSelfGroup ? sourceFields.map((f) => f.field) : refColumns;
 
   function set(patch) { onChange({ ...lookup, ...patch }); }
 
@@ -35,7 +44,7 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields }) {
   }
 
   function addFieldMap() {
-    set({ fields: [...(lookup.fields || []), { source_column: refColumns[0] || "", output_field: "" }] });
+    set({ fields: [...(lookup.fields || []), { source_column: enrichColumns[0] || "", output_field: "" }] });
   }
   function updateFieldMap(i, patch) {
     const fm = [...(lookup.fields || [])]; fm[i] = { ...fm[i], ...patch }; set({ fields: fm });
@@ -53,14 +62,17 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields }) {
             <option value="composite">Composite key</option>
             <option value="range">Range</option>
             <option value="date">Date-based</option>
+            <option value="self_group">Self-group (within dataset)</option>
           </select>
         </label>
-        <label className="control"><span>Reference file</span>
-          <select value={lookup.reference_file_id} onChange={(e) => set({ reference_file_id: e.target.value })}>
-            <option value="" disabled>select…</option>
-            {refFiles.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
-          </select>
-        </label>
+        {!isSelfGroup && (
+          <label className="control"><span>Reference file</span>
+            <select value={lookup.reference_file_id || ""} onChange={(e) => set({ reference_file_id: e.target.value })}>
+              <option value="" disabled>select…</option>
+              {refFiles.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+            </select>
+          </label>
+        )}
         <label className="control"><span>Join type</span>
           <select value={lookup.join_type} onChange={(e) => set({ join_type: e.target.value })}>
             <option value="left">LEFT (default)</option>
@@ -70,6 +82,28 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields }) {
           </select>
         </label>
       </div>
+
+      {isSelfGroup && (
+        <div className="lk-block">
+          <div className="lk-block-title">Group by</div>
+          <div className="lk-row">
+            <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>group rows where</span>
+            <select value={lookup.group_by_field || ""} onChange={(e) => set({ group_by_field: e.target.value })}>
+              <option value="" disabled>field…</option>
+              {sourceFields.map((f) => <option key={f.field} value={f.field}>{f.field}</option>)}
+            </select>
+            <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>is the same</span>
+          </div>
+          <div className="lk-block-title" style={{ marginTop: 10 }}>Representative row (optional)</div>
+          <ConditionBuilder group={lookup.selector || newGroup()} onChange={(g) => set({ selector: g })}
+                            fields={sourceFields} meta={meta} />
+          <p className="empty-hint" style={{ marginTop: 6 }}>
+            Within each group, the first row matching this condition is the one whose fields get broadcast to every
+            row sharing the same {lookup.group_by_field || "group"} value — e.g. the row flagged as the parent leg.
+            Leave empty to just use each group's first row.
+          </p>
+        </div>
+      )}
 
       {(lookup.lookup_type === "exact" || lookup.lookup_type === "composite") && (
         <div className="lk-block">
@@ -156,7 +190,7 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields }) {
           <div key={i} style={{ border: "1px solid var(--line)", borderRadius: 7, padding: 8, marginBottom: 8 }}>
             <div className="lk-row" style={{ marginBottom: 0 }}>
               <select value={fm.source_column} onChange={(e) => updateFieldMap(i, { source_column: e.target.value })}>
-                {refColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+                {enrichColumns.map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
               <span className="mono">→</span>
               <input placeholder="output field name" value={fm.output_field}
@@ -206,6 +240,7 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields }) {
         )}
       </div>
 
+      {!isSelfGroup && (
       <div className="lk-block">
         <div className="lk-block-title">If the reference key has duplicates</div>
         <div className="lk-row">
@@ -219,11 +254,12 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields }) {
           {lookup.priority_strategy !== "first_match" && (
             <select value={lookup.priority_field || ""} onChange={(e) => set({ priority_field: e.target.value })}>
               <option value="">priority field…</option>
-              {refColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+              {enrichColumns.map((c) => <option key={c} value={c}>{c}</option>)}
             </select>
           )}
         </div>
       </div>
+      )}
     </div>
   );
 }

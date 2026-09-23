@@ -139,7 +139,7 @@ export default function NodeConfigPanel({ node, fields, meta, onChange, onClose,
         )}
 
         {(node.type === "lookup" || node.type === "enrichment") && (
-          <LookupConfigForm lookup={node.lookup} onChange={(l) => set({ lookup: l })} sourceFields={fields} />
+          <LookupConfigForm lookup={node.lookup} onChange={(l) => set({ lookup: l })} sourceFields={fields} meta={meta} />
         )}
 
         {node.type === "calculate" && (

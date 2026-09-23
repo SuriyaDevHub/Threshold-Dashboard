@@ -348,6 +348,64 @@ def _demo_workflow(ref_id: str) -> Workflow:
     return Workflow(nodes=nodes, edges=edges)
 
 
+def _self_group_workflow(group_by_field: str, selector=None, missing_strategy=MissingLookupStrategy.CONTINUE_NULL,
+                          default_values=None) -> Workflow:
+    lookup = LookupConfig(
+        lookup_type=LookupType.SELF_GROUP, group_by_field=group_by_field, selector=selector,
+        fields=[LookupFieldMap(source_column="pnl", output_field="parent_pnl"),
+                LookupFieldMap(source_column="threshold", output_field="parent_threshold")],
+        missing_strategy=missing_strategy, default_values=default_values or {},
+    )
+    nodes = [WorkflowNode(id="in", type=NodeType.INPUT), WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup)]
+    return Workflow(nodes=nodes, edges=[WorkflowEdge(source="in", target="lk")])
+
+
+def test_self_group_lookup_broadcasts_parent_row_to_siblings():
+    # Mirrors the legacy FxoValidator's LN Murex/Margin grouping: rows
+    # sharing a deal reference, one flagged as parent, whose PnL/threshold
+    # should be visible on every row in the group — not just the parent's
+    # own record — so downstream CALCULATE/CONDITION nodes can evaluate
+    # against it per row.
+    selector = ConditionGroup(operator="AND", children=[
+        Condition(field="is_parent", operator=Operator.EQ, value=ValueRef(type="static", value="Y")),
+    ])
+    wf = _self_group_workflow("dealref", selector=selector)
+    rows = [
+        {"trade_id": 1, "dealref": "D1", "is_parent": "Y", "pnl": 1000.0, "threshold": 500.0},
+        {"trade_id": 2, "dealref": "D1", "is_parent": "N", "pnl": None, "threshold": None},
+        {"trade_id": 3, "dealref": "D1", "is_parent": "N", "pnl": None, "threshold": None},
+        {"trade_id": 4, "dealref": "D2", "is_parent": "N", "pnl": 10.0, "threshold": 1.0},  # no parent in D2
+    ]
+    results, diagnostics, summary = workflow_engine.run_workflow(wf, rows, reference_store.reference_loader,
+                                                                   record_id_field="trade_id")
+    by_id = {r.record_id: r for r in results}
+    assert by_id[1].final_record["parent_pnl"] == 1000.0
+    assert by_id[2].final_record["parent_pnl"] == 1000.0  # broadcast from D1's parent
+    assert by_id[3].final_record["parent_threshold"] == 500.0
+    assert by_id[4].final_record["parent_pnl"] is None  # D2 has no row satisfying the selector
+    assert diagnostics[0].successful_lookups == 3
+    assert diagnostics[0].lookup_failures == 1
+
+
+def test_self_group_lookup_falls_back_to_first_row_without_a_selector():
+    wf = _self_group_workflow("dealref", selector=None)
+    rows = [
+        {"trade_id": 1, "dealref": "D1", "pnl": 42.0, "threshold": 7.0},
+        {"trade_id": 2, "dealref": "D1", "pnl": 99.0, "threshold": 8.0},
+    ]
+    results, _, _ = workflow_engine.run_workflow(wf, rows, reference_store.reference_loader, record_id_field="trade_id")
+    by_id = {r.record_id: r for r in results}
+    assert by_id[2].final_record["parent_pnl"] == 42.0  # first row of the group, not its own
+
+
+def test_self_group_lookup_missing_strategy_default_when_group_key_absent():
+    wf = _self_group_workflow("dealref", missing_strategy=MissingLookupStrategy.DEFAULT,
+                               default_values={"parent_pnl": 0.0, "parent_threshold": 0.0})
+    rows = [{"trade_id": 1, "dealref": "", "pnl": 5.0, "threshold": 1.0}]  # blank group key -> excluded from grouping
+    results, _, _ = workflow_engine.run_workflow(wf, rows, reference_store.reference_loader, record_id_field="trade_id")
+    assert results[0].final_record["parent_pnl"] == 0.0
+
+
 def test_workflow_engine_end_to_end(tmp_path):
     ref = reference_store.upload_version(
         "ccy_ref", [{"Currency": "USD", "Threshold": 2.0}, {"Currency": "EUR", "Threshold": 3.0}], "tester")
@@ -778,6 +836,31 @@ def test_round_transform_precision_falls_back_when_blank():
     node = _transform_node(op="round", field="pct", output_field="pct", precision="")
     status, fields = workflow_engine._apply_transform(node, {"pct": 2.34567})
     assert status == "ok" and fields == {"pct": 2.35}
+
+
+def test_value_map_transform_first_matching_rule_wins():
+    node = _transform_node(op="value_map", field="region_desc", output_field="region_code", rules=[
+        {"contains": "LONDON", "value": "LN"},
+        {"contains": "JAPAN", "value": "JP"},
+    ], default="UNKNOWN")
+    status, fields = workflow_engine._apply_transform(node, {"region_desc": "London (LN) Branch"})
+    assert status == "ok" and fields == {"region_code": "LN"}
+
+
+def test_value_map_transform_falls_back_to_default_when_no_rule_matches():
+    node = _transform_node(op="value_map", field="region_desc", output_field="region_code", rules=[
+        {"contains": "LONDON", "value": "LN"},
+    ], default="UNKNOWN")
+    status, fields = workflow_engine._apply_transform(node, {"region_desc": "Sydney office"})
+    assert status == "ok" and fields == {"region_code": "UNKNOWN"}
+
+
+def test_value_map_transform_without_default_returns_original_value():
+    node = _transform_node(op="value_map", field="region_desc", output_field="region_code", rules=[
+        {"contains": "LONDON", "value": "LN"},
+    ])
+    status, fields = workflow_engine._apply_transform(node, {"region_desc": "Sydney office"})
+    assert status == "ok" and fields == {"region_code": "Sydney office"}
 
 
 # --------------------------------------------------------------------------

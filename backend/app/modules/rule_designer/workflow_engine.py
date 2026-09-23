@@ -21,7 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from app.modules.rule_designer import calc_ops, condition_engine, expr_engine, lookup_engine
 from app.modules.rule_designer.transform_ops import apply_transform_op
 from app.modules.rule_designer.models import (
-    DryRunSummary, EnrichmentDiagnostic, NodeType, RecordResult, RecordTraceStep,
+    DryRunSummary, EnrichmentDiagnostic, LookupType, NodeType, RecordResult, RecordTraceStep,
     ValueRef, Workflow, WorkflowNode,
 )
 
@@ -90,13 +90,58 @@ class _NodeIndex:
     fallback_idx: Optional[lookup_engine.LookupIndex] = None
 
 
-def _build_indexes(workflow: Workflow, reference_loader: ReferenceLoader) -> Dict[str, _NodeIndex]:
+def _self_group_reference_rows(input_rows: List[dict], cfg) -> Tuple[List[dict], Any]:
+    """Build a self_group LOOKUP's "reference rows" by grouping the input
+    dataset itself by `cfg.group_by_field` and picking one representative
+    row per group via `cfg.selector` (the first row satisfying it; the
+    group's first row if no selector is set or nothing satisfies it).
+    Grouping always happens over the raw input rows the dry-run/dataset
+    started with, not any upstream CALCULATE/TRANSFORM output within this
+    same run — matching how a reference-file lookup's index is also built
+    once, up front, independent of per-record pipeline state.
+
+    Returns (representative_rows, effective_config) — effective_config is
+    `cfg` with `join_keys` auto-derived from `group_by_field` (self_group
+    has no user-configured join_keys; the group key doubles as the join
+    key on both sides, since a representative row and the rows it enriches
+    share the exact same schema)."""
+    groups: Dict[Any, List[dict]] = {}
+    field_name = cfg.group_by_field
+    for row in input_rows:
+        if not field_name:
+            continue
+        key = row.get(field_name)
+        if key is None or key == "":
+            continue
+        groups.setdefault(key, []).append(row)
+
+    representatives = []
+    for rows_in_group in groups.values():
+        rep = rows_in_group[0]
+        if cfg.selector is not None:
+            rep = next(
+                (r for r in rows_in_group if condition_engine.eval_tree(cfg.selector, r).result),
+                None,
+            )
+        if rep is not None:
+            representatives.append(rep)
+
+    effective_cfg = cfg.model_copy(update={
+        "join_keys": [{"source": field_name, "reference": field_name}] if field_name else [],
+    })
+    return representatives, effective_cfg
+
+
+def _build_indexes(workflow: Workflow, rows: List[dict], reference_loader: ReferenceLoader) -> Dict[str, _NodeIndex]:
     indexes: Dict[str, _NodeIndex] = {}
     for node in workflow.nodes:
         if node.type in (NodeType.LOOKUP, NodeType.ENRICHMENT) and node.lookup:
             cfg = node.lookup
-            rows = reference_loader(cfg.reference_file_id, cfg.reference_version) or []
-            idx = lookup_engine.build_index(rows, cfg)
+            if cfg.lookup_type == LookupType.SELF_GROUP:
+                ref_rows, cfg = _self_group_reference_rows(rows, cfg)
+            else:
+                ref_rows = reference_loader(cfg.reference_file_id, cfg.reference_version) or []
+            idx = lookup_engine.build_index(ref_rows, cfg)
             fb_idx = None
             if cfg.fallback_reference_file_id:
                 fb_rows = reference_loader(cfg.fallback_reference_file_id, None) or []
@@ -155,7 +200,7 @@ def run_workflow(
     # caller can still pass an explicit cap for an unusually large pull.
     cap = explain_sample_cap if explain_sample_cap is not None else len(rows)
     order = topo_order(workflow)
-    indexes = _build_indexes(workflow, reference_loader)
+    indexes = _build_indexes(workflow, rows, reference_loader)
     has_outcome_node = any(n.type == NodeType.OUTCOME for n in workflow.nodes)
 
     enrich_stats: Dict[str, Dict[str, Any]] = {
