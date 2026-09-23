@@ -525,6 +525,40 @@ def test_lifecycle_happy_path():
     assert len(rule.approvals) == 5
 
 
+def test_structural_diff_fields_ignores_priority_and_bookkeeping():
+    before = _rule(rule_id="FT1", name="FT1", priority=50, notes="old notes")
+    after = before.model_copy(deep=True)
+    after.priority = 10
+    after.notes = "new notes"
+    after.version += 1
+    assert rule_store.structural_diff_fields(before, after) == set()
+
+
+def test_structural_diff_fields_catches_a_logic_change():
+    before = _rule(rule_id="FT2", name="FT2", priority=50)
+    after = before.model_copy(deep=True)
+    after.priority = 10  # also changes priority, alongside a real logic edit
+    after.conflict_handling = ConflictHandling.ALL_MATCHING
+    assert "conflict_handling" in rule_store.structural_diff_fields(before, after)
+
+
+def test_fast_track_submit_rejected_without_eligibility():
+    rule = _rule(rule_id="FT3", name="FT3", status=RuleStatus.DRAFT, fast_track_eligible=False)
+    rule_store.upsert_rule(rule, "tester")
+    with pytest.raises(ValueError, match="cannot submit directly"):
+        rule_store.transition(rule, RuleStatus.PENDING_APPROVAL, "admin", Role.ADMIN)
+
+
+def test_fast_track_submit_allowed_when_eligible():
+    # Simulates what update_rule does: a PUBLISHED rule demoted to DRAFT by
+    # a priority-only edit is marked fast_track_eligible, so it can jump
+    # straight to PENDING_APPROVAL without a fresh validate/dry-run pass.
+    rule = _rule(rule_id="FT4", name="FT4", status=RuleStatus.DRAFT, fast_track_eligible=True)
+    rule_store.upsert_rule(rule, "tester")
+    rule = rule_store.transition(rule, RuleStatus.PENDING_APPROVAL, "admin", Role.ADMIN)
+    assert rule.status == RuleStatus.PENDING_APPROVAL
+
+
 def test_next_rule_id_starts_at_001_for_a_fresh_product():
     assert rule_store.next_rule_id(TEST_PRODUCT) == f"OAR-{TEST_PRODUCT}-001"
 

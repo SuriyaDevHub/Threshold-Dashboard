@@ -114,7 +114,14 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
   if (!rule) return null;
 
   const s = rule.status;
-  const canSubmit = s === "DRY_RUN_COMPLETED" || s === "VALIDATED";
+  // A DRAFT normally can't submit until it's been re-validated and
+  // dry-run — but update_rule() marks a rule fast_track_eligible when the
+  // only thing that changed since its last APPROVED/PUBLISHED version is
+  // `priority`, and rule_store.transition() re-checks that flag itself
+  // before allowing DRAFT -> PENDING_APPROVAL, so this is a UI convenience
+  // on top of an authoritative server-side check, not a bypass of one.
+  const fastTrack = s === "DRAFT" && rule.fast_track_eligible;
+  const canSubmit = s === "DRY_RUN_COMPLETED" || s === "VALIDATED" || fastTrack;
   const canApprove = s === "PENDING_APPROVAL";
   const canPublish = s === "APPROVED";
 
@@ -131,11 +138,21 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
           <div className="module-actions" style={{ flexWrap: "wrap" }}>
             <span className="mono ds-id">{rule.product}</span>
             <span className={`rd-status rd-status--${s.toLowerCase()}`}>{STATUS_LABEL[s] || s}</span>
+            {fastTrack && (
+              <span className="badge badge--pass" title="Only priority changed since the last approved/published version — validate and dry-run can be skipped.">
+                priority-only change
+              </span>
+            )}
             {!rule.enabled && <span className="badge badge--breach">disabled</span>}
             <span className="mono ds-count">v{rule.version}</span>
             {isAdmin && dirty && <button className="btn" disabled={busy} onClick={save}><Save size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Save</button>}
             {isAdmin && <button className="btn btn--ghost" disabled={busy} onClick={doValidate}><CheckCircle2 size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Validate</button>}
-            {isAdmin && canSubmit && <button className="btn btn--ghost" disabled={busy} onClick={() => transition("submit")}><Send size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Submit for approval</button>}
+            {isAdmin && canSubmit && (
+              <button className="btn btn--ghost" disabled={busy} onClick={() => transition("submit")}>
+                <Send size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />
+                {fastTrack ? "Submit for approval (skip validate/dry-run)" : "Submit for approval"}
+              </button>
+            )}
             {isAdmin && canApprove && <button className="btn btn--ghost" disabled={busy} onClick={() => transition("approve")}><ThumbsUp size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Approve</button>}
             {isAdmin && canApprove && <button className="btn btn--ghost" disabled={busy} onClick={() => transition("reject")}><ThumbsDown size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Reject</button>}
             {isAdmin && canPublish && <button className="btn" disabled={busy} onClick={() => transition("publish")}><Rocket size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Publish</button>}

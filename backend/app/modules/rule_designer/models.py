@@ -170,7 +170,12 @@ class RuleStatus(str, Enum):
 
 
 LEGAL_TRANSITIONS: Dict[RuleStatus, List[RuleStatus]] = {
-    RuleStatus.DRAFT: [RuleStatus.VALIDATED],
+    # PENDING_APPROVAL is structurally legal from DRAFT so a priority-only
+    # edit (see Rule.fast_track_eligible) can submit without a fresh
+    # validate/dry-run pass — but rule_store.transition() still requires
+    # fast_track_eligible=True to actually take that path; an ordinary
+    # logic edit must still go through VALIDATED -> DRY_RUN_COMPLETED first.
+    RuleStatus.DRAFT: [RuleStatus.VALIDATED, RuleStatus.PENDING_APPROVAL],
     RuleStatus.VALIDATED: [RuleStatus.DRY_RUN_COMPLETED, RuleStatus.DRAFT],
     RuleStatus.DRY_RUN_COMPLETED: [RuleStatus.PENDING_APPROVAL, RuleStatus.DRAFT],
     RuleStatus.PENDING_APPROVAL: [RuleStatus.APPROVED, RuleStatus.REJECTED],
@@ -456,6 +461,14 @@ class Rule(BaseModel):
     name: str
     description: str = ""
     status: RuleStatus = RuleStatus.DRAFT
+    # Set by update_rule() when an edit to an APPROVED/PUBLISHED rule demotes
+    # it to DRAFT but changes nothing structural (workflow, dataset binding,
+    # etc.) — only bookkeeping fields like `priority`. Lets that DRAFT submit
+    # straight to PENDING_APPROVAL (see LEGAL_TRANSITIONS / rule_store.
+    # transition()) without a fresh validate/dry-run pass, since nothing
+    # about the rule's logic actually needs re-testing. Recomputed on every
+    # edit — never set directly by a client.
+    fast_track_eligible: bool = False
     # Independent of `status`/lifecycle: an admin's instant, reversible
     # on/off switch for a published rule. Disabling doesn't touch version
     # history or approvals — it's the "enable or disable rule" admin

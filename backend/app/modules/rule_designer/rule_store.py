@@ -20,6 +20,29 @@ from app.modules.rule_designer.models import LEGAL_TRANSITIONS, Rule, RuleStatus
 # count rather than every scratch attempt.
 _COUNTED_ID_STATUSES = {RuleStatus.APPROVED, RuleStatus.PUBLISHED}
 
+# Fields a priority-only edit is allowed to change without invalidating a
+# rule's prior validate/dry-run pass. Everything else on the model (the
+# workflow itself, its dataset binding, conflict_handling, ...) affects what
+# the rule actually does and must go through VALIDATED -> DRY_RUN_COMPLETED
+# again before it can be resubmitted.
+_IGNORED_FOR_STRUCTURAL_DIFF = {
+    "priority", "status", "fast_track_eligible", "version",
+    "updated_by", "updated_at", "last_dry_run_id", "approvals", "notes",
+}
+
+
+def structural_diff_fields(before: Rule, after: Rule) -> set:
+    """Every top-level field that differs between two Rule versions, other
+    than bookkeeping fields and the one this whole mechanism exists to
+    exempt (`priority`). Used to decide whether a DRAFT demoted from
+    APPROVED/PUBLISHED can fast-track straight back to PENDING_APPROVAL."""
+    b = before.model_dump(mode="json")
+    a = after.model_dump(mode="json")
+    return {
+        key for key in (set(b) | set(a)) - _IGNORED_FOR_STRUCTURAL_DIFF
+        if b.get(key) != a.get(key)
+    }
+
 
 def next_rule_id(product: str) -> str:
     """OAR-{PRODUCT}-NNN, NNN = 1 + the highest existing suffix among this
@@ -80,6 +103,11 @@ def transition(rule: Rule, target: RuleStatus, actor: str, role, comment: str = 
         raise ValueError(
             f"illegal transition {rule.status.value} -> {target.value} "
             f"(legal targets from {rule.status.value}: {[t.value for t in legal]})"
+        )
+    if rule.status == RuleStatus.DRAFT and target == RuleStatus.PENDING_APPROVAL and not rule.fast_track_eligible:
+        raise ValueError(
+            "cannot submit directly from DRAFT — this rule has changes beyond its priority; "
+            "validate and dry-run it first, then submit from DRY_RUN_COMPLETED"
         )
     came_from = rule.status
     rule.status = target

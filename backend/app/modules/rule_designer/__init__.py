@@ -407,7 +407,16 @@ async def update_rule(rule_id: str, body: UpdateRuleBody):
     prev_version = existing.version
     rule = Rule.model_validate(body.rule)
     if rule.status in (RuleStatus.APPROVED, RuleStatus.PUBLISHED):
-        rule.status = RuleStatus.DRAFT  # any edit re-opens the lifecycle
+        # Any edit re-opens the lifecycle — but if nothing structural
+        # changed (the workflow, dataset binding, etc. are identical, only
+        # `priority` moved), this DRAFT doesn't need a fresh validate/
+        # dry-run pass before it can be resubmitted. See rule_store.
+        # transition()'s DRAFT -> PENDING_APPROVAL gate, which re-checks
+        # this flag rather than trusting the client.
+        rule.fast_track_eligible = not rule_store.structural_diff_fields(existing, rule)
+        rule.status = RuleStatus.DRAFT
+    else:
+        rule.fast_track_eligible = False
     rule_store.upsert_rule(rule, body.actor)
     audit_service.log(body.actor, "EDIT", role=body.role.value, rule_id=rule.rule_id,
                        rule_name=rule.name, previous_version=prev_version, new_version=rule.version)
