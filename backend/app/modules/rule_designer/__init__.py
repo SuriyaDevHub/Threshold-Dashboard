@@ -220,6 +220,15 @@ async def next_rule_id(code: str):
     return {"rule_id": rule_store.next_rule_id(code)}
 
 
+@router.get("/products/{code}/group-keys")
+async def group_keys(code: str):
+    """The field(s) a generic per-trade validator wrapper needs to group
+    sibling rows by before calling evaluate-record with context_rows —
+    see product_engine.group_key_fields_for_product's own docstring."""
+    _require_product(code)
+    return {"product": code.upper(), "group_key_fields": product_engine.group_key_fields_for_product(code)}
+
+
 class ProductFailSafeBody(Actor):
     on_no_match: str = "clear"
     unmatched_reason_code: Optional[str] = None

@@ -18,7 +18,8 @@ from typing import Dict, List, Optional
 from app.core import store as dataset_store
 from app.modules.rule_designer import product_registry, reference_store, rule_store, workflow_engine
 from app.modules.rule_designer.models import (
-    ConflictHandling, ProductEvaluationResult, ProductEvaluationSummary, ProductRecordResult, RuleStatus,
+    ConflictHandling, LookupType, NodeType, ProductEvaluationResult, ProductEvaluationSummary,
+    ProductRecordResult, RuleStatus,
 )
 
 
@@ -26,6 +27,25 @@ def active_rules_for_product(product: str) -> List:
     rules = rule_store.list_rules(product)
     active = [r for r in rules if r.status == RuleStatus.PUBLISHED and r.enabled]
     return sorted(active, key=lambda r: r.priority)
+
+
+def group_key_fields_for_product(product: str) -> List[str]:
+    """The field(s) a per-trade validator wrapper needs to group sibling
+    records by before calling evaluate_record with context_rows — every
+    self-group LOOKUP node's group_by_field across this product's own
+    active rules, discovered rather than hardcoded per product. A product
+    with no self-group rules (most products) returns an empty list,
+    meaning its wrapper never needs to pre-group at all. This is what
+    GET /products/{code}/group-keys exposes to a generic validator
+    wrapper (see migration_examples/generic_validator.py)."""
+    fields: List[str] = []
+    for rule in active_rules_for_product(product):
+        for node in rule.workflow.nodes:
+            if node.type == NodeType.LOOKUP and node.lookup and node.lookup.lookup_type == LookupType.SELF_GROUP:
+                field = node.lookup.group_by_field
+                if field and field not in fields:
+                    fields.append(field)
+    return fields
 
 
 def evaluate_product(product: str, dataset_id: str, actor: str,

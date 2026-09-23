@@ -1103,6 +1103,22 @@ def test_evaluate_record_context_rows_only_reflects_the_target_record():
     assert result.matched is True and result.matched_rule_id == "SG1"  # 100 summed <= 250
 
 
+def test_group_key_fields_for_product_discovers_self_group_group_by_field():
+    # A generic per-trade validator wrapper needs to know which field(s)
+    # to pre-group sibling records by — discovered from the product's own
+    # self-group LOOKUP rules rather than hardcoded per product.
+    _pub_self_group_rule()
+    assert product_engine.group_key_fields_for_product(TEST_PRODUCT) == ["structure_id"]
+
+
+def test_group_key_fields_for_product_empty_when_no_self_group_rules():
+    # A product with only ordinary (non-grouping) rules needs no
+    # pre-grouping at all — the wrapper just calls validate_trade with no
+    # group_rows for every record.
+    _pub_rule("PR1", threshold=5.0)
+    assert product_engine.group_key_fields_for_product(TEST_PRODUCT) == []
+
+
 # --------------------------------------------------------------------------
 # shadow_test_service — new engine vs. legacy validator output
 # --------------------------------------------------------------------------
