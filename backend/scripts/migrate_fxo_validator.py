@@ -354,7 +354,17 @@ def oar_fxo_004() -> Rule:
 def oar_fxo_005() -> Rule:
     """LN Murex/Margin (base): group by omrctradeDealrefid (region=LN,
     product=FXO), parent row (omrctradeParentid truthy) — CLEAR if
-    abs(parent's omrctradePnlmurex) <= parent's omrctradePnlthreshold."""
+    abs(parent's omrctradePnlmurex) is within ANY leg's omrctradePnlthreshold
+    in the group. "Within any threshold" is equivalent to "within the max
+    threshold in the group", so this is a self-group max aggregate rather
+    than the parent leg's own threshold value — confirmed against the real
+    business-logic spec (OMRC GFX Business Logics - OAR.xlsx), which is
+    more precise here than the validate_trade() code this was first read
+    from. Note the max is computed across the whole group (parent leg's
+    own threshold included), not children only — the engine's self-group
+    aggregate has no way to exclude the representative row from its own
+    aggregate pool. In practice this only broadens the check if the
+    parent leg's own threshold happens to exceed every child leg's."""
     workflow = Workflow(
         nodes=[
             WorkflowNode(id="n_input", type=NodeType.INPUT, label="FXO trade", position={"x": 0, "y": 0}),
@@ -374,7 +384,8 @@ def oar_fxo_005() -> Rule:
                     selector=_parent_selector(),
                     fields=[
                         LookupFieldMap(source_column="omrctradePnlmurex", output_field="parent_pnl"),
-                        LookupFieldMap(source_column="omrctradePnlthreshold", output_field="parent_threshold"),
+                        LookupFieldMap(source_column="omrctradePnlthreshold", output_field="max_leg_threshold",
+                                       aggregate="max"),
                     ],
                     missing_strategy=MissingLookupStrategy.CONTINUE_NULL,
                 ),
@@ -386,13 +397,14 @@ def oar_fxo_005() -> Rule:
                                               "operands": [{"kind": "field", "field": "parent_pnl"}]}),
             ),
             WorkflowNode(
-                id="n_condition", type=NodeType.CONDITION, label="Within threshold", position={"x": 0, "y": 420},
+                id="n_condition", type=NodeType.CONDITION, label="Within any leg's threshold", position={"x": 0, "y": 420},
                 condition=ConditionGroup(operator="AND", children=[
-                    Condition(field="parent_pnl_abs", operator=Operator.LTE, value=column("parent_threshold")),
+                    Condition(field="parent_pnl_abs", operator=Operator.LTE, value=column("max_leg_threshold")),
                 ]),
             ),
             _outcome("OAR-FXO-005", "OAR-MKD-Murex", template(
-                "The Pnl (Murex) of parent leg reported to omrc is {parent_pnl_abs}, which is within threshold level."
+                "The Pnl (Murex) of parent leg reported to omrc is {parent_pnl_abs}, which is within threshold "
+                "level when checked against the deal's leg thresholds."
             )),
         ],
         edges=[

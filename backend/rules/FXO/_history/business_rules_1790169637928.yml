@@ -1,0 +1,235 @@
+schema_version: 1
+product: FXO
+rules:
+  - rule_id: OAR-FXO-001
+    product: FXO
+    name: FXO — BTB (JP)
+    description: Migrated from FxoValidator.validate_trade() OAR-FXO-001.
+    status: PUBLISHED
+    fast_track_eligible: false
+    enabled: true
+    priority: 10
+    conflict_handling: first_match
+    authoring_mode: visual
+    source_text:
+    interpretation_notes: []
+    workflow:
+      nodes:
+        - id: n_input
+          type: input
+          label: FXO trade
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_region
+          type: transform
+          label: Region code
+          position:
+            x: 0.0
+            y: 120.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: value_map
+            rules:
+              - contains: LONDON
+                value: LN
+              - contains: JAPAN
+                value: JP
+              - contains: AUSTRALIA
+                value: AU
+              - contains: CHINA
+                value: CN
+              - contains: THAILAND
+                value: TH
+            field: omrctradeRegion
+            output_field: region_code
+          validation:
+        - id: n_product
+          type: transform
+          label: Normalize omrctradeProducttype
+          position:
+            x: 0.0
+            y: 180.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: upper
+            field: omrctradeProducttype
+            output_field: product_type_norm
+          validation:
+        - id: n_bui
+          type: transform
+          label: Normalize omrctradeBuiValue
+          position:
+            x: 0.0
+            y: 240.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: upper
+            field: omrctradeBuiValue
+            output_field: bui_value_norm
+          validation:
+        - id: n_condition
+          type: condition
+          label: BTB (JP)
+          position:
+            x: 0.0
+            y: 300.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+            kind: group
+            id: grp_69ab137269
+            operator: AND
+            children:
+              - kind: condition
+                id: cond_76241be313
+                field: region_code
+                operator: eq
+                value:
+                  type: static
+                  value: JP
+                  name:
+                value2:
+                values:
+              - kind: condition
+                id: cond_baf715bf0c
+                field: product_type_norm
+                operator: eq
+                value:
+                  type: static
+                  value: FXO
+                  name:
+                value2:
+                values:
+              - kind: group
+                id: grp_8916f59142
+                operator: OR
+                children:
+                  - kind: condition
+                    id: cond_a50d01a124
+                    field: bui_value_norm
+                    operator: contains
+                    value:
+                      type: static
+                      value: JP
+                      name:
+                    value2:
+                    values:
+                  - kind: condition
+                    id: cond_b6fdb10464
+                    field: bui_value_norm
+                    operator: contains
+                    value:
+                      type: static
+                      value: BACK TO BACK
+                      name:
+                    value2:
+                    values:
+          outcomes:
+          transform:
+          validation:
+        - id: n_outcome
+          type: outcome
+          label: Clear — OAR-FXO-001
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+            - field: Alert
+              value:
+                type: static
+                value: false
+                name:
+            - field: Reason
+              value:
+                type: static
+                value: OAR-BRV-FXO BTB
+                name:
+            - field: Commentary
+              value:
+                type: static
+                value: This is BTB trade. OMRC is being performed at risk taking side.
+                name:
+          transform:
+          validation:
+      edges:
+        - id: edge_9f32a857ff
+          source: n_input
+          target: n_region
+        - id: edge_a3036299cb
+          source: n_region
+          target: n_product
+        - id: edge_0ea3ef8b44
+          source: n_product
+          target: n_bui
+        - id: edge_d11a62d6f2
+          source: n_bui
+          target: n_condition
+        - id: edge_2ac869f45d
+          source: n_condition
+          target: n_outcome
+    dataset_id:
+    required_columns:
+      - omrctradeRegion
+      - omrctradeProducttype
+      - omrctradeBuiValue
+    version: 1
+    created_by: migrate_fxo_validator
+    created_at: 1790169637.6725595
+    updated_by: migrate_fxo_validator
+    updated_at: 1790169637.8588085
+    notes: Migrated from fxo_validator.py — see migrate_fxo_validator.py header.
+    last_dry_run_id:
+    approvals:
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: VALIDATED
+        timestamp: 1790169637.693241
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: DRY_RUN_COMPLETED
+        timestamp: 1790169637.738665
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: PENDING_APPROVAL
+        timestamp: 1790169637.7782607
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: APPROVED
+        timestamp: 1790169637.818197
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: PUBLISHED
+        timestamp: 1790169637.8588006
+        comment: migrate_fxo_validator.py
+    depends_on: []
+last_updated_at: 1790169637.8861523
+last_updated_by: migrate_fxo_validator
