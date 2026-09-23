@@ -665,6 +665,23 @@ def test_structural_diff_fields_ignores_priority_and_bookkeeping():
     assert rule_store.structural_diff_fields(before, after) == set()
 
 
+def test_structural_diff_fields_ignores_dataset_id():
+    # Regression found via end-to-end testing: the workspace UI's "Bound
+    # dataset" selector submits whatever dataset it's currently showing on
+    # every Save — including a priority-only one — so a rule could pick up
+    # a dataset_id it never had (e.g. left over from browsing another rule
+    # earlier in the session) and lose fast-track eligibility for a change
+    # that never touched its actual evaluation logic. dataset_id is never
+    # read by evaluate_record()/evaluate_product() (both take it as an
+    # explicit call argument), so it belongs with the other bookkeeping
+    # fields here.
+    before = _rule(rule_id="FT1B", name="FT1B", priority=50, dataset_id=None)
+    after = before.model_copy(deep=True)
+    after.priority = 10
+    after.dataset_id = "ds_whatever_the_ui_happened_to_show"
+    assert rule_store.structural_diff_fields(before, after) == set()
+
+
 def test_structural_diff_fields_catches_a_logic_change():
     before = _rule(rule_id="FT2", name="FT2", priority=50)
     after = before.model_copy(deep=True)

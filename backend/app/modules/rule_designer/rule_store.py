@@ -28,6 +28,16 @@ _COUNTED_ID_STATUSES = {RuleStatus.APPROVED, RuleStatus.PUBLISHED}
 _IGNORED_FOR_STRUCTURAL_DIFF = {
     "priority", "status", "fast_track_eligible", "version",
     "updated_by", "updated_at", "last_dry_run_id", "approvals", "notes",
+    # `dataset_id` only picks which dataset Validate/Dry Run default to —
+    # it's never read by evaluate_record()/evaluate_product() (both take
+    # dataset_id as an explicit call argument, independent of this stored
+    # value). Found via end-to-end testing: the workspace UI's "Bound
+    # dataset" selector submits whatever it's currently showing on every
+    # Save, including a priority-only one, so without this a rule could
+    # silently pick up a dataset_id (e.g. left over from browsing another
+    # rule earlier in the session) and lose fast-track eligibility for a
+    # change that never touched its actual logic.
+    "dataset_id",
 }
 
 
