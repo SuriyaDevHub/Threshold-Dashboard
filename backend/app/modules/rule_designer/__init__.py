@@ -190,6 +190,7 @@ async def evaluate_product(code: str, body: EvaluateProductBody):
 
 class EvaluateRecordBody(Actor):
     record: Dict[str, Any]
+    context_rows: Optional[List[Dict[str, Any]]] = None
 
 
 @router.post("/products/{code}/evaluate-record")
@@ -197,10 +198,13 @@ async def evaluate_record(code: str, body: EvaluateRecordBody):
     """The per-trade entry point a migrated `{product}_validator.py`
     wrapper calls in place of its own hardcoded branches — one record in,
     one matched/outcome result out, same rule set and fail-safe posture
-    as `evaluate_product`."""
+    as `evaluate_product`. `context_rows` is optional sibling rows (e.g.
+    other legs of the same structure/dealref) so a self-group LOOKUP node
+    can group `record` against more than just itself — see
+    product_engine.evaluate_record's own docstring."""
     _require(body, "dry_run")
     try:
-        result = product_engine.evaluate_record(code, body.record, body.actor)
+        result = product_engine.evaluate_record(code, body.record, body.actor, context_rows=body.context_rows)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     return result.model_dump(mode="json")

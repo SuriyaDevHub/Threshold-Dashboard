@@ -56,5 +56,19 @@
     "created_at": 1790061348.665296,
     "updated_by": "migrate_pm_validator",
     "updated_at": 1790061348.666011
+  },
+  "FXO": {
+    "code": "FXO",
+    "name": "FXO",
+    "enabled": true,
+    "migration_status": "in_progress",
+    "description": "Migrated from the legacy fxo_validator.py \u2014 see migrate_fxo_validator.py.",
+    "on_no_match": "alert",
+    "unmatched_reason_code": "FXO-UNMATCHED",
+    "disabled_reason_code": "FXO-DISABLED",
+    "created_by": "migrate_fxo_validator",
+    "created_at": 1790164635.9529023,
+    "updated_by": "migrate_fxo_validator",
+    "updated_at": 1790164635.953634
   }
 }

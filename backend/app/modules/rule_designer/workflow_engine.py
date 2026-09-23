@@ -100,12 +100,16 @@ def _to_num_or_none(v: Any) -> Optional[float]:
 
 
 def _aggregate_value(op: str, rows: List[dict], field: str) -> Optional[float]:
-    """sum/count/min/max of `field` across every row in a self_group group
-    — e.g. summing a structure's total PnL across all its deals, where a
-    plain representative-row broadcast would only give you one deal's own
-    PnL. Non-numeric/missing values are skipped; an empty result is None
-    (not 0), so a group with no numeric data at all reads as "no data"
-    rather than a misleading zero."""
+    """sum/count/min/max/first of `field` across every row in a self_group
+    group — e.g. summing a structure's total PnL across all its deals,
+    where a plain representative-row broadcast would only give you one
+    deal's own PnL. Non-numeric/missing values are skipped; an empty
+    result is None (not 0), so a group with no numeric data at all reads
+    as "no data" rather than a misleading zero. "first" is the first
+    numeric value in row order — for a field that's expected to just be
+    duplicated across a group (e.g. a shared threshold), this tolerates
+    a representative row whose own value happens to be blank by reading
+    whichever group member has one first, rather than broadcasting None."""
     values = [v for v in (_to_num_or_none(r.get(field)) for r in rows) if v is not None]
     if op == "count":
         return float(len(values))
@@ -117,6 +121,8 @@ def _aggregate_value(op: str, rows: List[dict], field: str) -> Optional[float]:
         return min(values)
     if op == "max":
         return max(values)
+    if op == "first":
+        return values[0]
     return None
 
 

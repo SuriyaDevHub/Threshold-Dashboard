@@ -139,13 +139,24 @@ def _fail_safe_result(product: str, dataset_id: str, actor: str, rows: List[dict
     )
 
 
-def evaluate_record(product: str, record: dict, actor: str) -> ProductRecordResult:
+def evaluate_record(product: str, record: dict, actor: str,
+                     context_rows: Optional[List[dict]] = None) -> ProductRecordResult:
     """Single-record synchronous entry point — what a thin
     `{product}_validator.py` wrapper actually needs (legacy validators are
     called per-trade, e.g. `validate_trade(trade)`, not per-dataset). Runs
     the exact same rule set and fail-safe/on_no_match posture as
     `evaluate_product`, just against one in-memory record instead of a
-    stored dataset."""
+    stored dataset.
+
+    `context_rows`: sibling rows (e.g. every other leg of the same
+    structure/dealref) for a self-group LOOKUP node to group `record`
+    against — self-group only ever sees the rows a single `run_workflow`
+    call is given, so without this a lone record is its own entire group
+    and grouped aggregates (sum/first/etc.) silently degrade to that one
+    record's own value. Only `record`'s own result is returned; siblings
+    are there purely to give grouping visibility, the same way the legacy
+    validator's caller would have the whole batch in hand when it looked
+    up a structure's other legs."""
     prod = product_registry.get_product(product)
     if prod is None:
         raise ValueError(f"product '{product}' is not registered")
@@ -161,10 +172,12 @@ def evaluate_record(product: str, record: dict, actor: str) -> ProductRecordResu
             "Alert": True, "Reason": prod.disabled_reason_code or f"{product.upper()}-DISABLED",
         })
 
+    rows = [*context_rows, record] if context_rows else [record]
+
     matches = []  # [(rule, RecordResult)] in priority order
     for rule in active_rules:
-        records, _, _ = workflow_engine.run_workflow(rule.workflow, [record], reference_store.reference_loader)
-        rec = records[0] if records else None
+        records, _, _ = workflow_engine.run_workflow(rule.workflow, rows, reference_store.reference_loader)
+        rec = records[-1] if records else None
         if rec is not None and rec.matched:
             matches.append((rule, rec))
 

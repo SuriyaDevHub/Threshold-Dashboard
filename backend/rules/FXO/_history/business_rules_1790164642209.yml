@@ -1,0 +1,1884 @@
+schema_version: 1
+product: FXO
+rules:
+  - rule_id: OAR-FXO-001
+    product: FXO
+    name: FXO — BTB (JP)
+    description: Migrated from FxoValidator.validate_trade() OAR-FXO-001.
+    status: PUBLISHED
+    fast_track_eligible: false
+    enabled: true
+    priority: 10
+    conflict_handling: first_match
+    authoring_mode: visual
+    source_text:
+    interpretation_notes: []
+    workflow:
+      nodes:
+        - id: n_input
+          type: input
+          label: FXO trade
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_region
+          type: transform
+          label: Region code
+          position:
+            x: 0.0
+            y: 120.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: value_map
+            rules:
+              - contains: LONDON
+                value: LN
+              - contains: JAPAN
+                value: JP
+              - contains: AUSTRALIA
+                value: AU
+              - contains: CHINA
+                value: CN
+              - contains: THAILAND
+                value: TH
+            field: omrctradeRegion
+            output_field: region_code
+          validation:
+        - id: n_product
+          type: transform
+          label: Normalize omrctradeProducttype
+          position:
+            x: 0.0
+            y: 180.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: upper
+            field: omrctradeProducttype
+            output_field: product_type_norm
+          validation:
+        - id: n_bui
+          type: transform
+          label: Normalize omrctradeBuiValue
+          position:
+            x: 0.0
+            y: 240.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: upper
+            field: omrctradeBuiValue
+            output_field: bui_value_norm
+          validation:
+        - id: n_condition
+          type: condition
+          label: BTB (JP)
+          position:
+            x: 0.0
+            y: 300.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+            kind: group
+            id: grp_3d3447a977
+            operator: AND
+            children:
+              - kind: condition
+                id: cond_fb4a435eb3
+                field: region_code
+                operator: eq
+                value:
+                  type: static
+                  value: JP
+                  name:
+                value2:
+                values:
+              - kind: condition
+                id: cond_a0f9bdb576
+                field: product_type_norm
+                operator: eq
+                value:
+                  type: static
+                  value: FXO
+                  name:
+                value2:
+                values:
+              - kind: group
+                id: grp_e735ebd713
+                operator: OR
+                children:
+                  - kind: condition
+                    id: cond_1c4c428602
+                    field: bui_value_norm
+                    operator: contains
+                    value:
+                      type: static
+                      value: JP
+                      name:
+                    value2:
+                    values:
+                  - kind: condition
+                    id: cond_a7c7b55238
+                    field: bui_value_norm
+                    operator: contains
+                    value:
+                      type: static
+                      value: BACK TO BACK
+                      name:
+                    value2:
+                    values:
+          outcomes:
+          transform:
+          validation:
+        - id: n_outcome
+          type: outcome
+          label: Clear — OAR-FXO-001
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+            - field: Alert
+              value:
+                type: static
+                value: false
+                name:
+            - field: Reason
+              value:
+                type: static
+                value: OAR-BRV-FXO BTB
+                name:
+            - field: Commentary
+              value:
+                type: static
+                value: This is BTB trade. OMRC is being performed at risk taking side.
+                name:
+          transform:
+          validation:
+      edges:
+        - id: edge_8efb6d0a2f
+          source: n_input
+          target: n_region
+        - id: edge_165557847b
+          source: n_region
+          target: n_product
+        - id: edge_55557f1efd
+          source: n_product
+          target: n_bui
+        - id: edge_b8ce2d755e
+          source: n_bui
+          target: n_condition
+        - id: edge_d278128935
+          source: n_condition
+          target: n_outcome
+    dataset_id:
+    required_columns:
+      - omrctradeRegion
+      - omrctradeProducttype
+      - omrctradeBuiValue
+    version: 1
+    created_by: migrate_fxo_validator
+    created_at: 1790164635.9542696
+    updated_by: migrate_fxo_validator
+    updated_at: 1790164636.1393487
+    notes: Migrated from fxo_validator.py — see migrate_fxo_validator.py header.
+    last_dry_run_id:
+    approvals:
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: VALIDATED
+        timestamp: 1790164635.9744968
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: DRY_RUN_COMPLETED
+        timestamp: 1790164636.0187113
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: PENDING_APPROVAL
+        timestamp: 1790164636.0581167
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: APPROVED
+        timestamp: 1790164636.0973701
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: PUBLISHED
+        timestamp: 1790164636.1393414
+        comment: migrate_fxo_validator.py
+    depends_on: []
+  - rule_id: OAR-FXO-002
+    product: FXO
+    name: FXO — Low Vol (CN)
+    description: Migrated from FxoValidator.validate_trade() OAR-FXO-002. Assumes '/' as the omrctradeCcypair separator — confirm against real data.
+    status: PUBLISHED
+    fast_track_eligible: false
+    enabled: true
+    priority: 30
+    conflict_handling: first_match
+    authoring_mode: visual
+    source_text:
+    interpretation_notes: []
+    workflow:
+      nodes:
+        - id: n_input
+          type: input
+          label: FXO trade
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_region
+          type: transform
+          label: Region code
+          position:
+            x: 0.0
+            y: 120.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: value_map
+            rules:
+              - contains: LONDON
+                value: LN
+              - contains: JAPAN
+                value: JP
+              - contains: AUSTRALIA
+                value: AU
+              - contains: CHINA
+                value: CN
+              - contains: THAILAND
+                value: TH
+            field: omrctradeRegion
+            output_field: region_code
+          validation:
+        - id: n_product
+          type: transform
+          label: Normalize omrctradeProducttype
+          position:
+            x: 0.0
+            y: 180.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: upper
+            field: omrctradeProducttype
+            output_field: product_type_norm
+          validation:
+        - id: n_pair
+          type: transform
+          label: Normalize omrctradeCcypair
+          position:
+            x: 0.0
+            y: 240.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: upper
+            field: omrctradeCcypair
+            output_field: ccypair_norm
+          validation:
+        - id: n_base
+          type: transform
+          label: Base currency
+          position:
+            x: 0.0
+            y: 300.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: split
+            field: ccypair_norm
+            output_field: ccy_base
+            delimiter: /
+            index: 0
+          validation:
+        - id: n_quote
+          type: transform
+          label: Quote currency
+          position:
+            x: 0.0
+            y: 360.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: split
+            field: ccypair_norm
+            output_field: ccy_quote
+            delimiter: /
+            index: 1
+          validation:
+        - id: n_condition
+          type: condition
+          label: Low Vol (CN, non-CNY pair)
+          position:
+            x: 0.0
+            y: 420.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+            kind: group
+            id: grp_3810f699dc
+            operator: AND
+            children:
+              - kind: condition
+                id: cond_0b516a0aa6
+                field: region_code
+                operator: eq
+                value:
+                  type: static
+                  value: CN
+                  name:
+                value2:
+                values:
+              - kind: condition
+                id: cond_ffd39969e0
+                field: product_type_norm
+                operator: eq
+                value:
+                  type: static
+                  value: FXO
+                  name:
+                value2:
+                values:
+              - kind: condition
+                id: cond_1fb2e25729
+                field: ccy_base
+                operator: ne
+                value:
+                  type: static
+                  value: CNY
+                  name:
+                value2:
+                values:
+              - kind: condition
+                id: cond_3cc494b346
+                field: ccy_quote
+                operator: ne
+                value:
+                  type: static
+                  value: CNY
+                  name:
+                value2:
+                values:
+          outcomes:
+          transform:
+          validation:
+        - id: n_outcome
+          type: outcome
+          label: Clear — OAR-FXO-002
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+            - field: Alert
+              value:
+                type: static
+                value: false
+                name:
+            - field: Reason
+              value:
+                type: static
+                value: OAR-BRV-Low Vol
+                name:
+            - field: Commentary
+              value:
+                type: static
+                value: This is a non-CNY FXO, which is out of HBCN OMRC scope.
+                name:
+          transform:
+          validation:
+      edges:
+        - id: edge_fcb42de301
+          source: n_input
+          target: n_region
+        - id: edge_8931955e31
+          source: n_region
+          target: n_product
+        - id: edge_9e3f6a41cd
+          source: n_product
+          target: n_pair
+        - id: edge_9b64638fb4
+          source: n_pair
+          target: n_base
+        - id: edge_64cff5d24f
+          source: n_base
+          target: n_quote
+        - id: edge_1b43b9245c
+          source: n_quote
+          target: n_condition
+        - id: edge_b378ccaabf
+          source: n_condition
+          target: n_outcome
+    dataset_id:
+    required_columns:
+      - omrctradeRegion
+      - omrctradeProducttype
+      - omrctradeCcypair
+    version: 1
+    created_by: migrate_fxo_validator
+    created_at: 1790164636.1842222
+    updated_by: migrate_fxo_validator
+    updated_at: 1790164636.6071672
+    notes: Migrated from fxo_validator.py — see migrate_fxo_validator.py header.
+    last_dry_run_id:
+    approvals:
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: VALIDATED
+        timestamp: 1790164636.244141
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: DRY_RUN_COMPLETED
+        timestamp: 1790164636.3319495
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: PENDING_APPROVAL
+        timestamp: 1790164636.4246407
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: APPROVED
+        timestamp: 1790164636.5143945
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: PUBLISHED
+        timestamp: 1790164636.607159
+        comment: migrate_fxo_validator.py
+    depends_on: []
+  - rule_id: OAR-FXO-003
+    product: FXO
+    name: FXO — Option Exercise
+    description: Migrated from FxoValidator.validate_trade() OAR-FXO-003.
+    status: PUBLISHED
+    fast_track_eligible: false
+    enabled: true
+    priority: 20
+    conflict_handling: first_match
+    authoring_mode: visual
+    source_text:
+    interpretation_notes: []
+    workflow:
+      nodes:
+        - id: n_input
+          type: input
+          label: FXO trade
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_region
+          type: transform
+          label: Region code
+          position:
+            x: 0.0
+            y: 120.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: value_map
+            rules:
+              - contains: LONDON
+                value: LN
+              - contains: JAPAN
+                value: JP
+              - contains: AUSTRALIA
+                value: AU
+              - contains: CHINA
+                value: CN
+              - contains: THAILAND
+                value: TH
+            field: omrctradeRegion
+            output_field: region_code
+          validation:
+        - id: n_product
+          type: transform
+          label: Normalize omrctradeProducttype
+          position:
+            x: 0.0
+            y: 180.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: upper
+            field: omrctradeProducttype
+            output_field: product_type_norm
+          validation:
+        - id: n_source
+          type: transform
+          label: Normalize uctradeSourcesystem
+          position:
+            x: 0.0
+            y: 240.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: upper
+            field: uctradeSourcesystem
+            output_field: source_system_norm
+          validation:
+        - id: n_comment
+          type: transform
+          label: Normalize omrctradeComment
+          position:
+            x: 0.0
+            y: 300.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: upper
+            field: omrctradeComment
+            output_field: comment_norm
+          validation:
+        - id: n_sid
+          type: transform
+          label: Normalize omrctradeStructureid
+          position:
+            x: 0.0
+            y: 360.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: upper
+            field: omrctradeStructureid
+            output_field: sid_norm
+          validation:
+        - id: n_condition
+          type: condition
+          label: Option Exercise
+          position:
+            x: 0.0
+            y: 420.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+            kind: group
+            id: grp_6baafacd67
+            operator: AND
+            children:
+              - kind: condition
+                id: cond_4f4f8631bf
+                field: product_type_norm
+                operator: eq
+                value:
+                  type: static
+                  value: FXO
+                  name:
+                value2:
+                values:
+              - kind: condition
+                id: cond_3df502b748
+                field: region_code
+                operator: ne
+                value:
+                  type: static
+                  value: JP
+                  name:
+                value2:
+                values:
+              - kind: condition
+                id: cond_809481f3c7
+                field: source_system_norm
+                operator: eq
+                value:
+                  type: static
+                  value: EUC
+                  name:
+                value2:
+                values:
+              - kind: group
+                id: grp_a39dfb454e
+                operator: OR
+                children:
+                  - kind: condition
+                    id: cond_6094b5cd73
+                    field: comment_norm
+                    operator: contains
+                    value:
+                      type: static
+                      value: EXR. FX OPTION
+                      name:
+                    value2:
+                    values:
+                  - kind: condition
+                    id: cond_dc0964e8da
+                    field: sid_norm
+                    operator: contains
+                    value:
+                      type: static
+                      value: EXR. FX OPTION
+                      name:
+                    value2:
+                    values:
+                  - kind: condition
+                    id: cond_d65956a55f
+                    field: comment_norm
+                    operator: contains
+                    value:
+                      type: static
+                      value: "'EXR: FX OPTION'"
+                      name:
+                    value2:
+                    values:
+                  - kind: condition
+                    id: cond_0788d20ff6
+                    field: sid_norm
+                    operator: contains
+                    value:
+                      type: static
+                      value: "'EXR: FX OPTION'"
+                      name:
+                    value2:
+                    values:
+          outcomes:
+          transform:
+          validation:
+        - id: n_outcome
+          type: outcome
+          label: Clear — OAR-FXO-003
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+            - field: Alert
+              value:
+                type: static
+                value: false
+                name:
+            - field: Reason
+              value:
+                type: static
+                value: OAR-PTS-Option Exercise
+                name:
+            - field: Commentary
+              value:
+                type: static
+                value: These are option exercised trades where no new contract is formed because the existing option contract is acted upon by the client leading to new underlying FX position depending on the products settlement terms.
+                name:
+          transform:
+          validation:
+      edges:
+        - id: edge_be39011685
+          source: n_input
+          target: n_region
+        - id: edge_c652612765
+          source: n_region
+          target: n_product
+        - id: edge_a3f3df77a6
+          source: n_product
+          target: n_source
+        - id: edge_8a39b78334
+          source: n_source
+          target: n_comment
+        - id: edge_4db92cf4f4
+          source: n_comment
+          target: n_sid
+        - id: edge_c3d9ee505f
+          source: n_sid
+          target: n_condition
+        - id: edge_7691aca852
+          source: n_condition
+          target: n_outcome
+    dataset_id:
+    required_columns:
+      - omrctradeProducttype
+      - omrctradeRegion
+      - uctradeSourcesystem
+      - omrctradeComment
+      - omrctradeStructureid
+    version: 1
+    created_by: migrate_fxo_validator
+    created_at: 1790164636.7054136
+    updated_by: migrate_fxo_validator
+    updated_at: 1790164637.4595811
+    notes: Migrated from fxo_validator.py — see migrate_fxo_validator.py header.
+    last_dry_run_id:
+    approvals:
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: VALIDATED
+        timestamp: 1790164636.8175838
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: DRY_RUN_COMPLETED
+        timestamp: 1790164636.979199
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: PENDING_APPROVAL
+        timestamp: 1790164637.1679978
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: APPROVED
+        timestamp: 1790164637.3093388
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: PUBLISHED
+        timestamp: 1790164637.4595726
+        comment: migrate_fxo_validator.py
+    depends_on: []
+  - rule_id: OAR-FXO-004
+    product: FXO
+    name: FXO — TH structure grouping
+    description: Migrated from FxoValidator.validate_trade() / _compute_th_structure() OAR-FXO-004. Self-group LOOKUP grouping happens over this workflow's raw input rows, not rows pre-filtered to TH/FXO/EUC the way the legacy grouping loop did — see this script's module docstring.
+    status: PUBLISHED
+    fast_track_eligible: false
+    enabled: true
+    priority: 40
+    conflict_handling: first_match
+    authoring_mode: visual
+    source_text:
+    interpretation_notes: []
+    workflow:
+      nodes:
+        - id: n_input
+          type: input
+          label: FXO trade
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_region
+          type: transform
+          label: Region code
+          position:
+            x: 0.0
+            y: 120.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: value_map
+            rules:
+              - contains: LONDON
+                value: LN
+              - contains: JAPAN
+                value: JP
+              - contains: AUSTRALIA
+                value: AU
+              - contains: CHINA
+                value: CN
+              - contains: THAILAND
+                value: TH
+            field: omrctradeRegion
+            output_field: region_code
+          validation:
+        - id: n_product
+          type: transform
+          label: Normalize omrctradeProducttype
+          position:
+            x: 0.0
+            y: 180.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: upper
+            field: omrctradeProducttype
+            output_field: product_type_norm
+          validation:
+        - id: n_source
+          type: transform
+          label: Normalize uctradeSourcesystem
+          position:
+            x: 0.0
+            y: 240.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: upper
+            field: uctradeSourcesystem
+            output_field: source_system_norm
+          validation:
+        - id: n_filter
+          type: filter
+          label: TH / FXO / EUC
+          position:
+            x: 0.0
+            y: 300.0
+          filter:
+            kind: group
+            id: grp_26b6ca886a
+            operator: AND
+            children:
+              - kind: condition
+                id: cond_51f8367d3b
+                field: region_code
+                operator: eq
+                value:
+                  type: static
+                  value: TH
+                  name:
+                value2:
+                values:
+              - kind: condition
+                id: cond_749d70dd8d
+                field: product_type_norm
+                operator: eq
+                value:
+                  type: static
+                  value: FXO
+                  name:
+                value2:
+                values:
+              - kind: condition
+                id: cond_e0beea79e5
+                field: source_system_norm
+                operator: eq
+                value:
+                  type: static
+                  value: EUC
+                  name:
+                value2:
+                values:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_group
+          type: lookup
+          label: Structure PnL
+          position:
+            x: 0.0
+            y: 360.0
+          filter:
+          lookup:
+            lookup_type: self_group
+            reference_file_id:
+            reference_version:
+            group_by_field: omrctradeStructureid
+            selector:
+            join_keys: []
+            range_field:
+            range_low_column:
+            range_high_column:
+            date_field:
+            date_from_column:
+            date_to_column:
+            fields:
+              - source_column: omrctradePnlreportingccy
+                output_field: structure_total_pnl
+                transform:
+                aggregate: sum
+              - source_column: omrctradePnlthreshold
+                output_field: structure_threshold
+                transform:
+                aggregate: first
+            join_type: left
+            missing_strategy: continue_null
+            default_values: {}
+            flag_field:
+            fallback_reference_file_id:
+            priority_strategy: first_match
+            priority_field:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_abs
+          type: calculate
+          label: abs(structure total PnL)
+          position:
+            x: 0.0
+            y: 420.0
+          filter:
+          lookup:
+          calculate:
+            output_field: structure_pnl_abs
+            formula:
+              kind: operation
+              op: abs
+              operands:
+                - kind: field
+                  field: structure_total_pnl
+            output_type: numeric
+            description:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_condition
+          type: condition
+          label: Within threshold
+          position:
+            x: 0.0
+            y: 480.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+            kind: group
+            id: grp_3c4482ff4e
+            operator: AND
+            children:
+              - kind: condition
+                id: cond_0ff24c9bb9
+                field: structure_pnl_abs
+                operator: lte
+                value:
+                  type: column
+                  value:
+                  name: structure_threshold
+                value2:
+                values:
+          outcomes:
+          transform:
+          validation:
+        - id: n_outcome
+          type: outcome
+          label: Clear — OAR-FXO-004
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+            - field: Alert
+              value:
+                type: static
+                value: false
+                name:
+            - field: Reason
+              value:
+                type: static
+                value: OAR-PTS-Package/Structure ID
+                name:
+            - field: Commentary
+              value:
+                type: template
+                value: This deal belongs to structure id {omrctradeStructureid} and the combined Pnl of all the deals is {structure_total_pnl}, which is within threshold.
+                name:
+          transform:
+          validation:
+      edges:
+        - id: edge_bd4ea4d6ba
+          source: n_input
+          target: n_region
+        - id: edge_0198ccf98f
+          source: n_region
+          target: n_product
+        - id: edge_9e7169c66a
+          source: n_product
+          target: n_source
+        - id: edge_efba2733e7
+          source: n_source
+          target: n_filter
+        - id: edge_2540c10fb5
+          source: n_filter
+          target: n_group
+        - id: edge_cb2d32ecd9
+          source: n_group
+          target: n_abs
+        - id: edge_bf904da7a2
+          source: n_abs
+          target: n_condition
+        - id: edge_94cfa2ec29
+          source: n_condition
+          target: n_outcome
+    dataset_id:
+    required_columns:
+      - omrctradeRegion
+      - omrctradeProducttype
+      - uctradeSourcesystem
+      - omrctradeStructureid
+      - omrctradePnlreportingccy
+      - omrctradePnlthreshold
+    version: 1
+    created_by: migrate_fxo_validator
+    created_at: 1790164637.600012
+    updated_by: migrate_fxo_validator
+    updated_at: 1790164638.5940032
+    notes: Migrated from fxo_validator.py — see migrate_fxo_validator.py header.
+    last_dry_run_id:
+    approvals:
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: VALIDATED
+        timestamp: 1790164637.758711
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: DRY_RUN_COMPLETED
+        timestamp: 1790164637.952486
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: PENDING_APPROVAL
+        timestamp: 1790164638.1585965
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: APPROVED
+        timestamp: 1790164638.3959765
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: PUBLISHED
+        timestamp: 1790164638.5939949
+        comment: migrate_fxo_validator.py
+    depends_on: []
+  - rule_id: OAR-FXO-005
+    product: FXO
+    name: FXO — LN Murex/Margin (base)
+    description: Migrated from FxoValidator.validate_trade() / _compute_ln_murex_and_margin() OAR-FXO-005.
+    status: PUBLISHED
+    fast_track_eligible: false
+    enabled: true
+    priority: 50
+    conflict_handling: first_match
+    authoring_mode: visual
+    source_text:
+    interpretation_notes: []
+    workflow:
+      nodes:
+        - id: n_input
+          type: input
+          label: FXO trade
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_region
+          type: transform
+          label: Region code
+          position:
+            x: 0.0
+            y: 120.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: value_map
+            rules:
+              - contains: LONDON
+                value: LN
+              - contains: JAPAN
+                value: JP
+              - contains: AUSTRALIA
+                value: AU
+              - contains: CHINA
+                value: CN
+              - contains: THAILAND
+                value: TH
+            field: omrctradeRegion
+            output_field: region_code
+          validation:
+        - id: n_product
+          type: transform
+          label: Normalize omrctradeProducttype
+          position:
+            x: 0.0
+            y: 180.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: upper
+            field: omrctradeProducttype
+            output_field: product_type_norm
+          validation:
+        - id: n_filter
+          type: filter
+          label: LN / FXO
+          position:
+            x: 0.0
+            y: 240.0
+          filter:
+            kind: group
+            id: grp_0d75d668b4
+            operator: AND
+            children:
+              - kind: condition
+                id: cond_5516a48dd4
+                field: region_code
+                operator: eq
+                value:
+                  type: static
+                  value: LN
+                  name:
+                value2:
+                values:
+              - kind: condition
+                id: cond_94cade3af3
+                field: product_type_norm
+                operator: eq
+                value:
+                  type: static
+                  value: FXO
+                  name:
+                value2:
+                values:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_group
+          type: lookup
+          label: Parent leg PnL/threshold
+          position:
+            x: 0.0
+            y: 300.0
+          filter:
+          lookup:
+            lookup_type: self_group
+            reference_file_id:
+            reference_version:
+            group_by_field: omrctradeDealrefid
+            selector:
+              kind: group
+              id: grp_a9f7908dc1
+              operator: OR
+              children:
+                - kind: condition
+                  id: cond_f58d5f7608
+                  field: omrctradeParentid
+                  operator: eq
+                  value:
+                    type: static
+                    value: Y
+                    name:
+                  value2:
+                  values:
+                - kind: condition
+                  id: cond_ec5e16e26e
+                  field: omrctradeParentid
+                  operator: eq
+                  value:
+                    type: static
+                    value: YES
+                    name:
+                  value2:
+                  values:
+                - kind: condition
+                  id: cond_34709b3089
+                  field: omrctradeParentid
+                  operator: eq
+                  value:
+                    type: static
+                    value: 'TRUE'
+                    name:
+                  value2:
+                  values:
+                - kind: condition
+                  id: cond_8efddb5fe6
+                  field: omrctradeParentid
+                  operator: eq
+                  value:
+                    type: static
+                    value: '1'
+                    name:
+                  value2:
+                  values:
+            join_keys: []
+            range_field:
+            range_low_column:
+            range_high_column:
+            date_field:
+            date_from_column:
+            date_to_column:
+            fields:
+              - source_column: omrctradePnlmurex
+                output_field: parent_pnl
+                transform:
+                aggregate:
+              - source_column: omrctradePnlthreshold
+                output_field: parent_threshold
+                transform:
+                aggregate:
+            join_type: left
+            missing_strategy: continue_null
+            default_values: {}
+            flag_field:
+            fallback_reference_file_id:
+            priority_strategy: first_match
+            priority_field:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_abs
+          type: calculate
+          label: abs(parent PnL)
+          position:
+            x: 0.0
+            y: 360.0
+          filter:
+          lookup:
+          calculate:
+            output_field: parent_pnl_abs
+            formula:
+              kind: operation
+              op: abs
+              operands:
+                - kind: field
+                  field: parent_pnl
+            output_type: numeric
+            description:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_condition
+          type: condition
+          label: Within threshold
+          position:
+            x: 0.0
+            y: 420.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+            kind: group
+            id: grp_593ec9e42b
+            operator: AND
+            children:
+              - kind: condition
+                id: cond_1e508f9741
+                field: parent_pnl_abs
+                operator: lte
+                value:
+                  type: column
+                  value:
+                  name: parent_threshold
+                value2:
+                values:
+          outcomes:
+          transform:
+          validation:
+        - id: n_outcome
+          type: outcome
+          label: Clear — OAR-FXO-005
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+            - field: Alert
+              value:
+                type: static
+                value: false
+                name:
+            - field: Reason
+              value:
+                type: static
+                value: OAR-MKD-Murex
+                name:
+            - field: Commentary
+              value:
+                type: template
+                value: The Pnl (Murex) of parent leg reported to omrc is {parent_pnl_abs}, which is within threshold level.
+                name:
+          transform:
+          validation:
+      edges:
+        - id: edge_272e348cd1
+          source: n_input
+          target: n_region
+        - id: edge_268d48bdfc
+          source: n_region
+          target: n_product
+        - id: edge_8b6ebdc2c0
+          source: n_product
+          target: n_filter
+        - id: edge_f3af6a1158
+          source: n_filter
+          target: n_group
+        - id: edge_3612e75c13
+          source: n_group
+          target: n_abs
+        - id: edge_6ee00919ae
+          source: n_abs
+          target: n_condition
+        - id: edge_3795994b56
+          source: n_condition
+          target: n_outcome
+    dataset_id:
+    required_columns:
+      - omrctradeRegion
+      - omrctradeProducttype
+      - omrctradeDealrefid
+      - omrctradeParentid
+      - omrctradePnlmurex
+      - omrctradePnlthreshold
+    version: 1
+    created_by: migrate_fxo_validator
+    created_at: 1790164638.796484
+    updated_by: migrate_fxo_validator
+    updated_at: 1790164640.0464003
+    notes: Migrated from fxo_validator.py — see migrate_fxo_validator.py header.
+    last_dry_run_id:
+    approvals:
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: VALIDATED
+        timestamp: 1790164639.0165207
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: DRY_RUN_COMPLETED
+        timestamp: 1790164639.2687137
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: PENDING_APPROVAL
+        timestamp: 1790164639.5433662
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: APPROVED
+        timestamp: 1790164639.79401
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: PUBLISHED
+        timestamp: 1790164640.046391
+        comment: migrate_fxo_validator.py
+    depends_on: []
+  - rule_id: OAR-FXO-006
+    product: FXO
+    name: FXO — LN Murex/Margin (production credit override)
+    description: Migrated from FxoValidator.validate_trade() / _compute_ln_murex_and_margin() OAR-FXO-006.
+    status: APPROVED
+    fast_track_eligible: false
+    enabled: true
+    priority: 60
+    conflict_handling: first_match
+    authoring_mode: visual
+    source_text:
+    interpretation_notes: []
+    workflow:
+      nodes:
+        - id: n_input
+          type: input
+          label: FXO trade
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_region
+          type: transform
+          label: Region code
+          position:
+            x: 0.0
+            y: 120.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: value_map
+            rules:
+              - contains: LONDON
+                value: LN
+              - contains: JAPAN
+                value: JP
+              - contains: AUSTRALIA
+                value: AU
+              - contains: CHINA
+                value: CN
+              - contains: THAILAND
+                value: TH
+            field: omrctradeRegion
+            output_field: region_code
+          validation:
+        - id: n_product
+          type: transform
+          label: Normalize omrctradeProducttype
+          position:
+            x: 0.0
+            y: 180.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: upper
+            field: omrctradeProducttype
+            output_field: product_type_norm
+          validation:
+        - id: n_source
+          type: transform
+          label: Normalize uctradeSourcesystem
+          position:
+            x: 0.0
+            y: 240.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+            op: upper
+            field: uctradeSourcesystem
+            output_field: source_system_norm
+          validation:
+        - id: n_filter
+          type: filter
+          label: LN / FXO / FXO-MXG
+          position:
+            x: 0.0
+            y: 300.0
+          filter:
+            kind: group
+            id: grp_7d7087f8aa
+            operator: AND
+            children:
+              - kind: condition
+                id: cond_d9886f6b4a
+                field: region_code
+                operator: eq
+                value:
+                  type: static
+                  value: LN
+                  name:
+                value2:
+                values:
+              - kind: condition
+                id: cond_ca2314b823
+                field: product_type_norm
+                operator: eq
+                value:
+                  type: static
+                  value: FXO
+                  name:
+                value2:
+                values:
+              - kind: condition
+                id: cond_0470a9bfc1
+                field: source_system_norm
+                operator: eq
+                value:
+                  type: static
+                  value: FXO-MXG
+                  name:
+                value2:
+                values:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_group
+          type: lookup
+          label: Parent leg PnL/threshold/credit
+          position:
+            x: 0.0
+            y: 360.0
+          filter:
+          lookup:
+            lookup_type: self_group
+            reference_file_id:
+            reference_version:
+            group_by_field: omrctradeDealrefid
+            selector:
+              kind: group
+              id: grp_f8ccb64c09
+              operator: OR
+              children:
+                - kind: condition
+                  id: cond_d819dd96a2
+                  field: omrctradeParentid
+                  operator: eq
+                  value:
+                    type: static
+                    value: Y
+                    name:
+                  value2:
+                  values:
+                - kind: condition
+                  id: cond_f4cd217bda
+                  field: omrctradeParentid
+                  operator: eq
+                  value:
+                    type: static
+                    value: YES
+                    name:
+                  value2:
+                  values:
+                - kind: condition
+                  id: cond_801cf8abc0
+                  field: omrctradeParentid
+                  operator: eq
+                  value:
+                    type: static
+                    value: 'TRUE'
+                    name:
+                  value2:
+                  values:
+                - kind: condition
+                  id: cond_50203b0e38
+                  field: omrctradeParentid
+                  operator: eq
+                  value:
+                    type: static
+                    value: '1'
+                    name:
+                  value2:
+                  values:
+            join_keys: []
+            range_field:
+            range_low_column:
+            range_high_column:
+            date_field:
+            date_from_column:
+            date_to_column:
+            fields:
+              - source_column: omrctradePnlmurex
+                output_field: parent_pnl
+                transform:
+                aggregate:
+              - source_column: omrctradePnlthreshold
+                output_field: parent_threshold
+                transform:
+                aggregate:
+              - source_column: omrctradeProductioncredit
+                output_field: parent_prod_credit
+                transform:
+                aggregate:
+            join_type: left
+            missing_strategy: continue_null
+            default_values: {}
+            flag_field:
+            fallback_reference_file_id:
+            priority_strategy: first_match
+            priority_field:
+          calculate:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_abs
+          type: calculate
+          label: abs(parent PnL)
+          position:
+            x: 0.0
+            y: 420.0
+          filter:
+          lookup:
+          calculate:
+            output_field: parent_pnl_abs
+            formula:
+              kind: operation
+              op: abs
+              operands:
+                - kind: field
+                  field: parent_pnl
+            output_type: numeric
+            description:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_credit_x2
+          type: calculate
+          label: Production credit x2
+          position:
+            x: 0.0
+            y: 480.0
+          filter:
+          lookup:
+          calculate:
+            output_field: prod_credit_x2
+            formula:
+              kind: operation
+              op: multiply
+              operands:
+                - kind: field
+                  field: parent_prod_credit
+                - kind: constant
+                  value: 2
+            output_type: numeric
+            description:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_residual
+          type: calculate
+          label: Residual adjusted PnL
+          position:
+            x: 0.0
+            y: 540.0
+          filter:
+          lookup:
+          calculate:
+            output_field: residual_adj_pnl
+            formula:
+              kind: operation
+              op: abs
+              operands:
+                - kind: operation
+                  op: subtract
+                  operands:
+                    - kind: field
+                      field: parent_pnl
+                    - kind: field
+                      field: prod_credit_x2
+            output_type: numeric
+            description:
+          condition:
+          outcomes:
+          transform:
+          validation:
+        - id: n_condition
+          type: condition
+          label: Breach absorbed by production credit
+          position:
+            x: 0.0
+            y: 600.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+            kind: group
+            id: grp_6be8e0ee2c
+            operator: AND
+            children:
+              - kind: condition
+                id: cond_b879b48d61
+                field: parent_pnl_abs
+                operator: gt
+                value:
+                  type: column
+                  value:
+                  name: parent_threshold
+                value2:
+                values:
+              - kind: condition
+                id: cond_b1379b3ff1
+                field: residual_adj_pnl
+                operator: lte
+                value:
+                  type: column
+                  value:
+                  name: parent_threshold
+                value2:
+                values:
+          outcomes:
+          transform:
+          validation:
+        - id: n_outcome
+          type: outcome
+          label: Clear — OAR-FXO-006
+          position:
+            x: 0.0
+            y: 0.0
+          filter:
+          lookup:
+          calculate:
+          condition:
+          outcomes:
+            - field: Alert
+              value:
+                type: static
+                value: false
+                name:
+            - field: Reason
+              value:
+                type: static
+                value: OAR-BRV-FXO Margin
+                name:
+            - field: Commentary
+              value:
+                type: template
+                value: The Reported PnL (Murex) for the deal is {parent_pnl_abs}. Production Credit (x2) is {prod_credit_x2}. Residual Adj. PnL is {residual_adj_pnl}, which is below threshold level. Good to close.
+                name:
+          transform:
+          validation:
+      edges:
+        - id: edge_32a2283fdf
+          source: n_input
+          target: n_region
+        - id: edge_ccf732ce8c
+          source: n_region
+          target: n_product
+        - id: edge_98e0db1782
+          source: n_product
+          target: n_source
+        - id: edge_83ac5ac215
+          source: n_source
+          target: n_filter
+        - id: edge_55286ee81b
+          source: n_filter
+          target: n_group
+        - id: edge_5a9bed96b1
+          source: n_group
+          target: n_abs
+        - id: edge_bcf2b82661
+          source: n_abs
+          target: n_credit_x2
+        - id: edge_6b724596d0
+          source: n_credit_x2
+          target: n_residual
+        - id: edge_6ffcc8159c
+          source: n_residual
+          target: n_condition
+        - id: edge_da22a6e70c
+          source: n_condition
+          target: n_outcome
+    dataset_id:
+    required_columns:
+      - omrctradeRegion
+      - omrctradeProducttype
+      - uctradeSourcesystem
+      - omrctradeDealrefid
+      - omrctradeParentid
+      - omrctradePnlmurex
+      - omrctradePnlthreshold
+      - omrctradeProductioncredit
+    version: 1
+    created_by: migrate_fxo_validator
+    created_at: 1790164640.301094
+    updated_by: migrate_fxo_validator
+    updated_at: 1790164641.610218
+    notes: Migrated from fxo_validator.py — see migrate_fxo_validator.py header.
+    last_dry_run_id:
+    approvals:
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: VALIDATED
+        timestamp: 1790164640.6080852
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: DRY_RUN_COMPLETED
+        timestamp: 1790164640.9335203
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: PENDING_APPROVAL
+        timestamp: 1790164641.2657928
+        comment: migrate_fxo_validator.py
+      - actor: migrate_fxo_validator
+        role: ADMIN
+        action: APPROVED
+        timestamp: 1790164641.6102066
+        comment: migrate_fxo_validator.py
+    depends_on: []
+last_updated_at: 1790164641.8507974
+last_updated_by: migrate_fxo_validator

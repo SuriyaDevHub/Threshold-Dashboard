@@ -434,6 +434,26 @@ def test_self_group_lookup_sum_aggregate_across_group():
     assert by_id[4].final_record["total_pnl"] is None  # sum of zero numeric values -> no data, not 0.0
 
 
+def test_self_group_lookup_first_aggregate_skips_blank_representative_row():
+    # OAR-FXO-004's threshold: the group's first row happens to have a
+    # blank threshold, but a later row in the same structure has one —
+    # "first" should find that non-null value rather than broadcasting the
+    # representative (first) row's own blank one.
+    lookup = LookupConfig(
+        lookup_type=LookupType.SELF_GROUP, group_by_field="structure_id",
+        fields=[LookupFieldMap(source_column="threshold", output_field="structure_threshold", aggregate="first")],
+    )
+    wf = Workflow(nodes=[WorkflowNode(id="in", type=NodeType.INPUT), WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup)],
+                  edges=[WorkflowEdge(source="in", target="lk")])
+    rows = [
+        {"trade_id": 1, "structure_id": "S1", "threshold": None},
+        {"trade_id": 2, "structure_id": "S1", "threshold": 750.0},
+        {"trade_id": 3, "structure_id": "S1", "threshold": 900.0},
+    ]
+    results, _, _ = workflow_engine.run_workflow(wf, rows, reference_store.reference_loader, record_id_field="trade_id")
+    assert results[0].final_record["structure_threshold"] == 750.0  # not row 1's own None, not row 3's 900
+
+
 def test_self_group_lookup_two_aggregates_on_same_source_column_dont_clobber():
     # Regression: sum and count of the same source_column ("pnl") used to
     # be written into the representative row under that one shared key, so
@@ -1020,6 +1040,67 @@ def test_evaluate_record_no_match_respects_on_no_match_clear():
     _pub_rule("PR1", threshold=5.0)
     result = product_engine.evaluate_record(TEST_PRODUCT, {"deviation": 1.0}, "tester")
     assert result.matched is False
+
+
+def _pub_self_group_rule(rule_id: str = "SG1") -> Rule:
+    # Mirrors OAR-FXO-004's shape: sum a group's pnl and clear when it's
+    # within a threshold broadcast from the group.
+    lookup = LookupConfig(
+        lookup_type=LookupType.SELF_GROUP, group_by_field="structure_id",
+        fields=[
+            LookupFieldMap(source_column="pnl", output_field="total_pnl", aggregate="sum"),
+            LookupFieldMap(source_column="threshold", output_field="structure_threshold"),
+        ],
+    )
+    rule = _rule(rule_id=rule_id, name=rule_id, priority=100, workflow=Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup),
+            WorkflowNode(id="cond", type=NodeType.CONDITION, condition=ConditionGroup(operator="AND", children=[
+                Condition(field="total_pnl", operator=Operator.LTE, value=ValueRef(type="column", name="structure_threshold")),
+            ])),
+            WorkflowNode(id="out", type=NodeType.OUTCOME, outcomes=[
+                OutcomeAction(field="Reason", value=ValueRef(type="static", value=rule_id)),
+            ]),
+        ],
+        edges=[WorkflowEdge(source="in", target="lk"), WorkflowEdge(source="lk", target="cond"),
+               WorkflowEdge(source="cond", target="out")],
+    ))
+    rule_store.upsert_rule(rule, "tester")
+    rule.status = RuleStatus.PUBLISHED
+    return rule_store.upsert_rule(rule, "tester")
+
+
+def test_evaluate_record_context_rows_gives_self_group_lookup_sibling_visibility():
+    # A lone record is its own entire group — without sibling rows, a
+    # self_group LOOKUP's sum would just be that one record's own value,
+    # not the whole structure's. `context_rows` is what a per-trade
+    # validator wrapper passes to restore group visibility. Alone: 200 <=
+    # 250 clears. With a sibling in the same structure: summed 300 > 250
+    # breaches, so the rule no longer matches.
+    _pub_self_group_rule()
+    record = {"structure_id": "S1", "pnl": 200.0, "threshold": 250.0}
+    sibling = {"structure_id": "S1", "pnl": 100.0, "threshold": None}
+
+    lone = product_engine.evaluate_record(TEST_PRODUCT, record, "tester")
+    assert lone.matched is True and lone.matched_rule_id == "SG1"
+
+    grouped = product_engine.evaluate_record(TEST_PRODUCT, record, "tester", context_rows=[sibling])
+    assert grouped.matched is False
+
+
+def test_evaluate_record_context_rows_only_reflects_the_target_record():
+    # `record`'s own result is returned even when siblings are passed in —
+    # they're there purely for grouping visibility, not extra output rows.
+    _pub_self_group_rule()
+    record = {"structure_id": "S1", "pnl": 50.0, "threshold": 250.0}
+    # threshold is duplicated across every leg (as in the real data) so the
+    # broadcast value doesn't depend on which row is picked as
+    # representative — this test is about which record's own result comes
+    # back, not the representative-row-selection semantics covered above.
+    sibling = {"structure_id": "S1", "pnl": 50.0, "threshold": 250.0}
+    result = product_engine.evaluate_record(TEST_PRODUCT, record, "tester", context_rows=[sibling])
+    assert result.matched is True and result.matched_rule_id == "SG1"  # 100 summed <= 250
 
 
 # --------------------------------------------------------------------------

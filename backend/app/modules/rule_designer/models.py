@@ -331,9 +331,12 @@ class LookupFieldMap(BaseModel):
     # group's single representative row, aggregate it across every row in
     # the group first — e.g. "sum" a structure's total PnL across all its
     # deals rather than reading one deal's own PnL. One of
-    # sum/count/min/max; None/absent (the default, and the only meaningful
-    # value for every other lookup_type) keeps the plain representative-row
-    # behavior.
+    # sum/count/min/max/first ("first" = the first non-null value in row
+    # order, for a field expected to just be duplicated across the group —
+    # e.g. a shared threshold — that tolerates the representative row's own
+    # copy happening to be blank); None/absent (the default, and the only
+    # meaningful value for every other lookup_type) keeps the plain
+    # representative-row behavior.
     aggregate: Optional[str] = None
 
 

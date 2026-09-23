@@ -206,6 +206,7 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
                   <option value="count">count</option>
                   <option value="min">min</option>
                   <option value="max">max</option>
+                  <option value="first">first (non-null)</option>
                 </select>
               </div>
             )}
