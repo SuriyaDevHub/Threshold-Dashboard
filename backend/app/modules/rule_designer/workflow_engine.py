@@ -90,11 +90,45 @@ class _NodeIndex:
     fallback_idx: Optional[lookup_engine.LookupIndex] = None
 
 
+def _to_num_or_none(v: Any) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        return float(str(v).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _aggregate_value(op: str, rows: List[dict], field: str) -> Optional[float]:
+    """sum/count/min/max of `field` across every row in a self_group group
+    — e.g. summing a structure's total PnL across all its deals, where a
+    plain representative-row broadcast would only give you one deal's own
+    PnL. Non-numeric/missing values are skipped; an empty result is None
+    (not 0), so a group with no numeric data at all reads as "no data"
+    rather than a misleading zero."""
+    values = [v for v in (_to_num_or_none(r.get(field)) for r in rows) if v is not None]
+    if op == "count":
+        return float(len(values))
+    if not values:
+        return None
+    if op == "sum":
+        return sum(values)
+    if op == "min":
+        return min(values)
+    if op == "max":
+        return max(values)
+    return None
+
+
 def _self_group_reference_rows(input_rows: List[dict], cfg) -> Tuple[List[dict], Any]:
     """Build a self_group LOOKUP's "reference rows" by grouping the input
     dataset itself by `cfg.group_by_field` and picking one representative
     row per group via `cfg.selector` (the first row satisfying it; the
-    group's first row if no selector is set or nothing satisfies it).
+    group's first row if no selector is set or nothing satisfies it). Any
+    field mapping with `aggregate` set (sum/count/min/max) has its value
+    on the representative row overwritten with that aggregate computed
+    across every row in the group — e.g. a structure's total PnL summed
+    over all its deals, not just the representative deal's own PnL.
     Grouping always happens over the raw input rows the dry-run/dataset
     started with, not any upstream CALCULATE/TRANSFORM output within this
     same run — matching how a reference-file lookup's index is also built
@@ -115,6 +149,8 @@ def _self_group_reference_rows(input_rows: List[dict], cfg) -> Tuple[List[dict],
             continue
         groups.setdefault(key, []).append(row)
 
+    agg_fields = [fm for fm in cfg.fields if fm.aggregate]
+
     representatives = []
     for rows_in_group in groups.values():
         rep = rows_in_group[0]
@@ -123,8 +159,19 @@ def _self_group_reference_rows(input_rows: List[dict], cfg) -> Tuple[List[dict],
                 (r for r in rows_in_group if condition_engine.eval_tree(cfg.selector, r).result),
                 None,
             )
-        if rep is not None:
-            representatives.append(rep)
+        if rep is None:
+            continue
+        if agg_fields:
+            rep = dict(rep)  # copy — never mutate the caller's own input rows
+            for fm in agg_fields:
+                # A synthetic per-mapping key, not `fm.source_column` itself —
+                # two mappings commonly aggregate the same source_column with
+                # different ops (e.g. sum AND count of the same PnL field),
+                # and both writing "pnl" would let one silently clobber the
+                # other. lookup_engine.apply_lookup() reads this same key.
+                rep[lookup_engine.self_group_agg_key(fm.output_field)] = \
+                    _aggregate_value(fm.aggregate, rows_in_group, fm.source_column)
+        representatives.append(rep)
 
     effective_cfg = cfg.model_copy(update={
         "join_keys": [{"source": field_name, "reference": field_name}] if field_name else [],

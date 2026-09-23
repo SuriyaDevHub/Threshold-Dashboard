@@ -406,6 +406,59 @@ def test_self_group_lookup_missing_strategy_default_when_group_key_absent():
     assert results[0].final_record["parent_pnl"] == 0.0
 
 
+def test_self_group_lookup_sum_aggregate_across_group():
+    # Mirrors the legacy FxoValidator's TH structure grouping (OAR-FXO-004):
+    # sum PnL across every deal sharing a structure id (not just one
+    # representative deal's own PnL), while the threshold is broadcast
+    # from the group's first row same as any other self_group field.
+    lookup = LookupConfig(
+        lookup_type=LookupType.SELF_GROUP, group_by_field="structure_id",
+        fields=[
+            LookupFieldMap(source_column="pnl", output_field="total_pnl", aggregate="sum"),
+            LookupFieldMap(source_column="threshold", output_field="structure_threshold"),
+        ],
+    )
+    wf = Workflow(nodes=[WorkflowNode(id="in", type=NodeType.INPUT), WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup)],
+                  edges=[WorkflowEdge(source="in", target="lk")])
+    rows = [
+        {"trade_id": 1, "structure_id": "S1", "pnl": 100.0, "threshold": 500.0},
+        {"trade_id": 2, "structure_id": "S1", "pnl": 250.0, "threshold": None},
+        {"trade_id": 3, "structure_id": "S1", "pnl": 200.0, "threshold": None},
+        {"trade_id": 4, "structure_id": "S2", "pnl": None, "threshold": 10.0},  # no numeric pnl anywhere in S2
+    ]
+    results, _, _ = workflow_engine.run_workflow(wf, rows, reference_store.reference_loader, record_id_field="trade_id")
+    by_id = {r.record_id: r for r in results}
+    assert by_id[1].final_record["total_pnl"] == 550.0  # 100 + 250 + 200, not just row 1's own 100
+    assert by_id[2].final_record["total_pnl"] == 550.0  # broadcast to every row in S1
+    assert by_id[1].final_record["structure_threshold"] == 500.0  # plain broadcast from the group's first row
+    assert by_id[4].final_record["total_pnl"] is None  # sum of zero numeric values -> no data, not 0.0
+
+
+def test_self_group_lookup_two_aggregates_on_same_source_column_dont_clobber():
+    # Regression: sum and count of the same source_column ("pnl") used to
+    # be written into the representative row under that one shared key, so
+    # whichever field mapping's aggregate ran last silently overwrote the
+    # other's — both output fields would end up equal.
+    lookup = LookupConfig(
+        lookup_type=LookupType.SELF_GROUP, group_by_field="dealref",
+        fields=[
+            LookupFieldMap(source_column="pnl", output_field="total_pnl", aggregate="sum"),
+            LookupFieldMap(source_column="pnl", output_field="deal_count", aggregate="count"),
+        ],
+    )
+    wf = Workflow(nodes=[WorkflowNode(id="in", type=NodeType.INPUT), WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup)],
+                  edges=[WorkflowEdge(source="in", target="lk")])
+    rows = [
+        {"trade_id": 1, "dealref": "D1", "pnl": 100.0},
+        {"trade_id": 2, "dealref": "D1", "pnl": 50.0},
+        {"trade_id": 3, "dealref": "D1", "pnl": 25.0},
+    ]
+    results, _, _ = workflow_engine.run_workflow(wf, rows, reference_store.reference_loader, record_id_field="trade_id")
+    fr = results[0].final_record
+    assert fr["total_pnl"] == 175.0
+    assert fr["deal_count"] == 3.0
+
+
 def test_workflow_engine_end_to_end(tmp_path):
     ref = reference_store.upload_version(
         "ccy_ref", [{"Currency": "USD", "Threshold": 2.0}, {"Currency": "EUR", "Threshold": 3.0}], "tester")

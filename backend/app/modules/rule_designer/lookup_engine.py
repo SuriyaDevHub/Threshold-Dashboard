@@ -18,6 +18,15 @@ from app.modules.rule_designer.models import (
 )
 from app.modules.rule_designer.transform_ops import apply_transform_op
 
+# self_group aggregate values (see workflow_engine._self_group_reference_rows)
+# are stashed on the representative row under this synthetic per-field-mapping
+# key rather than overwriting `source_column` directly — two field mappings
+# commonly share the same source_column with different aggregate ops (e.g.
+# sum AND count of the same PnL field), and writing both into one shared key
+# would let the second silently clobber the first.
+def self_group_agg_key(output_field: str) -> str:
+    return f"__self_group_agg::{output_field}"
+
 
 def _key_tuple(row: dict, join_keys: List[Dict[str, Any]], side: str) -> Tuple[Any, ...]:
     """side: "source" or "reference" — which column name each join key
@@ -156,7 +165,10 @@ def apply_lookup(record: dict, idx: LookupIndex,
         chosen = _select_by_priority(candidates, config)
         fields = {}
         for fm in config.fields:
-            raw = chosen.get(fm.source_column)
+            if fm.aggregate and config.lookup_type == LookupType.SELF_GROUP:
+                raw = chosen.get(self_group_agg_key(fm.output_field))
+            else:
+                raw = chosen.get(fm.source_column)
             if fm.transform:
                 try:
                     raw = apply_transform_op(fm.transform.get("op"), raw, fm.transform)

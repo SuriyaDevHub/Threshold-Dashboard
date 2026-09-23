@@ -197,11 +197,29 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
                      onChange={(e) => updateFieldMap(i, { output_field: e.target.value })} />
               <button className="icon-btn" onClick={() => removeFieldMap(i)}><Trash2 size={13} /></button>
             </div>
+            {isSelfGroup && (
+              <div className="lk-row" style={{ marginTop: 6, marginBottom: 0 }}>
+                <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>across the whole group</span>
+                <select value={fm.aggregate || ""} onChange={(e) => updateFieldMap(i, { aggregate: e.target.value || null })}>
+                  <option value="">just this row (default)</option>
+                  <option value="sum">sum</option>
+                  <option value="count">count</option>
+                  <option value="min">min</option>
+                  <option value="max">max</option>
+                </select>
+              </div>
+            )}
             <div className="lk-row" style={{ marginTop: 6, marginBottom: 0 }}>
               <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>transform</span>
               <TransformOpFields transform={fm.transform} onChange={(t) => updateFieldMap(i, { transform: t })} allowNone />
             </div>
             {transformHint(fm.transform?.op) && <p className="empty-hint" style={{ marginTop: 4 }}>{transformHint(fm.transform?.op)}</p>}
+            {isSelfGroup && fm.aggregate && (
+              <p className="empty-hint" style={{ marginTop: 4 }}>
+                Every row sharing the same {lookup.group_by_field || "group"} value gets the {fm.aggregate} of{" "}
+                {fm.source_column || "this field"} across the whole group, not just the representative row's own value.
+              </p>
+            )}
           </div>
         ))}
         <button className="btn btn--ghost btn--xs" onClick={addFieldMap}><Plus size={13} /> Add field</button>

@@ -327,6 +327,14 @@ class LookupFieldMap(BaseModel):
     # output_field. None/absent means write the looked-up value through
     # unchanged, matching the prior (and still default) behavior.
     transform: Optional[Dict[str, Any]] = None
+    # self_group lookups only: instead of taking this field from the
+    # group's single representative row, aggregate it across every row in
+    # the group first — e.g. "sum" a structure's total PnL across all its
+    # deals rather than reading one deal's own PnL. One of
+    # sum/count/min/max; None/absent (the default, and the only meaningful
+    # value for every other lookup_type) keeps the plain representative-row
+    # behavior.
+    aggregate: Optional[str] = None
 
 
 class LookupConfig(BaseModel):
