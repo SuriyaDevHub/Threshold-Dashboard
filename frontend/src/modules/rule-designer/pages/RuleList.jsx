@@ -4,7 +4,6 @@ import { useAsync } from "../../../lib/useAsync.js";
 import { Card, Loader, ErrorState, ModuleHeader } from "../../../components/ui.jsx";
 import { rd } from "../api.js";
 import { useActor } from "../RoleContext.jsx";
-import { fmtDate } from "../format.js";
 
 function emptyWorkflow() {
   // Starts with zero nodes — a workflow needs no INPUT/Filter/Lookup/etc.
@@ -27,6 +26,19 @@ export default function RuleList({ onOpenRule }) {
   const [nextRuleId, setNextRuleId] = useState("");
   const [mode, setMode] = useState("visual");
   const [createError, setCreateError] = useState(null);
+  const [toggleError, setToggleError] = useState(null);
+
+  async function toggleRuleEnabled(e, r) {
+    e.stopPropagation(); // the row itself opens the rule — don't also navigate
+    if (!isAdmin) return;
+    setToggleError(null);
+    try {
+      await rd.setRuleEnabled(r.rule_id, actor, role, !r.enabled);
+      await reload();
+    } catch (err) {
+      setToggleError(String(err.message || err));
+    }
+  }
 
   const productList = products.data?.products || [];
   useEffect(() => { if (productList.length && !newProduct) setNewProduct(productList[0].code); }, [productList, newProduct]);
@@ -85,6 +97,8 @@ export default function RuleList({ onOpenRule }) {
         </label>
       </div>
 
+      {toggleError && <div className="errorbox">{toggleError}</div>}
+
       {creating && (
         <Card title="New rule">
           {createError && <div className="errorbox">{createError}</div>}
@@ -128,18 +142,30 @@ export default function RuleList({ onOpenRule }) {
           <table className="table">
             <thead>
               <tr>
-                <th>Rule</th><th>Product</th><th>Status</th><th>Priority</th><th>Version</th><th>Updated</th>
+                <th>Rule</th><th>Product</th><th>Enabled</th><th>Reason code</th><th>What this rule does</th>
               </tr>
             </thead>
             <tbody>
               {rules.map((r) => (
                 <tr key={r.rule_id} className="rd-clickable-row" onClick={() => onOpenRule(r.rule_id)}>
-                  <td><div>{r.name}</div><div className="mono ds-id">{r.rule_id}</div></td>
-                  <td className="mono">{r.product}{!r.enabled && <span className="badge badge--breach" style={{ marginLeft: 6 }}>disabled</span>}</td>
-                  <td><span className={`rd-status rd-status--${r.status.toLowerCase()}`}>{r.status.replace(/_/g, " ")}</span></td>
-                  <td className="mono">{r.priority}</td>
-                  <td className="mono">v{r.version}</td>
-                  <td className="mono">{fmtDate(r.updated_at)}</td>
+                  <td style={{ minWidth: 220, whiteSpace: "nowrap" }}>
+                    <div>{r.name}</div>
+                    <div className="mono ds-id">{r.rule_id}</div>
+                    <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                      <span className={`rd-status rd-status--${r.status.toLowerCase()}`}>{r.status.replace(/_/g, " ")}</span>
+                      <span className="mono" style={{ fontSize: 11, color: "var(--muted, #5b6775)" }}>priority {r.priority}</span>
+                    </div>
+                  </td>
+                  <td className="mono">{r.product}</td>
+                  <td onClick={(e) => e.stopPropagation()}>
+                    <label className="control" style={{ flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 }}>
+                      <input type="checkbox" checked={r.enabled} disabled={!isAdmin} onChange={(e) => toggleRuleEnabled(e, r)} />
+                    </label>
+                  </td>
+                  <td className="mono">
+                    {r.reason_code ? r.reason_code : <span style={{ fontStyle: "italic", color: "var(--muted, #5b6775)" }}>(dynamic)</span>}
+                  </td>
+                  <td className="rd-summary-cell" title={r.summary}>{r.summary}</td>
                 </tr>
               ))}
             </tbody>

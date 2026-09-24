@@ -1204,6 +1204,93 @@ def test_explanation_renders_template_outcome_values_not_none():
 
 
 # --------------------------------------------------------------------------
+# explain_service — generate_summary()/extract_reason_code(): the compact,
+# one-line fields GET /rules now returns per rule, replacing the legacy OAR
+# Business Rules admin screen's raw JSON Params column.
+# --------------------------------------------------------------------------
+
+def _outcome_rule(rule_id: str, reason_value: ValueRef, description: str = "",
+                   cond: ConditionGroup = None) -> Rule:
+    nodes = [WorkflowNode(id="in", type=NodeType.INPUT)]
+    edges = [WorkflowEdge(source="in", target="cond" if cond else "out")]
+    if cond:
+        nodes.append(WorkflowNode(id="cond", type=NodeType.CONDITION, condition=cond))
+        edges.append(WorkflowEdge(source="cond", target="out"))
+    nodes.append(WorkflowNode(id="out", type=NodeType.OUTCOME, outcomes=[
+        OutcomeAction(field="Alert", value=ValueRef(type="static", value=True)),
+        OutcomeAction(field="Reason", value=reason_value),
+    ]))
+    return _rule(rule_id=rule_id, name=rule_id, description=description,
+                 workflow=Workflow(nodes=nodes, edges=edges))
+
+
+def test_generate_summary_uses_authored_description():
+    rule = _outcome_rule("SUM1", ValueRef(type="static", value="OAR-X-001"),
+                          description="Flags trades booked at par with a stale reference price.")
+    assert explain_service.generate_summary(rule) == "Flags trades booked at par with a stale reference price."
+
+
+def test_generate_summary_falls_back_when_description_is_a_migration_note():
+    cond = ConditionGroup(operator="AND", children=[
+        Condition(field="region", operator=Operator.EQ, value=ValueRef(type="static", value="JP")),
+    ])
+    rule = _outcome_rule("SUM2", ValueRef(type="static", value="OAR-X-002"), cond=cond,
+                          description="Migrated from FxoValidator.validate_trade() OAR-FXO-001.")
+    summary = explain_service.generate_summary(rule)
+    assert "Migrated from" not in summary
+    assert "region is JP" in summary
+    assert "Reason = OAR-X-002" in summary
+
+
+def test_generate_summary_notes_self_group():
+    lookup = LookupConfig(
+        lookup_type=LookupType.SELF_GROUP, group_by_field="dealref",
+        fields=[LookupFieldMap(source_column="pnl", output_field="parent_pnl")],
+    )
+    cond = ConditionGroup(operator="AND", children=[
+        Condition(field="parent_pnl", operator=Operator.GT, value=ValueRef(type="static", value=100)),
+    ])
+    rule = _rule(rule_id="SUM3", name="SUM3", workflow=Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup),
+            WorkflowNode(id="cond", type=NodeType.CONDITION, condition=cond),
+            WorkflowNode(id="out", type=NodeType.OUTCOME, outcomes=[
+                OutcomeAction(field="Reason", value=ValueRef(type="static", value="OAR-X-003")),
+            ]),
+        ],
+        edges=[WorkflowEdge(source="in", target="lk"), WorkflowEdge(source="lk", target="cond"),
+               WorkflowEdge(source="cond", target="out")],
+    ))
+    summary = explain_service.generate_summary(rule)
+    assert summary.startswith("Grouped by dealref: ")
+
+
+def test_generate_summary_no_logic_configured():
+    rule = _rule(rule_id="SUM4", name="SUM4", workflow=Workflow(
+        nodes=[WorkflowNode(id="in", type=NodeType.INPUT)], edges=[],
+    ))
+    assert explain_service.generate_summary(rule) == "No logic configured yet."
+
+
+def test_extract_reason_code_static_value():
+    rule = _outcome_rule("RC1", ValueRef(type="static", value="OAR-BRV-OOS Product Code"))
+    assert explain_service.extract_reason_code(rule) == "OAR-BRV-OOS Product Code"
+
+
+def test_extract_reason_code_dynamic_value_returns_none():
+    rule = _outcome_rule("RC2", ValueRef(type="template", value="OAR-{region}-001"))
+    assert explain_service.extract_reason_code(rule) is None
+
+
+def test_extract_reason_code_no_outcome_node_returns_none():
+    rule = _rule(rule_id="RC3", name="RC3", workflow=Workflow(
+        nodes=[WorkflowNode(id="in", type=NodeType.INPUT)], edges=[],
+    ))
+    assert explain_service.extract_reason_code(rule) is None
+
+
+# --------------------------------------------------------------------------
 # product_engine — on_no_match fail-closed posture + evaluate_record
 # (the {product}_validator.py migration contract: legacy validators alert
 # a fully-unmatched record rather than silently clearing it)

@@ -43,6 +43,10 @@
 .rd-clickable-row { cursor: pointer; }
 .rd-clickable-row:hover { background: #fafbfc; }
 
+/* Rule list "What this rule does" cell — one line, full text on hover via
+   the native title attribute (see RuleList.jsx). */
+.rd-summary-cell { max-width: 1px; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 /* Condition builder */
 .cb-group { border: 1px solid var(--line, #e4e8ee); border-radius: 8px; padding: 10px; background: var(--bg, #f6f7f9); }
 .cb-group.depth-1 { background: var(--surface, #ffffff); }

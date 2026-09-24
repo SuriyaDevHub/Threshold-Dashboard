@@ -406,7 +406,17 @@ async def meta():
 
 @router.get("/rules")
 async def list_rules(product: Optional[str] = None):
-    return {"rules": [r.model_dump(mode="json") for r in rule_store.list_rules(product)]}
+    """`summary`/`reason_code` are derived here, not stored on Rule — see
+    explain_service.generate_summary()/extract_reason_code() — so the list
+    view (the business-friendly replacement for the old OAR Business Rules
+    admin screen's Params/Reason Code columns) always reflects the live
+    workflow in one request, with no N+1 calls to /rules/{id}/explanation."""
+    return {"rules": [
+        {**r.model_dump(mode="json"),
+         "summary": explain_service.generate_summary(r),
+         "reason_code": explain_service.extract_reason_code(r)}
+        for r in rule_store.list_rules(product)
+    ]}
 
 
 @router.get("/rules/{rule_id}")

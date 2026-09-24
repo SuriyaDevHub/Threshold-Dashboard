@@ -3,10 +3,12 @@ canonical model itself, not from the original free text, so it always
 reflects what the rule actually does after edits."""
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
 
 from app.modules.rule_designer import calc_ops, reference_store
-from app.modules.rule_designer.models import Condition, ConditionGroup, NodeType, Rule, ValueRef
+from app.modules.rule_designer.models import Condition, ConditionGroup, LookupType, NodeType, Rule, ValueRef
+
+_MIGRATION_NOTE_PREFIX = "Migrated from "
 
 _OP_TEXT = {
     "eq": "is", "ne": "is not", "gt": "is greater than", "lt": "is less than",
@@ -104,3 +106,60 @@ def generate_explanation(rule: Rule) -> str:
     lines.append("")
     lines.append(f"Priority {rule.priority}, conflict handling: {rule.conflict_handling.value.replace('_', ' ')}.")
     return "\n".join(lines)
+
+
+def _outcome_text(node) -> str:
+    parts = [f"{a.field} = {_value_text(a.value)}" for a in (node.outcomes or [])]
+    return "; ".join(parts) if parts else "an outcome"
+
+
+def generate_summary(rule: Rule) -> str:
+    """One sentence, for a list/table view — the compact counterpart to
+    generate_explanation()'s numbered walkthrough. Prefers rule.description
+    when it's an actual authored sentence; a migrate_*.py-generated
+    description (always literally "Migrated from ...") is provenance, not a
+    business explanation, so those fall through to a summary composed from
+    the workflow itself instead."""
+    desc = (rule.description or "").strip()
+    if desc and not desc.startswith(_MIGRATION_NOTE_PREFIX):
+        return desc
+
+    group_by = None
+    cond_text = None
+    outcome_text = None
+    for node in rule.workflow.nodes:
+        if node.type in (NodeType.LOOKUP, NodeType.ENRICHMENT) and node.lookup \
+                and node.lookup.lookup_type == LookupType.SELF_GROUP and group_by is None:
+            group_by = node.lookup.group_by_field
+        elif node.type in (NodeType.FILTER, NodeType.GROUP, NodeType.CONDITION) \
+                and (node.filter or node.condition) and cond_text is None:
+            cond_text = _condition_text(node.filter or node.condition)
+        elif node.type == NodeType.OUTCOME and node.outcomes and outcome_text is None:
+            outcome_text = _outcome_text(node)
+
+    if cond_text is None and outcome_text is None:
+        return "No logic configured yet."
+
+    prefix = f"Grouped by {group_by}: " if group_by else ""
+    if cond_text and outcome_text:
+        return f"{prefix}If {cond_text} → {outcome_text}."
+    if cond_text:
+        return f"{prefix}Applies where {cond_text}."
+    return f"{prefix}→ {outcome_text}."
+
+
+def extract_reason_code(rule: Rule) -> Optional[str]:
+    """The Outcome node's Reason value, for a list/table view — the same
+    "REASON CODE" column the legacy OAR Business Rules admin screen showed,
+    read from the canonical workflow instead of a separately stored field
+    (there isn't one; this IS where a rule's reason code lives). Only a
+    `static` value is returned — a `template`/`lookup`/`derived` Reason
+    isn't a fixed string, so the list shows "(dynamic)" for those rather
+    than a misleading unrendered placeholder."""
+    for node in rule.workflow.nodes:
+        if node.type != NodeType.OUTCOME or not node.outcomes:
+            continue
+        for action in node.outcomes:
+            if action.field == "Reason" and action.value is not None and action.value.type == "static":
+                return str(action.value.value)
+    return None
