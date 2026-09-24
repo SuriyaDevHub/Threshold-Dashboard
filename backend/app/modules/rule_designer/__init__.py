@@ -114,6 +114,17 @@ async def list_products():
     return {"products": [p.model_dump(mode="json") for p in product_registry.list_products()]}
 
 
+@router.get("/products/consistency-check")
+async def products_consistency_check():
+    """Backend validation for exactly the mismatch the rename action
+    fixes: a rules directory on disk with real rule content but no
+    matching registered product code (GenericValidator would find
+    nothing there) — see product_registry.consistency_report(). Must be
+    registered before GET /products/{code}, or that route would swallow
+    this path treating "consistency-check" as a product code."""
+    return product_registry.consistency_report()
+
+
 @router.get("/products/{code}")
 async def get_product(code: str):
     p = product_registry.get_product(code)
@@ -186,8 +197,15 @@ async def rename_product(code: str, body: RenameProductBody):
     updates the registry, so a failed rule-id collision check never
     leaves the registry pointing at a code with nothing moved to it. If
     `new_code` is already a separate registered product, this merges
-    `code`'s rules into it rather than refusing."""
+    `code`'s rules into it rather than refusing. `code` doesn't have to be
+    a registered product — it can be a stray rules directory that was
+    never registered at all (see product_registry.consistency_report()'s
+    orphaned_with_rules) — but it must be at least one of those two
+    things, or this is almost certainly a typo, not a real rename."""
     _require(body, "manage_products")
+    existing_rules, _ = yaml_service.load_rules(code)
+    if not product_registry.is_known_product(code) and not existing_rules:
+        raise HTTPException(404, f"'{code}' is not a registered product and has no rules on disk — nothing to rename")
     try:
         moved = yaml_service.rename_product_rules(code, body.new_code, body.actor)
         product, merged = product_registry.rename_product(code, body.new_code, body.actor)

@@ -1052,14 +1052,65 @@ def test_rename_product_merge_keeps_target_config_authoritative():
     assert product_registry.get_product(TEST_PRODUCT) is None
 
 
-def test_rename_product_unknown_old_code_raises():
-    with pytest.raises(ValueError):
-        product_registry.rename_product("NO_SUCH_PRODUCT", "WHATEVER", "admin")
+def test_rename_product_unregistered_old_code_registers_new_code_fresh():
+    # old_code doesn't have to be a registered product — the other real
+    # shape this fixes is a rules directory that was never registered at
+    # all (an orphan, e.g. GFXCASH next to the registered GFX_CASH). The
+    # route layer (not this function) is what refuses a pure typo — see
+    # the route's own guard requiring old_code to be registered OR have
+    # rules on disk.
+    product, merged = product_registry.rename_product("NO_SUCH_PRODUCT", "FRESH_CODE", "admin")
+    assert merged is False
+    assert product.code == "FRESH_CODE"
+    assert product_registry.get_product("NO_SUCH_PRODUCT") is None
 
 
 def test_rename_product_same_code_raises():
     with pytest.raises(ValueError):
         product_registry.rename_product(TEST_PRODUCT, TEST_PRODUCT.lower(), "admin")
+
+
+def test_rename_product_does_not_resurrect_asset_class_seeded_code():
+    # Regression for the actual reported bug: renaming AWAY from a code
+    # that's also one of ASSET_CLASSES's seeded defaults (CASH_BONDS is
+    # one — see app/core/asset_classes.py) must not have it silently
+    # reappear the next time anything calls _load() (e.g. the very next
+    # GET /products the frontend's own post-rename reload() makes).
+    product_registry.rename_product("CASH_BONDS", "CASHBONDS_FIXED", "admin")
+    assert product_registry.get_product("CASH_BONDS") is None
+    # simulate the frontend's reload() — any ordinary read call
+    product_registry.list_products()
+    product_registry.get_product("CASH_BONDS")
+    assert product_registry.get_product("CASH_BONDS") is None
+    assert product_registry.get_product("CASHBONDS_FIXED") is not None
+
+
+def test_create_product_clears_rename_tombstone():
+    product_registry.rename_product(TEST_PRODUCT, "RENAMED_AWAY", "admin")
+    assert product_registry.get_product(TEST_PRODUCT) is None
+    # deliberately re-creating the old code should work, not be silently
+    # blocked by its own earlier rename
+    product_registry.create_product(TEST_PRODUCT, "Recreated", "", "admin")
+    assert product_registry.get_product(TEST_PRODUCT) is not None
+
+
+def test_consistency_report_flags_orphaned_dir_with_rules():
+    yaml_service.save_rules([_rule(rule_id="ORPH1", name="ORPH1", product="ORPHAN_CODE")], actor="tester")
+    report = product_registry.consistency_report()
+    assert {"code": "ORPHAN_CODE", "rule_count": 1} in report["orphaned_with_rules"]
+    assert TEST_PRODUCT not in [o["code"] for o in report["orphaned_with_rules"]]
+
+
+def test_consistency_report_separates_empty_scaffold_dirs_from_real_orphans():
+    os.makedirs(yaml_service._product_dir("EMPTY_SCAFFOLD"), exist_ok=True)  # noqa: SLF001
+    report = product_registry.consistency_report()
+    assert "EMPTY_SCAFFOLD" in report["empty_scaffold_dirs"]
+    assert "EMPTY_SCAFFOLD" not in [o["code"] for o in report["orphaned_with_rules"]]
+
+
+def test_consistency_report_registered_without_rules_is_informational():
+    report = product_registry.consistency_report()
+    assert TEST_PRODUCT in report["registered_without_rules"]
 
 
 # --------------------------------------------------------------------------

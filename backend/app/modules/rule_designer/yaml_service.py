@@ -364,6 +364,15 @@ def rename_product_rules(old_code: str, new_code: str, actor: str = "system") ->
     old_code, new_code = old_code.upper(), new_code.upper()
     old_rules, _ = load_rules(old_code)
     if not old_rules:
+        # No rules to retag, but the old directory (e.g. an empty
+        # scaffold created by _ensure_dirs() the first time anything
+        # touched this code) should still go — otherwise it lingers as
+        # clutter that a later consistency check would flag.
+        old_dir = _product_dir(old_code)
+        if os.path.exists(old_dir):
+            shutil.rmtree(old_dir)
+        with _rules_cache_lock:
+            _rules_cache.pop(old_code, None)
         _move_or_merge_version_history(old_code, new_code)
         return 0
 

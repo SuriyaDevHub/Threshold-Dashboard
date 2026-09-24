@@ -19,6 +19,7 @@ export const rd = {
     post(`/products/${code}/migration-status`, { actor, role, migration_status }),
   renameProduct: (actor, role, code, newCode) =>
     post(`/products/${code}/rename`, { actor, role, new_code: newCode }),
+  productsConsistencyCheck: () => get("/products/consistency-check"),
   evaluateProduct: (code, body) => post(`/products/${code}/evaluate`, body),
   nextRuleId: (code) => get(`/products/${code}/next-rule-id`),
 

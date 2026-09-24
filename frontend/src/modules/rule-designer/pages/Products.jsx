@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Plus, ShieldAlert, Pencil } from "lucide-react";
+import { Plus, ShieldAlert, Pencil, AlertTriangle } from "lucide-react";
 import { useAsync } from "../../../lib/useAsync.js";
 import { Card, Loader, ErrorState, ModuleHeader } from "../../../components/ui.jsx";
 import { rd } from "../api.js";
@@ -11,6 +11,7 @@ const MIGRATION_CLASS = { not_migrated: "", in_progress: "watch", migrated: "pas
 export default function Products() {
   const { actor, role, isAdmin } = useActor();
   const { loading, data, error, reload } = useAsync(useCallback(() => rd.products(), []), []);
+  const consistency = useAsync(useCallback(() => (isAdmin ? rd.productsConsistencyCheck() : Promise.resolve(null)), [isAdmin]), [isAdmin]);
   const [creating, setCreating] = useState(false);
   const [code, setCode] = useState("");
   const [name, setName] = useState("");
@@ -18,6 +19,7 @@ export default function Products() {
   const [notice, setNotice] = useState(null);
   const [renamingCode, setRenamingCode] = useState(null);
   const [renameValue, setRenameValue] = useState("");
+  const [renameInFlight, setRenameInFlight] = useState(false);
 
   async function toggle(p) {
     if (!isAdmin) return;
@@ -53,6 +55,7 @@ export default function Products() {
   }
 
   async function submitRename(p) {
+    if (renameInFlight) return; // guard against a double-click firing two renames
     const newCode = renameValue.trim().toUpperCase();
     if (!newCode || newCode === p.code) { setRenamingCode(null); return; }
     if (!confirm(
@@ -61,6 +64,7 @@ export default function Products() {
       + `into it instead. This is how a product code that doesn't match what your validator integration actually `
       + `calls it gets fixed. It can't be undone automatically.`
     )) return;
+    setRenameInFlight(true);
     try {
       const result = await rd.renameProduct(actor, role, p.code, newCode);
       setRenamingCode(null);
@@ -69,7 +73,9 @@ export default function Products() {
         text: `${p.code} renamed to ${result.product.code}${result.merged ? " (merged into the existing product)" : ""} — ${result.rules_moved} rule(s) moved.`,
       });
       reload();
+      consistency.reload();
     } catch (e) { setNotice({ kind: "breach", text: String(e.message || e) }); }
+    finally { setRenameInFlight(false); }
   }
 
   if (loading) return <Loader label="Loading products…" />;
@@ -107,6 +113,52 @@ export default function Products() {
         </Card>
       )}
 
+      {isAdmin && consistency.data && (
+        consistency.data.orphaned_with_rules.length > 0 || consistency.data.empty_scaffold_dirs.length > 0
+      ) && (
+        <Card title="Consistency check">
+          {consistency.data.orphaned_with_rules.length > 0 && (
+            <div style={{ marginBottom: consistency.data.empty_scaffold_dirs.length ? 14 : 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
+                <AlertTriangle size={14} style={{ color: "var(--breach, #c0392b)" }} />
+                <strong>Rule directories with no registered product</strong>
+              </div>
+              <p className="empty-hint" style={{ marginTop: 0, marginBottom: 10 }}>
+                Rules exist on disk under these codes, but GenericValidator(product=…) won't find them under a code
+                that's not registered here. Rename each one to whatever your validator integration actually calls it.
+              </p>
+              {consistency.data.orphaned_with_rules.map((o) => (
+                <div key={o.code} className="lk-row" style={{ marginBottom: 6 }}>
+                  <span className="mono ds-id">{o.code}</span>
+                  <span className="ds-count">{o.rule_count} rule(s)</span>
+                  {renamingCode === o.code ? (
+                    <>
+                      <input
+                        className="mono" style={{ width: 160 }} autoFocus disabled={renameInFlight}
+                        value={renameValue} onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") submitRename({ code: o.code }); if (e.key === "Escape" && !renameInFlight) setRenamingCode(null); }}
+                      />
+                      <button className="btn btn--ghost" disabled={renameInFlight} onClick={() => submitRename({ code: o.code })}>
+                        {renameInFlight ? "Saving…" : "Save"}
+                      </button>
+                      <button className="btn btn--ghost" disabled={renameInFlight} onClick={() => setRenamingCode(null)}>Cancel</button>
+                    </>
+                  ) : (
+                    <button className="btn btn--ghost" onClick={() => startRename({ code: o.code })}>Rename to fix</button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {consistency.data.empty_scaffold_dirs.length > 0 && (
+            <p className="empty-hint" style={{ marginBottom: 0 }}>
+              Empty, unregistered rule directories with no rules in them (harmless — created the first time
+              something touched that code, nothing to move): {consistency.data.empty_scaffold_dirs.join(", ")}.
+            </p>
+          )}
+        </Card>
+      )}
+
       <div className="ds-list">
         {data.products.map((p) => (
           <Card key={p.code}>
@@ -117,12 +169,14 @@ export default function Products() {
                   {renamingCode === p.code ? (
                     <>
                       <input
-                        className="mono" style={{ width: 160 }} autoFocus
+                        className="mono" style={{ width: 160 }} autoFocus disabled={renameInFlight}
                         value={renameValue} onChange={(e) => setRenameValue(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === "Enter") submitRename(p); if (e.key === "Escape") setRenamingCode(null); }}
+                        onKeyDown={(e) => { if (e.key === "Enter") submitRename(p); if (e.key === "Escape" && !renameInFlight) setRenamingCode(null); }}
                       />
-                      <button className="btn btn--ghost" onClick={() => submitRename(p)}>Save</button>
-                      <button className="btn btn--ghost" onClick={() => setRenamingCode(null)}>Cancel</button>
+                      <button className="btn btn--ghost" disabled={renameInFlight} onClick={() => submitRename(p)}>
+                        {renameInFlight ? "Saving…" : "Save"}
+                      </button>
+                      <button className="btn btn--ghost" disabled={renameInFlight} onClick={() => setRenamingCode(null)}>Cancel</button>
                     </>
                   ) : (
                     <>
