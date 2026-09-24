@@ -30,7 +30,9 @@ from __future__ import annotations
 import io
 import json
 import os
+import threading
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import ValidationError
@@ -41,10 +43,26 @@ from app.modules.rule_designer.models import Rule
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 RULES_DIR = os.path.join(_BACKEND_DIR, "rules")
 
-_yaml = YAML()
-_yaml.preserve_quotes = True
-_yaml.width = 4096
-_yaml.indent(mapping=2, sequence=4, offset=2)
+def _new_yaml() -> YAML:
+    """A fresh ruamel YAML() instance per call — deliberately not a shared
+    module-level singleton. YAML() holds mutable parser/emitter state
+    across a single load()/dump() call, and this module is called
+    concurrently from multiple threads (rule_designer's own request
+    handlers, plus exception_analysis's in-process product_engine calls,
+    each of which re-reads a product's rules on every validation, all
+    dispatched through a thread pool). Two threads calling .load()/.dump()
+    on the SAME YAML() instance at the same time corrupt each other's
+    in-flight state and can write or read genuinely malformed YAML —
+    confirmed via a concurrent-writer repro that reliably corrupted output
+    when this was a shared instance. Constructing YAML() is cheap (just
+    sets a few config attributes), so paying that cost per call is the
+    simplest correct fix — no locking needed, since there's no shared
+    mutable state left to race on."""
+    y = YAML()
+    y.preserve_quotes = True
+    y.width = 4096
+    y.indent(mapping=2, sequence=4, offset=2)
+    return y
 
 
 def _product_dir(product: str) -> str:
@@ -118,7 +136,7 @@ def load_raw(product: str) -> Dict[str, Any]:
     if not os.path.exists(path):
         return {"schema_version": 1, "product": product.upper(), "rules": []}
     with open(path) as fh:
-        data = _yaml.load(fh)
+        data = _new_yaml().load(fh)
     return data if data is not None else {"schema_version": 1, "product": product.upper(), "rules": []}
 
 
@@ -186,10 +204,15 @@ def _backup(product: str) -> None:
 
 def _atomic_write(product: str, raw: Dict[str, Any]) -> None:
     path = _rules_file(product)
-    tmp_path = path + f".tmp{os.getpid()}"
+    # Unique per call, not just per process: os.getpid() alone collides
+    # across threads of the same process (this app runs rule_designer,
+    # data_fetch, and exception_analysis in one PyInstaller process, with
+    # request handling dispatched through a thread pool), which let two
+    # concurrent saves for the same product clobber each other's temp file.
+    tmp_path = f"{path}.tmp{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
     try:
         with open(tmp_path, "w") as fh:
-            _yaml.dump(raw, fh)
+            _new_yaml().dump(raw, fh)
         os.replace(tmp_path, path)
     except Exception:
         if os.path.exists(tmp_path):
@@ -259,8 +282,16 @@ def delete_rule(rule_id: str, product: str, actor: str = "system") -> bool:
 
 def dump_to_text(raw: Dict[str, Any]) -> str:
     buf = io.StringIO()
-    _yaml.dump(raw, buf)
+    _new_yaml().dump(raw, buf)
     return buf.getvalue()
+
+
+def load_text(text: str) -> Any:
+    """Parse a YAML string with the same round-trip loader load_raw() uses
+    (a fresh instance per call — see _new_yaml()'s own docstring for why).
+    For callers that already have YAML text in hand (e.g. a version
+    snapshot) rather than a product's live file."""
+    return _new_yaml().load(text)
 
 
 def rules_yaml_text(product: str) -> str:

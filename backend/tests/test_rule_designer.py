@@ -587,7 +587,7 @@ def test_yaml_round_trip_and_preserves_unrelated_keys():
                           "version": 1, "created_by": "x", "created_at": 0, "updated_by": "x",
                           "updated_at": 0, "notes": "", "approvals": [], "depends_on": []})
     with open(yaml_service._rules_file(TEST_PRODUCT), "w") as fh:  # noqa: SLF001
-        yaml_service._yaml.dump(raw, fh)  # noqa: SLF001
+        yaml_service._new_yaml().dump(raw, fh)  # noqa: SLF001
 
     rule.name = "Rule A1 (edited)"
     yaml_service.save_rules([rule], actor="tester2")
@@ -598,6 +598,67 @@ def test_yaml_round_trip_and_preserves_unrelated_keys():
     assert ids == {"A1", "LEGACY"}
     a1 = next(r for r in raw2["rules"] if r["rule_id"] == "A1")
     assert a1["name"] == "Rule A1 (edited)"
+
+
+def test_yaml_service_survives_concurrent_read_write():
+    """Regression for a real production incident: exception_analysis calls
+    into product_engine (and therefore yaml_service.load_rules()) once per
+    trade, dispatched across a thread pool — so many threads read (and,
+    less often, write) the same product's YAML at once. ruamel's YAML()
+    instances hold mutable parser/emitter state across a single load()/
+    dump() call; a shared module-level instance used from multiple threads
+    corrupts that state and produces exactly the errors seen in prod
+    ("string index out of range", "mapping values are not allowed here").
+    yaml_service._new_yaml() (a fresh instance per call) is the fix — this
+    test hammers it with concurrent readers and writers and asserts every
+    read succeeds and parses, and the file is never left unparseable."""
+    import threading
+
+    product = "CONCURRENCY_TEST"
+    yaml_service._ensure_dirs(product)  # noqa: SLF001
+    yaml_service._atomic_write(product, {  # noqa: SLF001
+        "schema_version": 1, "product": product,
+        "rules": [{"rule_id": "SEED", "name": "seed"}],
+    })
+
+    errors: list = []
+    errors_lock = threading.Lock()
+
+    def writer(marker: int) -> None:
+        try:
+            raw = {
+                "schema_version": 1, "product": product,
+                "rules": [
+                    {"rule_id": f"R{marker}_{i}", "name": "x" * 2000,
+                     "notes": "colon: value, dash - text"}
+                    for i in range(10)
+                ],
+            }
+            yaml_service._atomic_write(product, raw)  # noqa: SLF001
+        except Exception as exc:  # pragma: no cover - failure path under test
+            with errors_lock:
+                errors.append(("write", marker, exc))
+
+    def reader(marker: int) -> None:
+        try:
+            for _ in range(15):
+                data = yaml_service.load_raw(product)
+                assert isinstance(data, dict)
+                assert isinstance(data.get("rules"), list)
+        except Exception as exc:  # pragma: no cover - failure path under test
+            with errors_lock:
+                errors.append(("read", marker, exc))
+
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(8)]
+    threads += [threading.Thread(target=reader, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    final = yaml_service.load_raw(product)  # must still parse after the race
+    assert len(final.get("rules", [])) > 0
 
 
 def test_yaml_inspect_reports_parse_errors_without_crashing():

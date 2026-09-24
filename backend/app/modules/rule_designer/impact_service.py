@@ -13,7 +13,7 @@ def _published_rule_from_version(product: str, rule_id: str, version: int) -> Op
     text = version_service.get_version_yaml_text(product, version)
     if text is None:
         return None
-    raw = yaml_service._yaml.load(text)  # noqa: SLF001
+    raw = yaml_service.load_text(text)
     for item in raw.get("rules", []) or []:
         plain = yaml_service._plain(item)  # noqa: SLF001
         if plain.get("rule_id") == rule_id:

@@ -108,7 +108,7 @@ def rollback_to(product: str, version: int, actor: str) -> RuleSetVersion:
     if text is None:
         raise ValueError(f"{product} version {version} not found")
     old = get_version(product, version)
-    raw = yaml_service._yaml.load(text)  # noqa: SLF001 (intentional reuse of the same round-trip loader)
+    raw = yaml_service.load_text(text)
 
     yaml_service._ensure_dirs(product)  # noqa: SLF001
     yaml_service._backup(product)  # noqa: SLF001
