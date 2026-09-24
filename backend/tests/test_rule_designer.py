@@ -1242,6 +1242,35 @@ def test_generate_summary_falls_back_when_description_is_a_migration_note():
     assert "Reason = OAR-X-002" in summary
 
 
+def test_generate_summary_includes_every_condition_node_not_just_the_first():
+    # Regression: a real production rule (OAR-CASH_BONDS-001, "OOS Product
+    # Code") has a broad region FILTER, then a separate, more specific
+    # CONDITION on bookname/trade-id prefixes. generate_summary() used to
+    # stop at the first condition-bearing node, silently dropping the
+    # second — the list showed a summary that looked complete but wasn't.
+    region_filter = ConditionGroup(operator="AND", children=[
+        Condition(field="region", operator=Operator.EQ, value=ValueRef(type="static", value="HS")),
+    ])
+    book_condition = ConditionGroup(operator="AND", children=[
+        Condition(field="bookname", operator=Operator.EQ, value=ValueRef(type="static", value="398-RBM781")),
+    ])
+    rule = _rule(rule_id="SUM5", name="SUM5", workflow=Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="filt", type=NodeType.FILTER, filter=region_filter),
+            WorkflowNode(id="cond", type=NodeType.CONDITION, condition=book_condition),
+            WorkflowNode(id="out", type=NodeType.OUTCOME, outcomes=[
+                OutcomeAction(field="Reason", value=ValueRef(type="static", value="OAR-BRV-OOS Product Code")),
+            ]),
+        ],
+        edges=[WorkflowEdge(source="in", target="filt"), WorkflowEdge(source="filt", target="cond"),
+               WorkflowEdge(source="cond", target="out")],
+    ))
+    summary = explain_service.generate_summary(rule)
+    assert "region is HS" in summary
+    assert "bookname is 398-RBM781" in summary
+
+
 def test_generate_summary_notes_self_group():
     lookup = LookupConfig(
         lookup_type=LookupType.SELF_GROUP, group_by_field="dealref",

@@ -120,24 +120,34 @@ def generate_summary(rule: Rule) -> str:
     when it's an actual authored sentence; a migrate_*.py-generated
     description (always literally "Migrated from ...") is provenance, not a
     business explanation, so those fall through to a summary composed from
-    the workflow itself instead."""
+    the workflow itself instead.
+
+    Every FILTER/GROUP/CONDITION node's text is included, joined with AND —
+    a record only reaches the Outcome by passing ALL of them in sequence,
+    so a rule with e.g. a broad region FILTER followed by a more specific
+    booking/trade-id CONDITION (a real production pattern: OOS Product
+    Code rules narrow by region, then by a bookname/trade-id-prefix match)
+    needs every stage represented, not just the first one it hits — an
+    earlier version stopped at the first condition node and silently
+    dropped the rest, giving a summary that looked complete but wasn't."""
     desc = (rule.description or "").strip()
     if desc and not desc.startswith(_MIGRATION_NOTE_PREFIX):
         return desc
 
     group_by = None
-    cond_text = None
+    cond_texts: List[str] = []
     outcome_text = None
     for node in rule.workflow.nodes:
         if node.type in (NodeType.LOOKUP, NodeType.ENRICHMENT) and node.lookup \
                 and node.lookup.lookup_type == LookupType.SELF_GROUP and group_by is None:
             group_by = node.lookup.group_by_field
         elif node.type in (NodeType.FILTER, NodeType.GROUP, NodeType.CONDITION) \
-                and (node.filter or node.condition) and cond_text is None:
-            cond_text = _condition_text(node.filter or node.condition)
+                and (node.filter or node.condition):
+            cond_texts.append(_condition_text(node.filter or node.condition))
         elif node.type == NodeType.OUTCOME and node.outcomes and outcome_text is None:
             outcome_text = _outcome_text(node)
 
+    cond_text = " AND ".join(cond_texts) if cond_texts else None
     if cond_text is None and outcome_text is None:
         return "No logic configured yet."
 
