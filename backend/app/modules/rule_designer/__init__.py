@@ -197,6 +197,33 @@ async def evaluate_product(code: str, body: EvaluateProductBody):
     return result.model_dump(mode="json")
 
 
+class EvaluateRowsBody(Actor):
+    rows: List[Dict[str, Any]]
+    record_id_field: Optional[str] = None
+    record_sample_cap: Optional[int] = None
+
+
+@router.post("/products/{code}/evaluate-rows")
+async def evaluate_rows(code: str, body: EvaluateRowsBody):
+    """Same evaluation as `evaluate` (every active rule for this product,
+    together, fail-safe if disabled/empty), but against `rows` given
+    directly in the request body instead of a registered dataset_id — for
+    a caller that already holds its own pre-filtered/pre-transformed rows
+    in memory (e.g. exception_analysis's per-product loop) and would
+    otherwise need to register a throwaway dataset just to call
+    `evaluate`. `record_sample_cap` defaults to 500 like `evaluate`; pass
+    len(rows) to get every record back."""
+    _require(body, "dry_run")
+    kwargs = {}
+    if body.record_sample_cap is not None:
+        kwargs["record_sample_cap"] = body.record_sample_cap
+    try:
+        result = product_engine.evaluate_rows(code, body.rows, body.actor, body.record_id_field, **kwargs)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return result.model_dump(mode="json")
+
+
 class EvaluateRecordBody(Actor):
     record: Dict[str, Any]
     context_rows: Optional[List[Dict[str, Any]]] = None

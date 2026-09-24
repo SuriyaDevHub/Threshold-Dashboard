@@ -727,7 +727,10 @@ class ProductEvaluationSummary(BaseModel):
 class ProductEvaluationResult(BaseModel):
     id: str = Field(default_factory=lambda: _id("producteval"))
     product: str
-    dataset_id: str
+    # None for product_engine.evaluate_rows() calls made directly against an
+    # in-memory row list (no stored dataset involved) — always set for the
+    # dataset_id-based evaluate_product() path.
+    dataset_id: Optional[str] = None
     created_by: str = "system"
     created_at: float = Field(default_factory=time.time)
     summary: ProductEvaluationSummary = Field(default_factory=lambda: ProductEvaluationSummary(product=""))

@@ -217,6 +217,77 @@ class GenericValidator:
             results[rid] = new_result if (self.mode == "cutover" and new_result is not None) else legacy_result
         return results
 
+    def validate_many(self, trades: List[dict], record_id_field: Optional[str] = None) -> Dict[str, "ValidationResult"]:
+        """The fast path for a caller that already holds its own in-memory
+        list of trade dicts — not a dataset_id — e.g. exception_analysis's
+        per-product loop, which pre-filters against a validation cache and
+        only builds trade dicts (via its own row-to-trade transform) for
+        the rows that actually need a fresh validation. Registering those
+        as a throwaway dataset just to call validate_dataset() would be
+        pure overhead; this calls product_engine.evaluate_rows() directly
+        via POST /products/{code}/evaluate-rows — same ONE-call-total shape
+        as validate_dataset(), just against `trades` as given instead of a
+        stored dataset's rows.
+
+        Returns {record_id: ValidationResult}, one entry per trade (keys
+        are strings — the record_id_field's value, or the list index when
+        record_id_field is omitted). Replace a per-trade
+        `fxo_validator.validate_trade(trade)` loop with one call:
+
+            trades = [_fxo_trade_from_epe(row) for row in rows_needing_validation]
+            results = fxo_validator.validate_many(trades, record_id_field="eid")
+            for row in rows_needing_validation:
+                result = results[str(row["eid"])]
+
+        Shadow mode applies exactly like validate_dataset(): if
+        legacy_validate was supplied, it's called once per trade (a local
+        Python call) purely to log AGREE/DISAGREE and to decide which
+        result each trade actually returns."""
+        try:
+            resp = requests.post(
+                f"{RULE_ENGINE_BASE_URL}/products/{self.product}/evaluate-rows",
+                json={"actor": RULE_ENGINE_ACTOR, "role": "USER", "rows": trades,
+                      "record_id_field": record_id_field, "record_sample_cap": len(trades)},
+                timeout=RULE_ENGINE_DATASET_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            raise GenericValidatorEngineError(f"rule engine rows evaluation failed for {self.product}: {exc}") from exc
+
+        # --- in-process alternative (preferred where available — same
+        # Python env as Threshold-Dashboard, see validate_dataset()'s own
+        # in-process note) ---
+        # from app.modules.rule_designer import product_engine
+        # result = product_engine.evaluate_rows(self.product, trades, RULE_ENGINE_ACTOR,
+        #                                        record_id_field, record_sample_cap=len(trades))
+        # records_json = [r.model_dump(mode="json") for r in result.records]  # then map same as below
+
+        new_by_id: Dict[str, ValidationResult] = {}
+        for rec in resp.json().get("records", []):
+            outcome = rec.get("outcome") or {}
+            status = "ALERT" if (rec.get("matched") and outcome.get("Alert")) else "CLEAR"
+            new_by_id[str(rec.get("record_id"))] = ValidationResult(
+                status=status, rule_id=rec.get("matched_rule_id"),
+                reason_code=outcome.get("Reason"), commentary=outcome.get("Commentary"),
+            )
+
+        if self._legacy_validate is None:
+            if self.mode == "shadow":
+                log.warning(
+                    "GenericValidator(%s).validate_many: shadow mode with no legacy_validate — "
+                    "nothing to compare against, returning the new engine's results.", self.product,
+                )
+            return new_by_id
+
+        results: Dict[str, ValidationResult] = {}
+        for i, trade in enumerate(trades):
+            rid = str(trade.get(record_id_field)) if record_id_field else str(i)
+            new_result = new_by_id.get(rid)
+            legacy_result = self._legacy_validate(trade)
+            self._log_comparison(trade, new_result, None, legacy_result)
+            results[rid] = new_result if (self.mode == "cutover" and new_result is not None) else legacy_result
+        return results
+
     def _fetch_dataset_rows(self, dataset_id: str) -> List[dict]:
         try:
             resp = requests.get(f"{RULE_ENGINE_BASE_URL}/datasets/{dataset_id}/preview",

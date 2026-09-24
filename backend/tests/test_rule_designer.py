@@ -895,6 +895,40 @@ def test_product_engine_disabled_rule_excluded_from_active_set():
     assert result.summary.fail_safe_triggered is True  # zero *active* (published+enabled) rules left
 
 
+def test_product_engine_evaluate_rows_matches_evaluate_product():
+    """evaluate_rows() (the in-memory-list path a real exception_analysis
+    caller uses, since it already holds pre-filtered/pre-transformed rows
+    rather than a registered dataset_id) must give byte-identical per-record
+    results to evaluate_product() for the same rows — it's the same code
+    now, just entered without a dataset_store round trip."""
+    _pub_rule("ROWS1", threshold=1.0)
+    rows = [{"id": 1, "deviation": 9.0}, {"id": 2, "deviation": 0.1}]
+    ds = _dataset(rows)
+    via_dataset = product_engine.evaluate_product(TEST_PRODUCT, ds, "tester", record_id_field="id")
+    via_rows = product_engine.evaluate_rows(TEST_PRODUCT, rows, "tester", record_id_field="id")
+    assert [r.model_dump(mode="json") for r in via_rows.records] == [r.model_dump(mode="json") for r in via_dataset.records]
+    assert via_rows.summary.model_dump(mode="json") == via_dataset.summary.model_dump(mode="json")
+
+
+def test_product_engine_evaluate_rows_dataset_id_defaults_to_none():
+    _pub_rule("ROWS2", threshold=1.0)
+    result = product_engine.evaluate_rows(TEST_PRODUCT, [{"id": 1, "deviation": 9.0}], "tester", record_id_field="id")
+    assert result.dataset_id is None
+
+
+def test_product_engine_evaluate_rows_fail_safe_when_disabled():
+    _pub_rule("ROWS3", threshold=1.0)
+    product_registry.set_enabled(TEST_PRODUCT, False, "admin")
+    result = product_engine.evaluate_rows(TEST_PRODUCT, [{"id": 1, "deviation": 9.0}], "tester", record_id_field="id")
+    assert result.summary.fail_safe_triggered is True
+    assert result.summary.matched == 1
+
+
+def test_product_engine_evaluate_rows_unregistered_product_raises():
+    with pytest.raises(ValueError):
+        product_engine.evaluate_rows("NOT_A_REAL_PRODUCT", [{"id": 1}], "tester")
+
+
 # --------------------------------------------------------------------------
 # condition_engine — MATCHES_PATTERN (legacy _match_pattern/fnmatch parity)
 # --------------------------------------------------------------------------

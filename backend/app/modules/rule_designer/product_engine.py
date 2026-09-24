@@ -59,6 +59,23 @@ def evaluate_product(product: str, dataset_id: str, actor: str,
     if rows is None:
         raise ValueError(f"dataset '{dataset_id}' not found")
 
+    return evaluate_rows(product, rows, actor, record_id_field, record_sample_cap, dataset_id=dataset_id)
+
+
+def evaluate_rows(product: str, rows: List[dict], actor: str,
+                   record_id_field: Optional[str] = None,
+                   record_sample_cap: int = 500,
+                   dataset_id: Optional[str] = None) -> ProductEvaluationResult:
+    """Same evaluation as `evaluate_product`, against an in-memory row list
+    directly — no dataset_store lookup. For callers that already hold their
+    own pre-filtered/pre-transformed rows (e.g. exception_analysis's
+    per-product loops), where registering a throwaway dataset just to call
+    `evaluate_product` would be pure overhead. `evaluate_product` is now a
+    thin wrapper: resolve dataset_id -> rows, then call this."""
+    prod = product_registry.get_product(product)
+    if prod is None:
+        raise ValueError(f"product '{product}' is not registered")
+
     total = len(rows)
 
     if not prod.enabled:
