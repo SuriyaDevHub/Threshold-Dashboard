@@ -661,6 +661,74 @@ def test_yaml_service_survives_concurrent_read_write():
     assert len(final.get("rules", [])) > 0
 
 
+def test_load_rules_cache_never_serves_stale_data():
+    """load_rules() is now cached (see yaml_service._load_plain_rules_cached)
+    to fix the real production slowdown: every evaluate_record()/
+    evaluate_rows() call re-reads and re-parses YAML from disk with no
+    caching, unlike the old rules_singleton the hardcoded validators used.
+    This asserts the cache is still always correct: a save (or a rollback-
+    style direct _atomic_write) must be visible on the very next
+    load_rules() call, never stale by even one read."""
+    rule = _rule(rule_id="CACHE1", name="v1", priority=10)
+    rule_store.upsert_rule(rule, "tester")
+
+    rules, _ = yaml_service.load_rules(TEST_PRODUCT)
+    assert next(r for r in rules if r.rule_id == "CACHE1").name == "v1"
+
+    rule.name = "v2"
+    rule_store.upsert_rule(rule, "tester")
+    rules, _ = yaml_service.load_rules(TEST_PRODUCT)
+    assert next(r for r in rules if r.rule_id == "CACHE1").name == "v2"
+
+    rule_store.delete_rule("CACHE1", "tester", product=TEST_PRODUCT)
+    rules, _ = yaml_service.load_rules(TEST_PRODUCT)
+    assert all(r.rule_id != "CACHE1" for r in rules)
+
+    # A direct _atomic_write (what version_service.rollback_to does) must
+    # also invalidate correctly, not just save_rules()/delete_rule().
+    raw = yaml_service.load_raw(TEST_PRODUCT)
+    raw["rules"].append({
+        "rule_id": "CACHE2", "product": TEST_PRODUCT, "name": "rolled back",
+        "status": "DRAFT", "enabled": True, "priority": 5,
+        "conflict_handling": "first_match", "authoring_mode": "visual",
+        "interpretation_notes": [], "workflow": {"nodes": [], "edges": []},
+        "required_columns": [], "version": 1, "created_by": "x", "created_at": 0,
+        "updated_by": "x", "updated_at": 0, "notes": "", "approvals": [], "depends_on": [],
+    })
+    yaml_service._ensure_dirs(TEST_PRODUCT)  # noqa: SLF001
+    yaml_service._atomic_write(TEST_PRODUCT, raw)  # noqa: SLF001
+    rules, _ = yaml_service.load_rules(TEST_PRODUCT)
+    assert any(r.rule_id == "CACHE2" for r in rules)
+
+
+def test_load_rules_cache_avoids_repeated_disk_reads():
+    """The whole point of the cache: repeated load_rules() calls for an
+    unchanged product must not keep hitting disk. Patches open() to count
+    calls against this product's file specifically."""
+    rule = _rule(rule_id="CACHEPERF1", name="x")
+    rule_store.upsert_rule(rule, "tester")
+    yaml_service.load_rules(TEST_PRODUCT)  # warm the cache
+
+    path = yaml_service._rules_file(TEST_PRODUCT)  # noqa: SLF001
+    real_open = open
+    open_count = {"n": 0}
+
+    def counting_open(file, *args, **kwargs):
+        if str(file) == path:
+            open_count["n"] += 1
+        return real_open(file, *args, **kwargs)
+
+    import builtins
+    builtins.open = counting_open
+    try:
+        for _ in range(20):
+            yaml_service.load_rules(TEST_PRODUCT)
+    finally:
+        builtins.open = real_open
+
+    assert open_count["n"] == 0
+
+
 def test_yaml_inspect_reports_parse_errors_without_crashing():
     os.makedirs(yaml_service._product_dir(TEST_PRODUCT), exist_ok=True)  # noqa: SLF001
     with open(yaml_service._rules_file(TEST_PRODUCT), "w") as fh:  # noqa: SLF001

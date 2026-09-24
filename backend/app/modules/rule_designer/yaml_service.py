@@ -83,6 +83,63 @@ def _ensure_dirs(product: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# In-memory rules cache — the load_rules() hot path
+# --------------------------------------------------------------------------
+# load_rules() is called on every single evaluate_record()/evaluate_rows()
+# call (rule_store.list_rules() -> active_rules_for_product(), i.e. every
+# validation), so with no caching it re-reads and re-parses a product's
+# whole business_rules.yml from disk every time — the old hardcoded
+# {product}_validator.py files never paid this cost because they loaded
+# rules once via a process-wide singleton (rules_singleton.get_rules())
+# and reused it. This cache is that same idea, generalized per product so
+# every current and future product's validator gets it for free, with no
+# product-specific code anywhere.
+#
+# Cached at the plain-dict level (post-ruamel, pre-pydantic), not as
+# parsed Rule objects: load_rules() still re-validates into fresh Rule
+# instances from the cached dicts on every call, which is cheap (no I/O,
+# no YAML tokenizing) and means callers never share a mutable Rule object.
+#
+# Invalidation: _atomic_write() (the sole write path for these files)
+# updates the cache immediately after a successful write, using the raw
+# dict it already has in hand — no re-read needed, and no window where a
+# just-published rule could still read stale. The mtime check below is a
+# secondary safety net only, for the (not expected, per this module's own
+# "sole reader/writer" contract) case of the file changing outside this
+# process.
+_rules_cache_lock = threading.Lock()
+_rules_cache: Dict[str, Tuple[Optional[float], List[Dict[str, Any]]]] = {}
+
+
+def _file_mtime(product: str) -> Optional[float]:
+    try:
+        return os.path.getmtime(_rules_file(product))
+    except OSError:
+        return None
+
+
+def _load_plain_rules_cached(product: str) -> List[Dict[str, Any]]:
+    product = product.upper()
+    mtime = _file_mtime(product)
+    with _rules_cache_lock:
+        cached = _rules_cache.get(product)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+    raw = load_raw(product)
+    plain_rules = [_plain(item) for item in (raw.get("rules") or [])]
+    with _rules_cache_lock:
+        _rules_cache[product] = (mtime, plain_rules)
+    return plain_rules
+
+
+def _update_rules_cache(product: str, raw: Dict[str, Any]) -> None:
+    product = product.upper()
+    plain_rules = [_plain(item) for item in (raw.get("rules") or [])]
+    with _rules_cache_lock:
+        _rules_cache[product] = (_file_mtime(product), plain_rules)
+
+
+# --------------------------------------------------------------------------
 # rule_id -> product index (rule_id stays globally unique)
 # --------------------------------------------------------------------------
 
@@ -177,12 +234,14 @@ def _plain(obj: Any) -> Any:
 
 
 def load_rules(product: str) -> Tuple[List[Rule], List[Dict[str, Any]]]:
-    """Returns (rules that parsed, [{rule_id, errors}] for ones that didn't)."""
-    raw = load_raw(product)
+    """Returns (rules that parsed, [{rule_id, errors}] for ones that didn't).
+    This is the hot path (every evaluate_record()/evaluate_rows() call goes
+    through it via rule_store.list_rules()) — see _load_plain_rules_cached()
+    for why it doesn't hit disk/re-parse YAML on every call."""
+    plain_rules = _load_plain_rules_cached(product)
     rules: List[Rule] = []
     failures: List[Dict[str, Any]] = []
-    for item in raw.get("rules", []) or []:
-        plain = _plain(item)
+    for plain in plain_rules:
         try:
             rules.append(Rule.model_validate(plain))
         except ValidationError as exc:
@@ -218,6 +277,7 @@ def _atomic_write(product: str, raw: Dict[str, Any]) -> None:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
         raise
+    _update_rules_cache(product, raw)
 
 
 def save_rules(rules: List[Rule], actor: str = "system") -> None:
