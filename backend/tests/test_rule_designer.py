@@ -35,6 +35,7 @@ def isolated_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(version_service, "VERSIONS_DIR", str(tmp_path / "versions"))
     monkeypatch.setattr(reference_store, "BASE_DIR", str(tmp_path / "reference_data"))
     monkeypatch.setattr(product_registry, "REGISTRY_PATH", str(tmp_path / "rules" / "products.json"))
+    monkeypatch.setattr(product_registry, "REMOVED_CODES_PATH", str(tmp_path / "rules" / "_removed_product_codes.json"))
 
     import app.modules.rule_designer.audit_service as audit_service
     monkeypatch.setattr(audit_service, "AUDIT_DIR", str(tmp_path / "audit"))
@@ -830,6 +831,59 @@ def test_rename_product_rules_leaves_version_history_in_place_on_merge():
 
 def test_rename_product_rules_empty_product_returns_zero():
     assert yaml_service.rename_product_rules(TEST_PRODUCT, "NEW_CODE", "tester") == 0
+
+
+def test_rename_product_rules_renames_oar_convention_ids():
+    old_id = f"OAR-{TEST_PRODUCT}-001"
+    yaml_service.save_rules([_rule(rule_id=old_id, name="conventional")], actor="tester")
+
+    moved = yaml_service.rename_product_rules(TEST_PRODUCT, "NEW_CODE", "tester")
+    assert moved == 1
+
+    new_id = "OAR-NEW_CODE-001"
+    new_rules, _ = yaml_service.load_rules("NEW_CODE")
+    assert {r.rule_id for r in new_rules} == {new_id}
+    assert next(r for r in new_rules if r.rule_id == new_id).product == "NEW_CODE"
+
+    # the stale old id no longer resolves — it was removed from the index,
+    # not left pointing at a product that no longer has a rule under it
+    assert yaml_service.resolve_product(old_id) is None
+    assert yaml_service.resolve_product(new_id) == "NEW_CODE"
+
+
+def test_rename_product_rules_leaves_custom_ids_unchanged():
+    yaml_service.save_rules([_rule(rule_id="FX_DEVIATION_HIGH_RISK", name="custom")], actor="tester")
+
+    moved = yaml_service.rename_product_rules(TEST_PRODUCT, "NEW_CODE", "tester")
+    assert moved == 1
+
+    new_rules, _ = yaml_service.load_rules("NEW_CODE")
+    assert {r.rule_id for r in new_rules} == {"FX_DEVIATION_HIGH_RISK"}
+    assert yaml_service.resolve_product("FX_DEVIATION_HIGH_RISK") == "NEW_CODE"
+
+
+def test_rename_product_rules_collision_checked_against_renamed_ids():
+    # the source's rule_id, once renamed to the OAR-{new_code}-NNN
+    # convention, collides with an id already sitting under the target —
+    # even though the raw, un-renamed source id ("OAR-TESTPROD-001") never
+    # collides with anything. The collision guard must check the ids the
+    # rename would actually produce, not the ones being renamed away.
+    product_registry.create_product("OTHERPROD", "Other Product", "", "tester")
+    yaml_service.save_rules(
+        [_rule(rule_id=f"OAR-{TEST_PRODUCT}-001", name="source")], actor="tester"
+    )
+    yaml_service.save_rules(
+        [_rule(rule_id="OAR-OTHERPROD-001", name="target", product="OTHERPROD")], actor="tester"
+    )
+
+    with pytest.raises(ValueError):
+        yaml_service.rename_product_rules(TEST_PRODUCT, "OTHERPROD", "tester")
+
+    # nothing written on either side
+    source_rules, _ = yaml_service.load_rules(TEST_PRODUCT)
+    target_rules, _ = yaml_service.load_rules("OTHERPROD")
+    assert {r.rule_id for r in source_rules} == {f"OAR-{TEST_PRODUCT}-001"}
+    assert {r.rule_id for r in target_rules} == {"OAR-OTHERPROD-001"}
 
 
 # --------------------------------------------------------------------------

@@ -30,6 +30,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -341,6 +342,21 @@ def delete_rule(rule_id: str, product: str, actor: str = "system") -> bool:
     return True
 
 
+def _rule_id_for_new_product(rule_id: str, old_code: str, new_code: str) -> str:
+    """OAR-{OLD_CODE}-NNN -> OAR-{NEW_CODE}-NNN, preserving the sequence
+    number — matches rule_store.next_rule_id()'s own OAR-{PRODUCT}-NNN
+    convention exactly, so a renamed rule's id stays consistent with
+    every other rule under its new product (and with what a fresh
+    next_rule_id(new_code) call would produce next). A rule_id that
+    doesn't follow this convention (a hand-picked id like
+    FX_DEVIATION_HIGH_RISK) is left exactly as-is — there's no product
+    code embedded in it to fix."""
+    m = re.match(rf"^OAR-{re.escape(old_code)}-(\d+)$", rule_id, re.IGNORECASE)
+    if not m:
+        return rule_id
+    return f"OAR-{new_code}-{m.group(1)}"
+
+
 def rename_product_rules(old_code: str, new_code: str, actor: str = "system") -> int:
     """Moves every rule (and, where unambiguous, version history) from
     `old_code` to `new_code` — the fix for a product registered under the
@@ -356,10 +372,19 @@ def rename_product_rules(old_code: str, new_code: str, actor: str = "system") ->
     the atomic write, and rules/_index.json updated — all for free,
     exactly like a normal multi-rule save would.
 
+    Each rule's rule_id is renamed alongside its product when it follows
+    the OAR-{PRODUCT}-NNN convention (see _rule_id_for_new_product) —
+    confirmed as a real gap from a live screenshot: rules moved from
+    CASH_BONDS to CASHBONDS kept ids like OAR-CASH_BONDS-001, so the id
+    and the Product column disagreed about which product the rule
+    actually belonged to. The stale old id -> product index entry is
+    removed (save_rules() only ever adds/overwrites, never removes).
+
     If `new_code` is already a separate registered product (the
     CASHBONDS/CASH_BONDS shape), this merges old_code's rules into it —
-    a rule_id that exists under BOTH is refused up front, before any
-    write, rather than letting the merge silently pick one.
+    a rule_id (after renaming) that exists under BOTH is refused up
+    front, before any write, rather than letting the merge silently
+    pick one.
     """
     old_code, new_code = old_code.upper(), new_code.upper()
     old_rules, _ = load_rules(old_code)
@@ -376,16 +401,29 @@ def rename_product_rules(old_code: str, new_code: str, actor: str = "system") ->
         _move_or_merge_version_history(old_code, new_code)
         return 0
 
+    renamed_ids = [_rule_id_for_new_product(r.rule_id, old_code, new_code) for r in old_rules]
+    if len(set(renamed_ids)) != len(renamed_ids):
+        # two old rule_ids collapsed onto the same new id — shouldn't
+        # happen given unique NNN suffixes, but never silently merge them
+        raise ValueError(f"cannot rename '{old_code}' to '{new_code}': renaming would collide rule ids")
+
     new_rules, _ = load_rules(new_code)
-    collisions = {r.rule_id for r in old_rules} & {r.rule_id for r in new_rules}
+    existing_target_ids = {r.rule_id for r in new_rules}
+    collisions = set(renamed_ids) & existing_target_ids
     if collisions:
         raise ValueError(
             f"cannot rename '{old_code}' to '{new_code}': rule_id(s) "
             f"{sorted(collisions)} already exist under '{new_code}'"
         )
 
-    retagged = [r.model_copy(update={"product": new_code}) for r in old_rules]
+    id_changes = {r.rule_id: new_id for r, new_id in zip(old_rules, renamed_ids) if new_id != r.rule_id}
+    retagged = [
+        r.model_copy(update={"product": new_code, "rule_id": new_id})
+        for r, new_id in zip(old_rules, renamed_ids)
+    ]
     save_rules(retagged, actor=actor)
+    for old_id in id_changes:
+        _index_remove(old_id)
 
     old_dir = _product_dir(old_code)
     if os.path.exists(old_dir):
