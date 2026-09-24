@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from app.core.asset_classes import ASSET_CLASSES
 from app.modules.rule_designer.models import MigrationStatus, Product
@@ -138,3 +138,37 @@ def set_migration_status(code: str, status: MigrationStatus, actor: str) -> Prod
     data[code]["updated_at"] = time.time()
     _save(data)
     return Product.model_validate(data[code])
+
+
+def rename_product(old_code: str, new_code: str, actor: str) -> Tuple[Product, bool]:
+    """Fixes a product registered under the wrong code (spec: the
+    GenericValidator-integration mismatch, e.g. registry has CASHBONDS
+    but the validator calls it CASH_BONDS) — GenericValidator resolves
+    everything by this code, so this isn't cosmetic. Callers should move
+    the product's rules/version history (yaml_service.rename_product_rules)
+    BEFORE calling this, so a failed rule migration never leaves the
+    registry pointing at a code with no rules moved to it yet.
+
+    Returns (the resulting Product, whether this merged into an already-
+    registered new_code rather than a pure rename). On a merge, the
+    existing target's own config (enabled, migration_status, fail-safe
+    settings) is authoritative — it's the real product; the mismatched
+    one was the mistake — so only the old entry is discarded, nothing
+    about the target is overwritten."""
+    data = _load()
+    old_code, new_code = old_code.upper(), new_code.upper()
+    if old_code not in data:
+        raise ValueError(f"product '{old_code}' not found")
+    if old_code == new_code:
+        raise ValueError(f"'{old_code}' is already using that code")
+
+    merged = new_code in data
+    if not merged:
+        entry = dict(data[old_code])
+        entry["code"] = new_code
+        entry["updated_by"] = actor
+        entry["updated_at"] = time.time()
+        data[new_code] = entry
+    del data[old_code]
+    _save(data)
+    return Product.model_validate(data[new_code]), merged

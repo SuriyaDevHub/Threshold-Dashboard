@@ -171,6 +171,36 @@ async def set_product_migration_status(code: str, body: ProductMigrationBody):
     return p.model_dump(mode="json")
 
 
+class RenameProductBody(Actor):
+    new_code: str
+
+
+@router.post("/products/{code}/rename")
+async def rename_product(code: str, body: RenameProductBody):
+    """Fixes a product registered under a code that doesn't match what
+    the validator integration actually calls it (GenericValidator
+    resolves everything by this code, so a mismatch fails validation
+    outright, not just cosmetically). Moves every rule and, where
+    unambiguous, version history to `new_code` first — see
+    yaml_service.rename_product_rules()'s own docstring — and only then
+    updates the registry, so a failed rule-id collision check never
+    leaves the registry pointing at a code with nothing moved to it. If
+    `new_code` is already a separate registered product, this merges
+    `code`'s rules into it rather than refusing."""
+    _require(body, "manage_products")
+    try:
+        moved = yaml_service.rename_product_rules(code, body.new_code, body.actor)
+        product, merged = product_registry.rename_product(code, body.new_code, body.actor)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    audit_service.log(
+        body.actor, "UPDATE", role=body.role.value,
+        detail=f"renamed product '{code.upper()}' -> '{product.code}'"
+               f"{' (merged into existing product)' if merged else ''}, {moved} rule(s) moved",
+    )
+    return {"product": product.model_dump(mode="json"), "rules_moved": moved, "merged": merged}
+
+
 class EvaluateProductBody(Actor):
     dataset_id: str
     record_id_field: Optional[str] = None

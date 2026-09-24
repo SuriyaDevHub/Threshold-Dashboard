@@ -757,6 +757,82 @@ def test_rule_id_to_product_index_resolves_without_scanning():
 
 
 # --------------------------------------------------------------------------
+# yaml_service.rename_product_rules — fixes a product registered under a
+# code that doesn't match what the validator integration actually calls
+# it (spec: GenericValidator resolves everything by this code, so a
+# mismatch fails validation outright)
+# --------------------------------------------------------------------------
+
+def test_rename_product_rules_pure_rename_moves_rules_and_index():
+    yaml_service.save_rules([_rule(rule_id="RN1", name="RN1"), _rule(rule_id="RN2", name="RN2")], actor="tester")
+    version_service.publish_snapshot(TEST_PRODUCT, "tester", "d", ["RN1", "RN2"])
+
+    moved = yaml_service.rename_product_rules(TEST_PRODUCT, "NEW_CODE", "tester")
+    assert moved == 2
+
+    old_rules, _ = yaml_service.load_rules(TEST_PRODUCT)
+    new_rules, _ = yaml_service.load_rules("NEW_CODE")
+    assert old_rules == []
+    assert {r.rule_id for r in new_rules} == {"RN1", "RN2"}
+    assert all(r.product == "NEW_CODE" for r in new_rules)
+    assert yaml_service.resolve_product("RN1") == "NEW_CODE"
+    assert not os.path.exists(yaml_service._rules_file(TEST_PRODUCT))  # noqa: SLF001
+
+    # version history moved with it on a pure rename
+    assert version_service.next_version_number("NEW_CODE") == 2
+    assert version_service.next_version_number(TEST_PRODUCT) == 1  # nothing left behind
+
+
+def test_rename_product_rules_merge_combines_with_existing_target():
+    product_registry.create_product("OTHERPROD", "Other Product", "", "tester")
+    yaml_service.save_rules([_rule(rule_id="RN3", name="RN3")], actor="tester")
+    yaml_service.save_rules([_rule(rule_id="RN4", name="RN4", product="OTHERPROD")], actor="tester")
+
+    moved = yaml_service.rename_product_rules(TEST_PRODUCT, "OTHERPROD", "tester")
+    assert moved == 1
+
+    merged_rules, _ = yaml_service.load_rules("OTHERPROD")
+    assert {r.rule_id for r in merged_rules} == {"RN3", "RN4"}
+    old_rules, _ = yaml_service.load_rules(TEST_PRODUCT)
+    assert old_rules == []
+
+
+def test_rename_product_rules_collision_raises_and_writes_nothing():
+    product_registry.create_product("OTHERPROD", "Other Product", "", "tester")
+    yaml_service.save_rules([_rule(rule_id="DUP", name="from source")], actor="tester")
+    yaml_service.save_rules([_rule(rule_id="DUP", name="from target", product="OTHERPROD")], actor="tester")
+
+    with pytest.raises(ValueError):
+        yaml_service.rename_product_rules(TEST_PRODUCT, "OTHERPROD", "tester")
+
+    # nothing written on either side
+    source_rules, _ = yaml_service.load_rules(TEST_PRODUCT)
+    target_rules, _ = yaml_service.load_rules("OTHERPROD")
+    assert {r.rule_id for r in source_rules} == {"DUP"}
+    assert {r.rule_id for r in target_rules} == {"DUP"}
+    assert next(r for r in target_rules if r.rule_id == "DUP").name == "from target"
+
+
+def test_rename_product_rules_leaves_version_history_in_place_on_merge():
+    product_registry.create_product("OTHERPROD", "Other Product", "", "tester")
+    yaml_service.save_rules([_rule(rule_id="RN5", name="RN5")], actor="tester")
+    yaml_service.save_rules([_rule(rule_id="RN6", name="RN6", product="OTHERPROD")], actor="tester")
+    version_service.publish_snapshot(TEST_PRODUCT, "tester", "d", ["RN5"])
+    version_service.publish_snapshot("OTHERPROD", "tester", "d", ["RN6"])
+
+    yaml_service.rename_product_rules(TEST_PRODUCT, "OTHERPROD", "tester")
+
+    # target's own version numbering is untouched by the merge
+    assert version_service.next_version_number("OTHERPROD") == 2
+    # source's version history is left on disk, not deleted or spliced in
+    assert version_service.get_version(TEST_PRODUCT, 1) is not None
+
+
+def test_rename_product_rules_empty_product_returns_zero():
+    assert yaml_service.rename_product_rules(TEST_PRODUCT, "NEW_CODE", "tester") == 0
+
+
+# --------------------------------------------------------------------------
 # rule_store — lifecycle transitions, product-scoped lookup
 # --------------------------------------------------------------------------
 
@@ -954,6 +1030,36 @@ def test_product_enable_disable():
 def test_product_create_duplicate_rejected():
     with pytest.raises(ValueError):
         product_registry.create_product(TEST_PRODUCT, "dup", "", "tester")
+
+
+def test_rename_product_pure_rename_moves_config_and_drops_old_code():
+    product_registry.set_enabled(TEST_PRODUCT, False, "admin")
+    product, merged = product_registry.rename_product(TEST_PRODUCT, "RENAMED_CODE", "admin")
+    assert merged is False
+    assert product.code == "RENAMED_CODE"
+    assert product.enabled is False  # config carried over, not reset
+    assert product_registry.get_product(TEST_PRODUCT) is None
+    assert product_registry.get_product("RENAMED_CODE") is not None
+
+
+def test_rename_product_merge_keeps_target_config_authoritative():
+    product_registry.create_product("REALCODE", "Real Product", "the correct one", "admin")
+    product_registry.set_enabled("REALCODE", False, "admin")  # target's own config
+    product, merged = product_registry.rename_product(TEST_PRODUCT, "REALCODE", "admin")
+    assert merged is True
+    assert product.code == "REALCODE"
+    assert product.enabled is False  # target's config wins, not TEST_PRODUCT's
+    assert product_registry.get_product(TEST_PRODUCT) is None
+
+
+def test_rename_product_unknown_old_code_raises():
+    with pytest.raises(ValueError):
+        product_registry.rename_product("NO_SUCH_PRODUCT", "WHATEVER", "admin")
+
+
+def test_rename_product_same_code_raises():
+    with pytest.raises(ValueError):
+        product_registry.rename_product(TEST_PRODUCT, TEST_PRODUCT.lower(), "admin")
 
 
 # --------------------------------------------------------------------------

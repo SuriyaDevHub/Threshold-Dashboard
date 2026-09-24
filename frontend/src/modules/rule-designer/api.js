@@ -17,6 +17,8 @@ export const rd = {
   setProductEnabled: (actor, role, code, enabled) => post(`/products/${code}/enabled`, { actor, role, enabled }),
   setProductMigrationStatus: (actor, role, code, migration_status) =>
     post(`/products/${code}/migration-status`, { actor, role, migration_status }),
+  renameProduct: (actor, role, code, newCode) =>
+    post(`/products/${code}/rename`, { actor, role, new_code: newCode }),
   evaluateProduct: (code, body) => post(`/products/${code}/evaluate`, body),
   nextRuleId: (code) => get(`/products/${code}/next-rule-id`),
 

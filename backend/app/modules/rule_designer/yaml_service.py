@@ -30,6 +30,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -338,6 +339,73 @@ def delete_rule(rule_id: str, product: str, actor: str = "system") -> bool:
     _atomic_write(product, raw)
     _index_remove(rule_id)
     return True
+
+
+def rename_product_rules(old_code: str, new_code: str, actor: str = "system") -> int:
+    """Moves every rule (and, where unambiguous, version history) from
+    `old_code` to `new_code` — the fix for a product registered under the
+    wrong code (e.g. CASHBONDS when the validator integration actually
+    calls it CASH_BONDS): GenericValidator resolves everything by this
+    code, so a mismatch here means validation fails outright, not just
+    cosmetically. Returns the number of rules moved.
+
+    Reuses save_rules() for the actual merge rather than writing new
+    rules-file logic: retagging each rule's `product` and calling
+    save_rules() gets the target directory created, the target's current
+    file backed up, the rules merged into its `rules` list by rule_id,
+    the atomic write, and rules/_index.json updated — all for free,
+    exactly like a normal multi-rule save would.
+
+    If `new_code` is already a separate registered product (the
+    CASHBONDS/CASH_BONDS shape), this merges old_code's rules into it —
+    a rule_id that exists under BOTH is refused up front, before any
+    write, rather than letting the merge silently pick one.
+    """
+    old_code, new_code = old_code.upper(), new_code.upper()
+    old_rules, _ = load_rules(old_code)
+    if not old_rules:
+        _move_or_merge_version_history(old_code, new_code)
+        return 0
+
+    new_rules, _ = load_rules(new_code)
+    collisions = {r.rule_id for r in old_rules} & {r.rule_id for r in new_rules}
+    if collisions:
+        raise ValueError(
+            f"cannot rename '{old_code}' to '{new_code}': rule_id(s) "
+            f"{sorted(collisions)} already exist under '{new_code}'"
+        )
+
+    retagged = [r.model_copy(update={"product": new_code}) for r in old_rules]
+    save_rules(retagged, actor=actor)
+
+    old_dir = _product_dir(old_code)
+    if os.path.exists(old_dir):
+        shutil.rmtree(old_dir)
+    with _rules_cache_lock:
+        _rules_cache.pop(old_code, None)
+    _move_or_merge_version_history(old_code, new_code)
+    return len(retagged)
+
+
+def _move_or_merge_version_history(old_code: str, new_code: str) -> None:
+    """versions/{code}/ isn't owned by this module (version_service.py is)
+    — imported here, not at module scope, since version_service.py
+    already imports yaml_service (a real, load-time circular import, not
+    just a style preference)."""
+    from app.modules.rule_designer import version_service
+
+    old_dir = version_service._product_dir(old_code)  # noqa: SLF001
+    if not os.path.exists(old_dir):
+        return
+    new_dir = version_service._product_dir(new_code)  # noqa: SLF001
+    if os.path.exists(new_dir):
+        # Target already has its own version history — splicing two
+        # independently-numbered sequences together is more likely to
+        # confuse than help, so old_code's history is left in place,
+        # still on disk and inspectable, just not merged into new_code's
+        # next_version_number() sequence.
+        return
+    os.rename(old_dir, new_dir)
 
 
 def dump_to_text(raw: Dict[str, Any]) -> str:

@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Plus, ShieldAlert } from "lucide-react";
+import { Plus, ShieldAlert, Pencil } from "lucide-react";
 import { useAsync } from "../../../lib/useAsync.js";
 import { Card, Loader, ErrorState, ModuleHeader } from "../../../components/ui.jsx";
 import { rd } from "../api.js";
@@ -16,6 +16,8 @@ export default function Products() {
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [notice, setNotice] = useState(null);
+  const [renamingCode, setRenamingCode] = useState(null);
+  const [renameValue, setRenameValue] = useState("");
 
   async function toggle(p) {
     if (!isAdmin) return;
@@ -41,6 +43,31 @@ export default function Products() {
     try {
       await rd.createProduct(actor, role, code.trim().toUpperCase(), name.trim(), description.trim());
       setCreating(false); setCode(""); setName(""); setDescription("");
+      reload();
+    } catch (e) { setNotice({ kind: "breach", text: String(e.message || e) }); }
+  }
+
+  function startRename(p) {
+    setRenamingCode(p.code);
+    setRenameValue(p.code);
+  }
+
+  async function submitRename(p) {
+    const newCode = renameValue.trim().toUpperCase();
+    if (!newCode || newCode === p.code) { setRenamingCode(null); return; }
+    if (!confirm(
+      `Rename ${p.code} to ${newCode}? This moves every rule (and, where unambiguous, version history) from `
+      + `${p.code} to ${newCode} — if ${newCode} is already a registered product, ${p.code}'s rules are merged `
+      + `into it instead. This is how a product code that doesn't match what your validator integration actually `
+      + `calls it gets fixed. It can't be undone automatically.`
+    )) return;
+    try {
+      const result = await rd.renameProduct(actor, role, p.code, newCode);
+      setRenamingCode(null);
+      setNotice({
+        kind: "pass",
+        text: `${p.code} renamed to ${result.product.code}${result.merged ? " (merged into the existing product)" : ""} — ${result.rules_moved} rule(s) moved.`,
+      });
       reload();
     } catch (e) { setNotice({ kind: "breach", text: String(e.message || e) }); }
   }
@@ -87,7 +114,29 @@ export default function Products() {
               <div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <strong>{p.name}</strong>
-                  <span className="mono ds-id">{p.code}</span>
+                  {renamingCode === p.code ? (
+                    <>
+                      <input
+                        className="mono" style={{ width: 160 }} autoFocus
+                        value={renameValue} onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") submitRename(p); if (e.key === "Escape") setRenamingCode(null); }}
+                      />
+                      <button className="btn btn--ghost" onClick={() => submitRename(p)}>Save</button>
+                      <button className="btn btn--ghost" onClick={() => setRenamingCode(null)}>Cancel</button>
+                    </>
+                  ) : (
+                    <>
+                      <span className="mono ds-id">{p.code}</span>
+                      {isAdmin && (
+                        <button
+                          className="btn btn--ghost" title="Rename this product's code"
+                          style={{ padding: "2px 6px" }} onClick={() => startRename(p)}
+                        >
+                          <Pencil size={12} />
+                        </button>
+                      )}
+                    </>
+                  )}
                   {!p.enabled && (
                     <span className="badge badge--breach">
                       <ShieldAlert size={11} style={{ marginRight: 3, verticalAlign: "-2px" }} />disabled
