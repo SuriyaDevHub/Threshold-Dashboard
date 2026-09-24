@@ -3,6 +3,7 @@ canonical model itself, not from the original free text, so it always
 reflects what the rule actually does after edits."""
 from __future__ import annotations
 
+import string as _string_mod
 from typing import List, Optional
 
 from app.modules.rule_designer import calc_ops, reference_store
@@ -148,18 +149,44 @@ def generate_summary(rule: Rule) -> str:
     return f"{prefix}→ {outcome_text}."
 
 
+def _has_template_placeholder(text: str) -> bool:
+    """True if `text` contains an unresolved `{field}`-style placeholder,
+    matching expr_engine.render_template()'s str.format_map() syntax
+    exactly (so this agrees with what actually happens at evaluation
+    time). string.Formatter().parse() correctly handles escaped `{{`/`}}`
+    literal braces, unlike a naive '{' in text check. A malformed format
+    string (stray unmatched brace) is treated as a placeholder rather than
+    guessed to be a plain string."""
+    try:
+        return any(field_name is not None for _, field_name, _, _ in _string_mod.Formatter().parse(text))
+    except ValueError:
+        return True
+
+
 def extract_reason_code(rule: Rule) -> Optional[str]:
     """The Outcome node's Reason value, for a list/table view — the same
     "REASON CODE" column the legacy OAR Business Rules admin screen showed,
     read from the canonical workflow instead of a separately stored field
-    (there isn't one; this IS where a rule's reason code lives). Only a
-    `static` value is returned — a `template`/`lookup`/`derived` Reason
-    isn't a fixed string, so the list shows "(dynamic)" for those rather
-    than a misleading unrendered placeholder."""
+    (there isn't one; this IS where a rule's reason code lives).
+
+    A `static` value always counts as fixed. A `template` value counts as
+    fixed too, UNLESS its text actually contains a `{field}` placeholder —
+    the Outcome tab UI always stores Reason/Commentary as `type: "template"`
+    (see NodeConfigPanel.jsx's setReason()/setCommentary()) even when the
+    author never typed a placeholder, purely so `{field}` interpolation is
+    available if they want it later. Treating only `static` as "fixed"
+    meant every UI-authored rule's reason code showed as "(dynamic)" here
+    even though the text plainly wasn't — a `lookup`/`derived`/`column`
+    Reason is the only case that's genuinely dynamic and shows that way."""
     for node in rule.workflow.nodes:
         if node.type != NodeType.OUTCOME or not node.outcomes:
             continue
         for action in node.outcomes:
-            if action.field == "Reason" and action.value is not None and action.value.type == "static":
+            if action.field != "Reason" or action.value is None:
+                continue
+            if action.value.type == "static":
                 return str(action.value.value)
+            if action.value.type == "template":
+                text = str(action.value.value)
+                return None if _has_template_placeholder(text) else text
     return None

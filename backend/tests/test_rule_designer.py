@@ -1283,6 +1283,25 @@ def test_extract_reason_code_dynamic_value_returns_none():
     assert explain_service.extract_reason_code(rule) is None
 
 
+def test_extract_reason_code_fixed_template_text_is_not_dynamic():
+    """Regression: the Outcome tab UI (NodeConfigPanel.jsx's setReason())
+    always stores Reason as type="template", even when the author never
+    typed a {field} placeholder — this is the actual authoring path for
+    every UI-built rule (real CASH_BONDS rules hit exactly this: the list
+    showed "(dynamic)" for a plainly fixed code like "OAR-BRV-OOS Product
+    Code"). A template with no placeholder at all must read as fixed."""
+    rule = _outcome_rule("RC4", ValueRef(type="template", value="OAR-BRV-OOS Product Code"))
+    assert explain_service.extract_reason_code(rule) == "OAR-BRV-OOS Product Code"
+
+
+def test_extract_reason_code_escaped_braces_are_not_a_placeholder():
+    # str.format_map (what render_template actually uses) treats doubled
+    # braces as an escaped literal, not a field reference — the reason
+    # code detection must agree, not just naively look for "{" in the text.
+    rule = _outcome_rule("RC5", ValueRef(type="template", value="Breach on {{THRESHOLD}} set"))
+    assert explain_service.extract_reason_code(rule) == "Breach on {{THRESHOLD}} set"
+
+
 def test_extract_reason_code_no_outcome_node_returns_none():
     rule = _rule(rule_id="RC3", name="RC3", workflow=Workflow(
         nodes=[WorkflowNode(id="in", type=NodeType.INPUT)], edges=[],
