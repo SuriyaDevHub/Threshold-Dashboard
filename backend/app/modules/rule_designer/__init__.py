@@ -16,6 +16,7 @@ should end up calling.
 """
 from __future__ import annotations
 
+from datetime import date
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -105,13 +106,17 @@ async def dashboard(product: Optional[str] = None):
 
 
 @router.get("/dashboard/rule-usage")
-async def dashboard_rule_usage():
+async def dashboard_rule_usage(date_from: Optional[str] = None, date_to: Optional[str] = None):
     """What fraction of each product's committed live traffic (exception_
-    analysis's Global Live CSV — see GLOBAL_LIVE_CSV_PATH) each of its
-    rules actually accounted for, and which published rules accounted for
-    none of it. See rule_usage_service.compute_usage() for how hits are
-    attributed."""
-    usage = rule_usage_service.compute_usage()
+    analysis's Global Live CSV — see GLOBAL_LIVE_CSV_PATH), within an
+    optional [date_from, date_to] window (ISO YYYY-MM-DD, inclusive, over
+    each row's EXCEPTIONTIMESTAMP), each of its rules actually accounted
+    for, and which published rules accounted for none of it in that
+    window. See rule_usage_service.compute_usage() for how hits are
+    attributed and how the date window is applied."""
+    parsed_from = date.fromisoformat(date_from) if date_from else None
+    parsed_to = date.fromisoformat(date_to) if date_to else None
+    usage = rule_usage_service.compute_usage(parsed_from, parsed_to)
     out = []
     for p in product_registry.list_products():
         total = usage.product_totals.get(p.code, 0)
@@ -122,9 +127,9 @@ async def dashboard_rule_usage():
                 "rule_id": r.rule_id, "name": r.name, "status": r.status.value,
                 "enabled": r.enabled, "hits": hits,
                 "hit_pct": round(hits / total * 100, 2) if total else None,
-                # A published, enabled rule nobody's live data ever matched
-                # is the signal worth surfacing — a draft/unpublished rule
-                # with 0 hits is just expected, not a highlight.
+                # A published, enabled rule nobody's live data matched IN
+                # THIS WINDOW is the signal worth surfacing — a draft/
+                # unpublished rule with 0 hits is just expected, not a highlight.
                 "unused": hits == 0 and r.status == RuleStatus.PUBLISHED and r.enabled,
             })
         rule_rows.sort(key=lambda x: x["hits"])
@@ -133,6 +138,7 @@ async def dashboard_rule_usage():
     return {
         "available": usage.available, "csv_path": usage.csv_path,
         "as_of": usage.as_of, "total_rows": usage.total_rows,
+        "earliest_date": usage.earliest_date, "latest_date": usage.latest_date,
         "error": usage.error, "products": out,
     }
 

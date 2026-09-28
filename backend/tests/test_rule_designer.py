@@ -1821,7 +1821,10 @@ def test_rule_usage_counts_hits_and_skips_blank_rule_id(tmp_path, monkeypatch):
 
     usage = rule_usage_service.compute_usage()
     assert usage.available is True
-    assert usage.total_rows == 3
+    # total_rows now counts attributable rows only (blank RULE_ID rows were
+    # never attributable, so they were never part of what the Dashboard's
+    # totals/percentages reflect anyway) — matches sum(product_totals.values()).
+    assert usage.total_rows == 2
     assert usage.rule_hits == {"OAR-TESTPROD-001": 2}
     assert usage.product_totals == {TEST_PRODUCT: 2}
 
@@ -1851,13 +1854,20 @@ def test_rule_usage_tolerates_header_casing(tmp_path, monkeypatch):
 def test_rule_usage_caches_until_mtime_changes(tmp_path, monkeypatch):
     csv_path = _write_live_csv(tmp_path, [("OAR-TESTPROD-001", "ALERT", "X")])
     monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
+    # compute_usage() aggregates fresh per call (needed so a date window
+    # recomputes), but the expensive part — reading and parsing the CSV
+    # itself — is cached in _load_parsed(); that's what should be reused.
+    parsed_first = rule_usage_service._load_parsed()
+    parsed_second = rule_usage_service._load_parsed()
+    assert parsed_second is parsed_first  # same object — no re-parse
+
     first = rule_usage_service.compute_usage()
-    second = rule_usage_service.compute_usage()
-    assert second is first  # same object — no re-parse
+    assert first.rule_hits == {"OAR-TESTPROD-001": 1}
 
     _write_live_csv(tmp_path, [("OAR-TESTPROD-001", "ALERT", "X"), ("OAR-TESTPROD-001", "ALERT", "X")])
+    parsed_third = rule_usage_service._load_parsed()
+    assert parsed_third is not parsed_first
     third = rule_usage_service.compute_usage()
-    assert third is not first
     assert third.rule_hits == {"OAR-TESTPROD-001": 2}
 
 
@@ -1888,10 +1898,10 @@ def test_rule_usage_aggregates_a_directory_of_per_product_files(tmp_path, monkey
     assert usage.product_totals == {TEST_PRODUCT: 2, "OTHERPROD": 1}
 
     # adding a new per-product file invalidates the cache
-    (tmp_path / "thirdprod_validation_results.csv").write_text("RULE_ID,STATUS\nSOME_OTHER_ID,ALERT\n")
+    (tmp_path / "thirdprod_validation_results.csv").write_text("RULE_ID,STATUS\nOAR-TESTPROD-001,ALERT\n")
     usage2 = rule_usage_service.compute_usage()
-    assert usage2 is not usage
     assert usage2.total_rows == 4
+    assert usage2.rule_hits["OAR-TESTPROD-001"] == 3
 
 
 def test_rule_usage_falls_back_across_encodings_for_non_utf8_file(tmp_path, monkeypatch):
@@ -1910,6 +1920,55 @@ def test_rule_usage_falls_back_across_encodings_for_non_utf8_file(tmp_path, monk
     usage = rule_usage_service.compute_usage()
     assert usage.available is True
     assert usage.rule_hits == {"OAR-TESTPROD-001": 1}
+
+
+def test_rule_usage_date_range_recomputes_hits_and_reports_span(tmp_path, monkeypatch):
+    yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
+    csv_path = tmp_path / "testprod_validation_results.csv"
+    csv_path.write_text(
+        "RULE_ID,EXCEPTIONTIMESTAMP\n"
+        "OAR-TESTPROD-001,2026-09-10T09:00:00\n"
+        "OAR-TESTPROD-001,2026-09-20T09:00:00\n"
+        "OAR-TESTPROD-001,2026-09-30T09:00:00\n"
+    )
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
+
+    from datetime import date as _date
+
+    all_time = rule_usage_service.compute_usage()
+    assert all_time.rule_hits == {"OAR-TESTPROD-001": 3}
+    assert all_time.earliest_date == "2026-09-10"
+    assert all_time.latest_date == "2026-09-30"
+
+    narrowed = rule_usage_service.compute_usage(_date(2026, 9, 15), _date(2026, 9, 25))
+    assert narrowed.rule_hits == {"OAR-TESTPROD-001": 1}
+    assert narrowed.total_rows == 1
+
+    # inclusive at both ends
+    exact = rule_usage_service.compute_usage(_date(2026, 9, 10), _date(2026, 9, 10))
+    assert exact.rule_hits == {"OAR-TESTPROD-001": 1}
+
+
+def test_rule_usage_date_range_excludes_rows_with_no_parseable_timestamp(tmp_path, monkeypatch):
+    yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
+    csv_path = tmp_path / "testprod_validation_results.csv"
+    csv_path.write_text(
+        "RULE_ID,EXCEPTIONTIMESTAMP\n"
+        "OAR-TESTPROD-001,2026-09-10T09:00:00\n"
+        "OAR-TESTPROD-001,\n"          # blank timestamp
+        "OAR-TESTPROD-001,not-a-date\n"  # unparseable
+    )
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
+
+    from datetime import date as _date
+
+    # no range given — every attributable row counts regardless of timestamp
+    all_time = rule_usage_service.compute_usage()
+    assert all_time.rule_hits == {"OAR-TESTPROD-001": 3}
+
+    # a range given — rows with no confirmed date are excluded, not guessed into range
+    ranged = rule_usage_service.compute_usage(_date(2026, 9, 1), _date(2026, 9, 30))
+    assert ranged.rule_hits == {"OAR-TESTPROD-001": 1}
 
 
 def test_dashboard_rule_usage_route_flags_published_enabled_zero_hit_rule(tmp_path, monkeypatch):
@@ -1933,3 +1992,27 @@ def test_dashboard_rule_usage_route_flags_published_enabled_zero_hit_rule(tmp_pa
     assert by_id["OAR-TESTPROD-002"]["hits"] == 0
     assert by_id["OAR-TESTPROD-002"]["unused"] is True  # published + enabled + never hit
     assert by_id["OAR-TESTPROD-003"]["unused"] is False  # draft — not a signal
+
+
+def test_dashboard_rule_usage_route_applies_date_from_date_to_query_params(tmp_path, monkeypatch):
+    yaml_service.save_rules([
+        _rule(rule_id="OAR-TESTPROD-001", name="R1", status=RuleStatus.PUBLISHED, enabled=True),
+    ], actor="tester")
+    csv_path = tmp_path / "testprod_validation_results.csv"
+    csv_path.write_text(
+        "RULE_ID,EXCEPTIONTIMESTAMP\n"
+        "OAR-TESTPROD-001,2026-09-10T09:00:00\n"
+        "OAR-TESTPROD-001,2026-09-20T09:00:00\n"
+    )
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
+
+    import asyncio
+    from app.modules.rule_designer import dashboard_rule_usage
+    body = asyncio.run(dashboard_rule_usage(date_from="2026-09-15", date_to="2026-09-25"))
+
+    product = next(p for p in body["products"] if p["code"] == TEST_PRODUCT)
+    assert product["total_live_rows"] == 1
+    assert body["earliest_date"] == "2026-09-10"
+    assert body["latest_date"] == "2026-09-20"
+    by_id = {r["rule_id"]: r for r in product["rules"]}
+    assert by_id["OAR-TESTPROD-001"]["hits"] == 1
