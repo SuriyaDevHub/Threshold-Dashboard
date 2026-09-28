@@ -179,9 +179,19 @@ export default function Dashboard({ onOpenRule }) {
   // the immediately preceding, equal-length window.
   const totalAlerts = useMemo(() => sumAlerts(data), [data]);
   const priorTotalAlerts = useMemo(() => sumAlerts(priorData), [priorData]);
-  const alertsDeltaPct = useMemo(() => {
-    if (totalAlerts == null || !priorTotalAlerts) return null;
-    return Math.round(((totalAlerts - priorTotalAlerts) / priorTotalAlerts) * 1000) / 10;
+  // A percent change computed off a tiny prior-period base is noise, not
+  // signal — 620 vs a prior period of 29 reads as "+2038%", which alarms
+  // without informing (one more/fewer alert back then swings it by dozens
+  // of points). Below this floor, show the absolute change and the prior
+  // number itself instead of a percentage.
+  const MIN_PRIOR_FOR_PCT = 20;
+  const alertsDelta = useMemo(() => {
+    if (totalAlerts == null || priorTotalAlerts == null) return null;
+    const diff = totalAlerts - priorTotalAlerts;
+    if (priorTotalAlerts < MIN_PRIOR_FOR_PCT) {
+      return { kind: "absolute", diff, prior: priorTotalAlerts };
+    }
+    return { kind: "pct", pct: Math.round((diff / priorTotalAlerts) * 1000) / 10 };
   }, [totalAlerts, priorTotalAlerts]);
 
   // Coverage — of every published, enabled (i.e. actually live) rule, what
@@ -353,9 +363,14 @@ export default function Dashboard({ onOpenRule }) {
     );
   }
 
-  const alertsDeltaLabel = alertsDeltaPct == null
-    ? null
-    : `${alertsDeltaPct > 0 ? "+" : ""}${alertsDeltaPct}% vs prior period`;
+  const alertsDeltaLabel = (() => {
+    if (!alertsDelta) return null;
+    if (alertsDelta.kind === "pct") {
+      return `${alertsDelta.pct > 0 ? "+" : ""}${alertsDelta.pct}% vs prior period`;
+    }
+    const { diff, prior } = alertsDelta;
+    return `${diff > 0 ? "+" : ""}${diff} vs prior period (only ${prior} then — too few for a %)`;
+  })();
   const selectedProductName = productFilter
     ? (data.products.find((p) => p.code === productFilter)?.name || productFilter)
     : null;
