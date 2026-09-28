@@ -201,7 +201,17 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
       <Card>
         <div className="controls controls--row">
           <DatasetSelector label="Bound dataset" datasets={datasets} value={datasetId}
-                            onChange={(v) => { if (isAdmin) { setDatasetId(v); setDirty(true); } }} />
+                            onChange={(v) => {
+                              if (!isAdmin) return;
+                              setDatasetId(v); setDirty(true);
+                              // A validation error naming the OLD dataset_id (e.g.
+                              // "dataset 'ds_...' not found") stays on screen otherwise —
+                              // it was true of the binding that's now being replaced, not
+                              // of what Validate would report next, and reads as if
+                              // re-binding didn't fix anything. Clear it so the banner
+                              // only ever reflects the currently-bound dataset.
+                              setValidation(null);
+                            }} />
           <label className="control"><span>Priority</span>
             <input type="number" value={rule.priority} disabled={!isAdmin}
                    onChange={(e) => { setRule((r) => ({ ...r, priority: Number(e.target.value) })); setDirty(true); }} />
