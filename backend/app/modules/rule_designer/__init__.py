@@ -110,9 +110,9 @@ async def dashboard_rule_usage(date_from: Optional[str] = None, date_to: Optiona
     """What fraction of each product's committed live traffic (exception_
     analysis's Global Live CSV — see GLOBAL_LIVE_CSV_PATH), within an
     optional [date_from, date_to] window (ISO YYYY-MM-DD, inclusive, over
-    each row's EXCEPTIONTIMESTAMP), each of its rules actually accounted
-    for, and which published rules accounted for none of it in that
-    window. See rule_usage_service.compute_usage() for how hits are
+    each row's OMRCTRADECLOSEOFBUSINESSDATE), each of its rules actually
+    accounted for, and which published rules accounted for none of it in
+    that window. See rule_usage_service.compute_usage() for how hits are
     attributed and how the date window is applied."""
     parsed_from = date.fromisoformat(date_from) if date_from else None
     parsed_to = date.fromisoformat(date_to) if date_to else None

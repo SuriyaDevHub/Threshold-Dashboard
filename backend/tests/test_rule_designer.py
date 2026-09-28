@@ -1766,6 +1766,24 @@ def test_rule_usage_falls_back_to_rule_id_pattern_for_unknown_id(tmp_path, monke
     assert usage.rule_hits == {"OAR-TESTPROD-999": 1}
 
 
+def test_rule_usage_maps_legacy_gfx_rule_ids_to_gfxcash(tmp_path, monkeypatch):
+    # Historical exception_analysis rows committed before GFX was renamed
+    # to GFXCASH still carry rule_ids shaped "OAR-GFX-NNN" — the regex
+    # fallback's naive group(1) would bucket those under a phantom "GFX"
+    # product distinct from the registered "GFXCASH", splitting one
+    # product's volume into two totals. They must land in the same bucket.
+    product_registry.create_product("GFXCASH", "GFX Cash", "", "tester")
+    csv_path = _write_live_csv(tmp_path, [
+        ("OAR-GFX-001", "ALERT", "X"),
+        ("OAR-GFXCASH-002", "ALERT", "X"),
+    ])
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
+
+    usage = rule_usage_service.compute_usage()
+    assert usage.product_totals == {"GFXCASH": 2}
+    assert usage.rule_hits == {"OAR-GFX-001": 1, "OAR-GFXCASH-002": 1}
+
+
 def test_rule_usage_mixed_product_file_falls_back_to_row_level_attribution(tmp_path, monkeypatch):
     # The "one combined CSV across every product" shape this module still
     # supports, as opposed to the live one-file-per-product shape: a single
@@ -1884,7 +1902,7 @@ def test_rule_usage_date_range_recomputes_hits_and_reports_span(tmp_path, monkey
     yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
     csv_path = tmp_path / "testprod_validation_results.csv"
     csv_path.write_text(
-        "RULE_ID,EXCEPTIONTIMESTAMP\n"
+        "RULE_ID,OMRCTRADECLOSEOFBUSINESSDATE\n"
         "OAR-TESTPROD-001,2026-09-10T09:00:00\n"
         "OAR-TESTPROD-001,2026-09-20T09:00:00\n"
         "OAR-TESTPROD-001,2026-09-30T09:00:00\n"
@@ -1912,14 +1930,14 @@ def test_rule_usage_daily_product_counts_bucketed_by_day_and_product(tmp_path, m
     yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
     yaml_service.save_rules([_rule(rule_id="OAR-OTHERPROD-001", name="R2", product="OTHERPROD")], actor="tester")
     (tmp_path / "testprod_validation_results.csv").write_text(
-        "RULE_ID,EXCEPTIONTIMESTAMP\n"
+        "RULE_ID,OMRCTRADECLOSEOFBUSINESSDATE\n"
         "OAR-TESTPROD-001,2026-09-10T09:00:00\n"
         "OAR-TESTPROD-001,2026-09-10T14:00:00\n"  # same day — one bucket
         "OAR-TESTPROD-001,2026-09-11T09:00:00\n"
         "OAR-TESTPROD-001,\n"  # no timestamp — counted in totals, not in daily buckets
     )
     (tmp_path / "otherprod_validation_results.csv").write_text(
-        "RULE_ID,EXCEPTIONTIMESTAMP\nOAR-OTHERPROD-001,2026-09-10T09:00:00\n"
+        "RULE_ID,OMRCTRADECLOSEOFBUSINESSDATE\nOAR-OTHERPROD-001,2026-09-10T09:00:00\n"
     )
     monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(tmp_path))
 
@@ -1968,7 +1986,7 @@ def test_rule_usage_status_totals_excludes_rows_with_missing_or_unrecognized_sta
 def test_rule_usage_daily_status_counts_bucketed_by_day_product_and_category(tmp_path, monkeypatch):
     yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
     (tmp_path / "testprod_validation_results.csv").write_text(
-        "RULE_ID,STATUS,EXCEPTIONTIMESTAMP\n"
+        "RULE_ID,STATUS,OMRCTRADECLOSEOFBUSINESSDATE\n"
         "OAR-TESTPROD-001,ALERT,2026-09-10T09:00:00\n"
         "OAR-TESTPROD-001,ALERT,2026-09-10T14:00:00\n"  # same day — one bucket
         "OAR-TESTPROD-001,CLEAR,2026-09-10T09:00:00\n"
@@ -1989,7 +2007,7 @@ def test_rule_usage_date_range_excludes_rows_with_no_parseable_timestamp(tmp_pat
     yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
     csv_path = tmp_path / "testprod_validation_results.csv"
     csv_path.write_text(
-        "RULE_ID,EXCEPTIONTIMESTAMP\n"
+        "RULE_ID,OMRCTRADECLOSEOFBUSINESSDATE\n"
         "OAR-TESTPROD-001,2026-09-10T09:00:00\n"
         "OAR-TESTPROD-001,\n"          # blank timestamp
         "OAR-TESTPROD-001,not-a-date\n"  # unparseable
@@ -2029,7 +2047,7 @@ def test_dashboard_rule_usage_route_flags_published_enabled_zero_hit_rule(tmp_pa
     assert by_id["OAR-TESTPROD-002"]["unused"] is True  # published + enabled + never hit
     assert by_id["OAR-TESTPROD-003"]["unused"] is False  # draft — not a signal
     assert body["status_totals"] == {"alerted": 1}
-    assert body["daily_status_counts"] == []  # the one row carries no EXCEPTIONTIMESTAMP
+    assert body["daily_status_counts"] == []  # the one row carries no OMRCTRADECLOSEOFBUSINESSDATE
 
 
 def test_dashboard_rule_usage_route_applies_date_from_date_to_query_params(tmp_path, monkeypatch):
@@ -2038,7 +2056,7 @@ def test_dashboard_rule_usage_route_applies_date_from_date_to_query_params(tmp_p
     ], actor="tester")
     csv_path = tmp_path / "testprod_validation_results.csv"
     csv_path.write_text(
-        "RULE_ID,EXCEPTIONTIMESTAMP\n"
+        "RULE_ID,OMRCTRADECLOSEOFBUSINESSDATE\n"
         "OAR-TESTPROD-001,2026-09-10T09:00:00\n"
         "OAR-TESTPROD-001,2026-09-20T09:00:00\n"
     )

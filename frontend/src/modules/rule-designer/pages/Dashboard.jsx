@@ -412,9 +412,15 @@ export default function Dashboard({ onOpenRule }) {
       <Card>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16 }}>
           <div ref={chartWrapRef} style={{ flex: 1, minWidth: 0, background: "#ffffff" }}>
-            <h2 className="card-title" style={{ margin: "0 0 14px" }}>
+            <h2 className="card-title" style={{ margin: "0 0 4px" }}>
               Exceptions caught over time — {selectedProductName || "all products"}
             </h2>
+            <p className="preview-note" style={{ margin: "0 0 14px" }}>
+              <strong style={{ color: "var(--breach, #c0392b)" }}>Alerted</strong>: a real exception, nothing
+              cleared it. <strong style={{ color: "var(--pass, #1f8a4c)" }}>Cleared (business rule)</strong>: a
+              rule evaluated the record and its own logic cleared it. <strong style={{ color: "var(--muted, #5b6775)" }}>
+              Cleared (market data)</strong>: cleared by market-data validation, not any one rule.
+            </p>
             {statusChartData.length === 0 ? (
               <p className="empty-hint">No dated rows in the current window to chart.</p>
             ) : (
@@ -424,7 +430,7 @@ export default function Dashboard({ onOpenRule }) {
                     <CartesianGrid strokeDasharray="3 3" stroke="#eef1f4" />
                     <XAxis dataKey="date" tick={{ fontSize: 10 }} />
                     <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-                    <Tooltip contentStyle={{ fontSize: 12 }} />
+                    <Tooltip contentStyle={{ fontSize: 12 }} labelStyle={{ fontWeight: 600, marginBottom: 4 }} />
                     <Legend wrapperStyle={{ fontSize: 12 }} />
                     <Line type="monotone" dataKey="alerted" name="Alerted" dot={false}
                           strokeWidth={2} stroke="var(--breach, #c0392b)" />
@@ -437,31 +443,43 @@ export default function Dashboard({ onOpenRule }) {
               </div>
             )}
           </div>
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: 12, flexShrink: 0, width: 170 }}>
-            {!productFilter && productAlertDistribution.length > 0 && (
-              <div>
-                <div style={{
-                  fontSize: 11, fontWeight: 600, color: "var(--muted)",
-                  textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 8,
-                }}>
-                  Alerts by product
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: 12, flexShrink: 0, width: 190 }}>
+            {!productFilter && productAlertDistribution.length > 0 && (() => {
+              const distributionTotal = productAlertDistribution.reduce((s, d) => s + d.count, 0);
+              return (
+                <div title="Share of this window's Alerted rows by product — click a product in the filter below to see just its trend.">
+                  <div style={{
+                    fontSize: 11, fontWeight: 600, color: "var(--muted)",
+                    textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 2,
+                  }}>
+                    Alerts by product
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 8 }}>
+                    share of {distributionTotal} alerted rows
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {productAlertDistribution.map(({ product, count }) => {
+                      const pct = distributionTotal ? Math.round((count / distributionTotal) * 100) : 0;
+                      return (
+                        <div key={product}
+                             title={`${product} — ${count} alerted row${count === 1 ? "" : "s"} (${pct}% of ${distributionTotal} in this window)`}
+                             style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                          <span style={{
+                            width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+                            background: colorMap[product] || OTHER_COLOR,
+                          }} />
+                          <span className="mono" style={{
+                            flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                          }}>{product}</span>
+                          <span className="mono">{count}</span>
+                          <span className="mono" style={{ width: 34, textAlign: "right", color: "var(--muted)" }}>{pct}%</span>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  {productAlertDistribution.map(({ product, count }) => (
-                    <div key={product} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
-                      <span style={{
-                        width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
-                        background: colorMap[product] || OTHER_COLOR,
-                      }} />
-                      <span className="mono" style={{
-                        flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                      }}>{product}</span>
-                      <span className="mono">{count}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
+              );
+            })()}
             <button className="btn btn--ghost" onClick={exportChartPng} disabled={statusChartData.length === 0}
                     style={{ alignSelf: "flex-end" }}>
               <ImageDown size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Export chart (PNG)

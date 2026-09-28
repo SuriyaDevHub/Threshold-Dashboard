@@ -1,7 +1,8 @@
 """Reads exception_analysis's committed validation-result CSVs (every
 validated record it's ever approved, with a RULE_ID column naming which
-published rule produced it, and an EXCEPTIONTIMESTAMP naming when — see
-GLOBAL_LIVE_CSV_PATH in app/core/config.py) and turns them into per-rule/
+published rule produced it, and an OMRCTRADECLOSEOFBUSINESSDATE column
+naming which close-of-business date it belongs to — see GLOBAL_LIVE_CSV_PATH
+in app/core/config.py) and turns them into per-rule/
 per-product hit counts for a given date window, so the Dashboard can show
 what fraction of a product's live traffic each of its rules actually
 accounted for, and flag a published rule nobody's data has matched.
@@ -119,6 +120,16 @@ class UsageSnapshot:
     error: Optional[str] = None
 
 
+# One legacy naming quirk, not a general synonym system: exception_analysis
+# rows committed before GFX was renamed to GFXCASH still carry rule_ids
+# shaped "OAR-GFX-NNN" (current/live rules are all "OAR-GFXCASH-NNN"). The
+# regex fallback below would otherwise bucket those historical rows under a
+# phantom "GFX" product that doesn't match the registered "GFXCASH" code,
+# splitting one product's volume into two totals. Map that one old code
+# forward so old and new data land in the same product.
+_LEGACY_PRODUCT_ALIASES = {"GFX": "GFXCASH"}
+
+
 def _product_for_rule_id(rule_id: str) -> Optional[str]:
     """The product a CSV row's RULE_ID belongs to — the existing rule_id
     index first (correct for both OAR-{PRODUCT}-NNN and hand-picked ids),
@@ -130,14 +141,18 @@ def _product_for_rule_id(rule_id: str) -> Optional[str]:
     if product:
         return product
     m = _RULE_ID_PRODUCT.match(rule_id)
-    return m.group(1).upper() if m else None
+    if not m:
+        return None
+    code = m.group(1).upper()
+    return _LEGACY_PRODUCT_ALIASES.get(code, code)
 
 
 def _parse_ts(value: str) -> Optional[datetime]:
-    """Lenient EXCEPTIONTIMESTAMP parse — a bare date ("2026-09-24") or a
-    full ISO-ish timestamp ("2026-09-24T09:28:03", optionally with a
-    trailing 'Z' or a space instead of 'T'). Anything else -> None rather
-    than raising, so one malformed row never breaks the whole file."""
+    """Lenient OMRCTRADECLOSEOFBUSINESSDATE parse — a bare date
+    ("2026-09-24") or a full ISO-ish timestamp ("2026-09-24T09:28:03",
+    optionally with a trailing 'Z' or a space instead of 'T'). Anything
+    else -> None rather than raising, so one malformed row never breaks
+    the whole file."""
     value = (value or "").strip()
     if not value:
         return None
@@ -250,7 +265,10 @@ def _parse_all(csv_path: str, files: List[str]) -> _ParsedData:
         fieldnames, rows = _read_rows(file_path)
         header_map = {(h or "").strip().lower(): h for h in fieldnames}
         rule_id_col = header_map.get("rule_id")
-        ts_col = header_map.get("exceptiontimestamp")
+        # The close-of-business date a row belongs to — not when
+        # exception_analysis happened to raise/commit it — is what the
+        # Dashboard's date window and daily trend are built from.
+        ts_col = header_map.get("omrctradecloseofbusinessdate")
         status_col = header_map.get("status")
         records.extend(_parse_file(rows, rule_id_col, ts_col, status_col))
     return _ParsedData(available=True, csv_path=csv_path, as_of=as_of, records=records)
