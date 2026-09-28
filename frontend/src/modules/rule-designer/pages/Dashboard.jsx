@@ -67,12 +67,36 @@ function buildProductAlertDistribution(dailyStatusCounts) {
     .sort((a, b) => b.count - a.count);
 }
 
-// "Exceptions caught" — the KPI band's headline number — means ALERT rows
-// specifically (see buildStatusChartData's comment): a CLEAR row, however
-// it got cleared, isn't an exception the system caught.
-function sumAlerts(usageData) {
+// Sums one or more status categories, scoped to a single product when
+// productFilter is set (reading product_status_totals — the same
+// per-product breakdown rule_usage_service keeps for exactly this, rather
+// than summing daily_status_counts, which silently excludes undated rows)
+// or across every product when it isn't (status_totals).
+function sumCategoryTotals(usageData, productFilter, categories) {
   if (!usageData?.available) return null;
-  return usageData.status_totals?.alerted ?? 0;
+  const totals = productFilter
+    ? (usageData.product_status_totals?.[productFilter] || {})
+    : (usageData.status_totals || {});
+  return categories.reduce((s, c) => s + (totals[c] || 0), 0);
+}
+
+// A percent change computed off a tiny prior-period base is noise, not
+// signal — 620 vs a prior period of 29 reads as "+2038%", which alarms
+// without informing (one more/fewer row back then swings it by dozens of
+// points). Below this floor, the absolute change and the prior number
+// itself are shown instead of a percentage.
+const MIN_PRIOR_FOR_PCT = 20;
+function computeDelta(current, prior) {
+  if (current == null || prior == null) return null;
+  const diff = current - prior;
+  if (prior < MIN_PRIOR_FOR_PCT) return { kind: "absolute", diff, prior };
+  return { kind: "pct", pct: Math.round((diff / prior) * 1000) / 10 };
+}
+function deltaLabel(delta) {
+  if (!delta) return null;
+  if (delta.kind === "pct") return `${delta.pct > 0 ? "+" : ""}${delta.pct}% vs prior period`;
+  const { diff, prior } = delta;
+  return `${diff > 0 ? "+" : ""}${diff} vs prior period (only ${prior} then — too few for a %)`;
 }
 
 // The [dateFrom, dateTo] window's own length, immediately preceding it —
@@ -100,6 +124,29 @@ function downloadBlob(blob, filename) {
   const a = document.createElement("a");
   a.href = url; a.download = filename; a.click();
   URL.revokeObjectURL(url);
+}
+
+// The default recharts tooltip lists each line's value with no total, so
+// a viewer has to add Alerted + both Cleared lines themselves to see the
+// day's full exception count. This adds that sum as a fourth, visually
+// distinct row.
+function ChartTooltip({ active, payload, label }) {
+  if (!active || !payload || !payload.length) return null;
+  const total = payload.reduce((s, p) => s + (p.value || 0), 0);
+  return (
+    <div style={{
+      background: "#ffffff", border: "1px solid var(--line, #e4e8ee)", borderRadius: 8,
+      padding: "8px 12px", fontSize: 12, boxShadow: "var(--shadow, 0 1px 3px rgba(16,24,40,0.08))",
+    }}>
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>{label}</div>
+      {payload.map((p) => (
+        <div key={p.dataKey} style={{ color: p.color }}>{p.name} : {p.value}</div>
+      ))}
+      <div style={{ marginTop: 4, paddingTop: 4, borderTop: "1px solid var(--line, #e4e8ee)", fontWeight: 600 }}>
+        Total : {total}
+      </div>
+    </div>
+  );
 }
 
 function SortIcon({ active, dir }) {
@@ -175,37 +222,47 @@ export default function Dashboard({ onOpenRule }) {
     });
   }, [filtered, sort]);
 
-  // "Exceptions caught" — ALERT rows specifically — plus its direction vs.
-  // the immediately preceding, equal-length window.
-  const totalAlerts = useMemo(() => sumAlerts(data), [data]);
-  const priorTotalAlerts = useMemo(() => sumAlerts(priorData), [priorData]);
-  // A percent change computed off a tiny prior-period base is noise, not
-  // signal — 620 vs a prior period of 29 reads as "+2038%", which alarms
-  // without informing (one more/fewer alert back then swings it by dozens
-  // of points). Below this floor, show the absolute change and the prior
-  // number itself instead of a percentage.
-  const MIN_PRIOR_FOR_PCT = 20;
-  const alertsDelta = useMemo(() => {
-    if (totalAlerts == null || priorTotalAlerts == null) return null;
-    const diff = totalAlerts - priorTotalAlerts;
-    if (priorTotalAlerts < MIN_PRIOR_FOR_PCT) {
-      return { kind: "absolute", diff, prior: priorTotalAlerts };
-    }
-    return { kind: "pct", pct: Math.round((diff / priorTotalAlerts) * 1000) / 10 };
-  }, [totalAlerts, priorTotalAlerts]);
+  // Every rule row narrowed to the selected product only — this is the
+  // scope the whole KPI band (exceptions caught/cleared, coverage, rules
+  // needing attention) uses, independent of the table's own search/
+  // not-seen-only filters below (those stay table-specific).
+  const productScoped = useMemo(
+    () => (productFilter ? rows.filter((r) => r.productCode === productFilter) : rows),
+    [rows, productFilter],
+  );
 
-  // Coverage — of every published, enabled (i.e. actually live) rule, what
-  // share caught at least one exception in this window. A published rule
-  // with zero hits is either quiet (nothing wrong) or broken (silently not
-  // firing) — coverage can't tell those apart, but it flags how many rules
-  // need a human to make that call (see deadRules below).
-  const liveRules = useMemo(() => rows.filter((r) => r.status === "PUBLISHED" && r.enabled), [rows]);
+  // "Exceptions caught"/"Exceptions cleared" — ALERT vs. CLEAR rows for
+  // the current product scope — plus each one's direction vs. the
+  // immediately preceding, equal-length window.
+  const totalAlerts = useMemo(() => sumCategoryTotals(data, productFilter, ["alerted"]), [data, productFilter]);
+  const priorTotalAlerts = useMemo(
+    () => sumCategoryTotals(priorData, productFilter, ["alerted"]), [priorData, productFilter],
+  );
+  const alertsDelta = useMemo(() => computeDelta(totalAlerts, priorTotalAlerts), [totalAlerts, priorTotalAlerts]);
+
+  const totalCleared = useMemo(
+    () => sumCategoryTotals(data, productFilter, ["cleared_business", "cleared_mkt"]), [data, productFilter],
+  );
+  const priorTotalCleared = useMemo(
+    () => sumCategoryTotals(priorData, productFilter, ["cleared_business", "cleared_mkt"]), [priorData, productFilter],
+  );
+  const clearedDelta = useMemo(() => computeDelta(totalCleared, priorTotalCleared), [totalCleared, priorTotalCleared]);
+
+  // Coverage — of every published, enabled (i.e. actually live) rule in
+  // scope, what share caught at least one exception in this window. A
+  // published rule with zero hits is either quiet (nothing wrong) or
+  // broken (silently not firing) — coverage can't tell those apart, but
+  // it flags how many rules need a human to make that call (see
+  // deadRules below).
+  const liveRules = useMemo(
+    () => productScoped.filter((r) => r.status === "PUBLISHED" && r.enabled), [productScoped],
+  );
   const coveragePct = useMemo(() => {
     if (!liveRules.length) return null;
     return Math.round((liveRules.filter((r) => r.hits > 0).length / liveRules.length) * 100);
   }, [liveRules]);
 
-  const deadRules = useMemo(() => rows.filter((r) => r.unused), [rows]);
+  const deadRules = useMemo(() => productScoped.filter((r) => r.unused), [productScoped]);
 
   // Top rules by impact — respects the same product/search/unused filters
   // as the table below, always ranked by hits regardless of the table's
@@ -363,17 +420,12 @@ export default function Dashboard({ onOpenRule }) {
     );
   }
 
-  const alertsDeltaLabel = (() => {
-    if (!alertsDelta) return null;
-    if (alertsDelta.kind === "pct") {
-      return `${alertsDelta.pct > 0 ? "+" : ""}${alertsDelta.pct}% vs prior period`;
-    }
-    const { diff, prior } = alertsDelta;
-    return `${diff > 0 ? "+" : ""}${diff} vs prior period (only ${prior} then — too few for a %)`;
-  })();
+  const alertsDeltaLabel = deltaLabel(alertsDelta);
+  const clearedDeltaLabel = deltaLabel(clearedDelta);
   const selectedProductName = productFilter
     ? (data.products.find((p) => p.code === productFilter)?.name || productFilter)
     : null;
+  const scopeLabel = selectedProductName || "all products";
 
   return (
     <>
@@ -381,13 +433,50 @@ export default function Dashboard({ onOpenRule }) {
         Data as of {fmtDate(data.as_of)} · <span className="mono">{data.csv_path}</span> · {data.total_rows} live rows in the full feed
       </p>
 
+      <Card>
+        <div className="controls controls--row">
+          <label className="control"><span>From</span>
+            <input type="date" value={dateFrom} min={data.earliest_date || undefined} max={dateTo || data.latest_date || undefined}
+                   onChange={(e) => setDateFrom(e.target.value)} />
+          </label>
+          <label className="control"><span>To</span>
+            <input type="date" value={dateTo} min={dateFrom || data.earliest_date || undefined} max={data.latest_date || undefined}
+                   onChange={(e) => setDateTo(e.target.value)} />
+          </label>
+          <label className="control"><span>Product</span>
+            <select value={productFilter} onChange={(e) => setProductFilter(e.target.value)}>
+              <option value="">all products</option>
+              {data.products.map((p) => <option key={p.code} value={p.code}>{p.name}</option>)}
+            </select>
+          </label>
+          <label className="control" style={{ minWidth: 220 }}><span>Search</span>
+            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="rule name or id…" />
+          </label>
+          <label className="control" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <input type="checkbox" checked={unusedOnly} onChange={(e) => setUnusedOnly(e.target.checked)} />
+            <span>Not seen only</span>
+          </label>
+          <div className="control" style={{ justifyContent: "flex-end" }}>
+            <button className="btn btn--ghost" onClick={exportTableCsv} disabled={sorted.length === 0}>
+              <Download size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Export table (CSV)
+            </button>
+          </div>
+        </div>
+        <p className="preview-note" style={{ margin: "10px 0 0" }}>
+          Product, Search and "Not seen only" filter the whole page below — the KPI band, leaderboard, trend
+          chart and rules table all scope to {scopeLabel}
+          {(search.trim() || unusedOnly) && ", further narrowed by search/not-seen-only where noted"}.
+        </p>
+      </Card>
+
       <div className="stat-grid">
-        <Stat label="Exceptions caught" value={totalAlerts ?? "—"} sub={alertsDeltaLabel || "ALERT rows in the selected window"} />
+        <Stat label="Exceptions caught" value={totalAlerts ?? "—"} sub={alertsDeltaLabel || `ALERTed rows — ${scopeLabel}`} />
+        <Stat label="Exceptions cleared" value={totalCleared ?? "—"} sub={clearedDeltaLabel || `CLEARed rows — ${scopeLabel}`} />
         <Stat label="Rule coverage" value={coveragePct == null ? "—" : `${coveragePct}%`}
-              sub={`${liveRules.filter((r) => r.hits > 0).length} of ${liveRules.length} live rules caught ≥1`}
+              sub={`${liveRules.filter((r) => r.hits > 0).length} of ${liveRules.length} live rules — ${scopeLabel}`}
               status={coveragePct == null ? undefined : coveragePct >= 80 ? "pass" : coveragePct >= 50 ? "watch" : "breach"} />
         <Stat label="Rules needing attention" value={deadRules.length}
-              sub="published, enabled, zero hits" status={deadRules.length ? "breach" : "pass"} />
+              sub={`published, enabled, zero hits — ${scopeLabel}`} status={deadRules.length ? "breach" : "pass"} />
       </div>
 
       <Card title="Top rules by impact">
@@ -445,7 +534,7 @@ export default function Dashboard({ onOpenRule }) {
                     <CartesianGrid strokeDasharray="3 3" stroke="#eef1f4" />
                     <XAxis dataKey="date" tick={{ fontSize: 10 }} />
                     <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-                    <Tooltip contentStyle={{ fontSize: 12 }} labelStyle={{ fontWeight: 600, marginBottom: 4 }} />
+                    <Tooltip content={<ChartTooltip />} />
                     <Legend wrapperStyle={{ fontSize: 12 }} />
                     <Line type="monotone" dataKey="alerted" name="Alerted" dot={false}
                           strokeWidth={2} stroke="var(--breach, #c0392b)" />
@@ -535,36 +624,7 @@ export default function Dashboard({ onOpenRule }) {
         )}
       </Card>
 
-      <Card>
-        <div className="controls controls--row" style={{ marginBottom: 14 }}>
-          <label className="control"><span>From</span>
-            <input type="date" value={dateFrom} min={data.earliest_date || undefined} max={dateTo || data.latest_date || undefined}
-                   onChange={(e) => setDateFrom(e.target.value)} />
-          </label>
-          <label className="control"><span>To</span>
-            <input type="date" value={dateTo} min={dateFrom || data.earliest_date || undefined} max={data.latest_date || undefined}
-                   onChange={(e) => setDateTo(e.target.value)} />
-          </label>
-          <label className="control"><span>Product</span>
-            <select value={productFilter} onChange={(e) => setProductFilter(e.target.value)}>
-              <option value="">all products</option>
-              {data.products.map((p) => <option key={p.code} value={p.code}>{p.name}</option>)}
-            </select>
-          </label>
-          <label className="control" style={{ minWidth: 220 }}><span>Search</span>
-            <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="rule name or id…" />
-          </label>
-          <label className="control" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-            <input type="checkbox" checked={unusedOnly} onChange={(e) => setUnusedOnly(e.target.checked)} />
-            <span>Not seen only</span>
-          </label>
-          <div className="control" style={{ justifyContent: "flex-end" }}>
-            <button className="btn btn--ghost" onClick={exportTableCsv} disabled={sorted.length === 0}>
-              <Download size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Export table (CSV)
-            </button>
-          </div>
-        </div>
-
+      <Card title="Rules matching the current filters">
         {loading && <p className="empty-hint">Refreshing…</p>}
 
         <div className="table-wrap">

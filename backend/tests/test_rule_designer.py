@@ -1971,6 +1971,33 @@ def test_rule_usage_status_categorizes_alerted_vs_cleared_business_vs_cleared_mk
 
     usage = rule_usage_service.compute_usage()
     assert usage.status_totals == {"alerted": 2, "cleared_business": 1, "cleared_mkt": 1}
+    assert usage.product_status_totals == {
+        TEST_PRODUCT: {"alerted": 2, "cleared_business": 1, "cleared_mkt": 1},
+    }
+
+
+def test_rule_usage_product_status_totals_split_across_products(tmp_path, monkeypatch):
+    # The Dashboard's KPI band needs an accurate alerted/cleared count for
+    # one selected product, not just the all-products status_totals — this
+    # is the per-product breakdown it reads instead of summing
+    # daily_status_counts (which excludes undated rows).
+    product_registry.create_product("OTHERPROD", "Other Product", "", "tester")
+    yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
+    yaml_service.save_rules([_rule(rule_id="OAR-OTHERPROD-001", name="R2", product="OTHERPROD")], actor="tester")
+    (tmp_path / "testprod_validation_results.csv").write_text(
+        "RULE_ID,STATUS\nOAR-TESTPROD-001,ALERT\nOAR-TESTPROD-001,CLEAR\n"
+    )
+    (tmp_path / "otherprod_validation_results.csv").write_text(
+        "RULE_ID,STATUS\nOAR-OTHERPROD-001,ALERT\n"
+    )
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(tmp_path))
+
+    usage = rule_usage_service.compute_usage()
+    assert usage.status_totals == {"alerted": 2, "cleared_business": 1}
+    assert usage.product_status_totals == {
+        TEST_PRODUCT: {"alerted": 1, "cleared_business": 1},
+        "OTHERPROD": {"alerted": 1},
+    }
 
 
 def test_rule_usage_status_totals_excludes_rows_with_missing_or_unrecognized_status(tmp_path, monkeypatch):

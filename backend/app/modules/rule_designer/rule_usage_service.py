@@ -110,6 +110,12 @@ class UsageSnapshot:
     # still real volume (counted in total_rows/product_totals) but with no
     # signal for this breakdown.
     status_totals: Dict[str, int] = field(default_factory=dict)
+    # status_totals, split by product — {product: {category: count}} — so
+    # the Dashboard's KPI band can show an accurate alerted/cleared count
+    # for one selected product without falling back to summing
+    # daily_status_counts (which, like daily_product_counts, silently
+    # excludes undated rows).
+    product_status_totals: Dict[str, Dict[str, int]] = field(default_factory=dict)
     # Same (day, product) shape as daily_product_counts, with an added
     # category dimension — one entry per (day, product, category) — so the
     # frontend can build the alerted/cleared_business/cleared_mkt trend
@@ -338,6 +344,7 @@ def compute_usage(date_from: Optional[date] = None, date_to: Optional[date] = No
     product_totals: Dict[str, int] = {}
     daily_product: Dict[Tuple[str, str], int] = {}
     status_totals: Dict[str, int] = {}
+    product_status_totals: Dict[str, Dict[str, int]] = {}
     daily_status: Dict[Tuple[str, str, str], int] = {}
     for r in in_range:
         if r.rule_id:
@@ -349,6 +356,8 @@ def compute_usage(date_from: Optional[date] = None, date_to: Optional[date] = No
         category = _exception_category(r)
         if category:
             status_totals[category] = status_totals.get(category, 0) + 1
+            product_cats = product_status_totals.setdefault(r.product, {})
+            product_cats[category] = product_cats.get(category, 0) + 1
             if r.ts is not None:
                 skey = (r.ts.date().isoformat(), r.product, category)
                 daily_status[skey] = daily_status.get(skey, 0) + 1
@@ -364,5 +373,6 @@ def compute_usage(date_from: Optional[date] = None, date_to: Optional[date] = No
     return UsageSnapshot(available=True, csv_path=parsed.csv_path, as_of=parsed.as_of,
                           total_rows=len(in_range), rule_hits=rule_hits, product_totals=product_totals,
                           daily_product_counts=daily_product_counts,
-                          status_totals=status_totals, daily_status_counts=daily_status_counts,
+                          status_totals=status_totals, product_status_totals=product_status_totals,
+                          daily_status_counts=daily_status_counts,
                           earliest_date=earliest, latest_date=latest)
