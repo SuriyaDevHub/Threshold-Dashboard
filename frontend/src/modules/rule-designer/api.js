@@ -10,6 +10,7 @@ const del = (path, params) => api.module(MOD, path, params, { method: "DELETE" }
 export const rd = {
   meta: () => get("/meta"),
   dashboard: (product) => get("/dashboard", { product }),
+  ruleUsage: () => get("/dashboard/rule-usage"),
 
   products: () => get("/products"),
   product: (code) => get(`/products/${code}`),

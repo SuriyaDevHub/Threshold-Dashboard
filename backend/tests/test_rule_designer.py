@@ -12,10 +12,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import pytest
 
 from app.core import store as dataset_store
+from app.core.config import get_settings
 from app.modules.rule_designer import (
     calc_ops, condition_engine, explain_service, lookup_engine, product_engine, product_registry,
-    reference_store, rule_store, shadow_test_service, validation_service, version_service, workflow_engine,
-    yaml_service,
+    reference_store, rule_store, rule_usage_service, shadow_test_service, validation_service, version_service,
+    workflow_engine, yaml_service,
 )
 from app.modules.rule_designer.models import (
     Condition, ConditionGroup, ConflictHandling, DeriveSpec, LookupConfig, LookupFieldMap, LookupType,
@@ -1780,3 +1781,104 @@ def test_shadow_test_missing_dataset_raises():
         shadow_test_service.run_shadow_test(
             rule, "nonexistent_ds", [], [], "tester", "trade_id",
         )
+
+
+# --------------------------------------------------------------------------
+# rule_usage_service — per-rule hit counts from exception_analysis's
+# committed Global Live CSV (GLOBAL_LIVE_CSV_PATH)
+# --------------------------------------------------------------------------
+
+def _write_live_csv(tmp_path, rows, header=("RULE_ID", "STATUS", "REASONCODE")):
+    path = tmp_path / "global_live.csv"
+    lines = [",".join(header)]
+    lines += [",".join(row) for row in rows]
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_rule_usage_unavailable_when_path_unset(monkeypatch):
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", "")
+    usage = rule_usage_service.compute_usage()
+    assert usage.available is False
+    assert usage.rule_hits == {}
+
+
+def test_rule_usage_unavailable_when_file_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(tmp_path / "nope.csv"))
+    usage = rule_usage_service.compute_usage()
+    assert usage.available is False
+    assert usage.error
+
+
+def test_rule_usage_counts_hits_and_skips_blank_rule_id(tmp_path, monkeypatch):
+    yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
+    csv_path = _write_live_csv(tmp_path, [
+        ("OAR-TESTPROD-001", "ALERT", "X"),
+        ("OAR-TESTPROD-001", "ALERT", "X"),
+        ("", "ALERT", "TESTPROD-UNMATCHED"),  # blank RULE_ID — doesn't count toward anything
+    ])
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
+
+    usage = rule_usage_service.compute_usage()
+    assert usage.available is True
+    assert usage.total_rows == 3
+    assert usage.rule_hits == {"OAR-TESTPROD-001": 2}
+    assert usage.product_totals == {TEST_PRODUCT: 2}
+
+
+def test_rule_usage_falls_back_to_rule_id_pattern_for_unknown_id(tmp_path, monkeypatch):
+    # OAR-TESTPROD-999 was never created in this test's registry (deleted/
+    # renamed since the row was committed) — resolve_product() can't find
+    # it, but the OAR-{PRODUCT}-NNN shape still tells us which product's
+    # total it belongs to.
+    csv_path = _write_live_csv(tmp_path, [("OAR-TESTPROD-999", "ALERT", "X")])
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
+
+    usage = rule_usage_service.compute_usage()
+    assert usage.product_totals == {TEST_PRODUCT: 1}
+    assert usage.rule_hits == {"OAR-TESTPROD-999": 1}
+
+
+def test_rule_usage_tolerates_header_casing(tmp_path, monkeypatch):
+    yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
+    csv_path = _write_live_csv(tmp_path, [("OAR-TESTPROD-001", "ALERT", "X")], header=("Rule_Id", "Status", "ReasonCode"))
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
+
+    usage = rule_usage_service.compute_usage()
+    assert usage.rule_hits == {"OAR-TESTPROD-001": 1}
+
+
+def test_rule_usage_caches_until_mtime_changes(tmp_path, monkeypatch):
+    csv_path = _write_live_csv(tmp_path, [("OAR-TESTPROD-001", "ALERT", "X")])
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
+    first = rule_usage_service.compute_usage()
+    second = rule_usage_service.compute_usage()
+    assert second is first  # same object — no re-parse
+
+    _write_live_csv(tmp_path, [("OAR-TESTPROD-001", "ALERT", "X"), ("OAR-TESTPROD-001", "ALERT", "X")])
+    third = rule_usage_service.compute_usage()
+    assert third is not first
+    assert third.rule_hits == {"OAR-TESTPROD-001": 2}
+
+
+def test_dashboard_rule_usage_route_flags_published_enabled_zero_hit_rule(tmp_path, monkeypatch):
+    yaml_service.save_rules([
+        _rule(rule_id="OAR-TESTPROD-001", name="Live, hit", status=RuleStatus.PUBLISHED, enabled=True),
+        _rule(rule_id="OAR-TESTPROD-002", name="Live, never hit", status=RuleStatus.PUBLISHED, enabled=True),
+        _rule(rule_id="OAR-TESTPROD-003", name="Still a draft", status=RuleStatus.DRAFT, enabled=True),
+    ], actor="tester")
+    csv_path = _write_live_csv(tmp_path, [("OAR-TESTPROD-001", "ALERT", "X")])
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
+
+    import asyncio
+    from app.modules.rule_designer import dashboard_rule_usage
+    body = asyncio.run(dashboard_rule_usage())
+
+    product = next(p for p in body["products"] if p["code"] == TEST_PRODUCT)
+    assert product["total_live_rows"] == 1
+    by_id = {r["rule_id"]: r for r in product["rules"]}
+    assert by_id["OAR-TESTPROD-001"]["hits"] == 1
+    assert by_id["OAR-TESTPROD-001"]["unused"] is False
+    assert by_id["OAR-TESTPROD-002"]["hits"] == 0
+    assert by_id["OAR-TESTPROD-002"]["unused"] is True  # published + enabled + never hit
+    assert by_id["OAR-TESTPROD-003"]["unused"] is False  # draft — not a signal

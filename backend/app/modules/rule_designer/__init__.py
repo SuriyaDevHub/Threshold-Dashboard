@@ -24,8 +24,8 @@ from pydantic import BaseModel
 from app.core import store as dataset_store
 from app.modules.rule_designer import (
     audit_service, diff_service, dry_run_service, explain_service, impact_service,
-    nlp_parser, product_engine, product_registry, reference_store, rule_store, shadow_test_service,
-    validation_service, version_service, yaml_service,
+    nlp_parser, product_engine, product_registry, reference_store, rule_store, rule_usage_service,
+    shadow_test_service, validation_service, version_service, yaml_service,
 )
 from app.modules.rule_designer.models import (
     LEGAL_TRANSITIONS, ROLE_ALLOWED_ACTIONS, ConditionGroup, MigrationStatus, NodeType, Operator,
@@ -101,6 +101,39 @@ async def dashboard(product: Optional[str] = None):
         "recent_activity": [e.model_dump() for e in recent_audit],
         "reference_files": len(reference_store.list_files()),
         "versions_published": len(version_service.list_all_versions()),
+    }
+
+
+@router.get("/dashboard/rule-usage")
+async def dashboard_rule_usage():
+    """What fraction of each product's committed live traffic (exception_
+    analysis's Global Live CSV — see GLOBAL_LIVE_CSV_PATH) each of its
+    rules actually accounted for, and which published rules accounted for
+    none of it. See rule_usage_service.compute_usage() for how hits are
+    attributed."""
+    usage = rule_usage_service.compute_usage()
+    out = []
+    for p in product_registry.list_products():
+        total = usage.product_totals.get(p.code, 0)
+        rule_rows = []
+        for r in rule_store.list_rules(p.code):
+            hits = usage.rule_hits.get(r.rule_id, 0)
+            rule_rows.append({
+                "rule_id": r.rule_id, "name": r.name, "status": r.status.value,
+                "enabled": r.enabled, "hits": hits,
+                "hit_pct": round(hits / total * 100, 2) if total else None,
+                # A published, enabled rule nobody's live data ever matched
+                # is the signal worth surfacing — a draft/unpublished rule
+                # with 0 hits is just expected, not a highlight.
+                "unused": hits == 0 and r.status == RuleStatus.PUBLISHED and r.enabled,
+            })
+        rule_rows.sort(key=lambda x: x["hits"])
+        out.append({"code": p.code, "name": p.name, "enabled": p.enabled,
+                     "total_live_rows": total, "rules": rule_rows})
+    return {
+        "available": usage.available, "csv_path": usage.csv_path,
+        "as_of": usage.as_of, "total_rows": usage.total_rows,
+        "error": usage.error, "products": out,
     }
 
 

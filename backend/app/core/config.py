@@ -41,6 +41,13 @@ class Settings:
     # Server-side dataset cache lives here (JSON per dataset, survives reload).
     DATA_DIR: str = os.getenv("DATA_DIR", os.path.join(_BACKEND_DIR, "_datasets"))
 
+    # Cross-product committed exception-analysis output (exception_analysis's
+    # "Global Live CSV" — every validated record it's ever approved, with a
+    # RULE_ID column naming which published rule produced it). Lives outside
+    # this repo/deployment's own storage, so no in-repo default makes sense —
+    # "" (matching S3_BUCKET's own convention) means "not configured yet".
+    GLOBAL_LIVE_CSV_PATH: str = os.getenv("GLOBAL_LIVE_CSV_PATH", "")
+
     # --- EPE API (exception data) ---
     EPE_BASE_URL: str = os.getenv("EPE_BASE_URL", "https://epe.internal/api")
     EPE_TIMEOUT: float = float(os.getenv("EPE_TIMEOUT", "60"))
