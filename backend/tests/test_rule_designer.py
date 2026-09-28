@@ -1810,23 +1810,28 @@ def test_rule_usage_unavailable_when_file_missing(tmp_path, monkeypatch):
     assert usage.error
 
 
-def test_rule_usage_counts_hits_and_skips_blank_rule_id(tmp_path, monkeypatch):
+def test_rule_usage_counts_hits_and_includes_blank_rule_id_in_product_total(tmp_path, monkeypatch):
+    # Live report: a product's hit% showed 100% for its one active rule
+    # while the real validation tool showed a much larger total row count
+    # (only the rule-tagged rows counted toward the old denominator) — a
+    # blank RULE_ID row (e.g. a fail-safe/unmatched ALERT) is still real
+    # product volume, so it must count toward the product's total even
+    # though it can't count toward any specific rule's hits. The file is
+    # still attributed as a whole to TESTPROD, from the two rows that DO
+    # resolve — see _parse_file's per-file attribution.
     yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
     csv_path = _write_live_csv(tmp_path, [
         ("OAR-TESTPROD-001", "ALERT", "X"),
         ("OAR-TESTPROD-001", "ALERT", "X"),
-        ("", "ALERT", "TESTPROD-UNMATCHED"),  # blank RULE_ID — doesn't count toward anything
+        ("", "ALERT", "TESTPROD-UNMATCHED"),
     ])
     monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
 
     usage = rule_usage_service.compute_usage()
     assert usage.available is True
-    # total_rows now counts attributable rows only (blank RULE_ID rows were
-    # never attributable, so they were never part of what the Dashboard's
-    # totals/percentages reflect anyway) — matches sum(product_totals.values()).
-    assert usage.total_rows == 2
+    assert usage.total_rows == 3
     assert usage.rule_hits == {"OAR-TESTPROD-001": 2}
-    assert usage.product_totals == {TEST_PRODUCT: 2}
+    assert usage.product_totals == {TEST_PRODUCT: 3}
 
 
 def test_rule_usage_falls_back_to_rule_id_pattern_for_unknown_id(tmp_path, monkeypatch):
@@ -1840,6 +1845,40 @@ def test_rule_usage_falls_back_to_rule_id_pattern_for_unknown_id(tmp_path, monke
     usage = rule_usage_service.compute_usage()
     assert usage.product_totals == {TEST_PRODUCT: 1}
     assert usage.rule_hits == {"OAR-TESTPROD-999": 1}
+
+
+def test_rule_usage_mixed_product_file_falls_back_to_row_level_attribution(tmp_path, monkeypatch):
+    # The "one combined CSV across every product" shape this module still
+    # supports, as opposed to the live one-file-per-product shape: a single
+    # file whose resolvable rule_ids span more than one product can't be
+    # attributed as a whole to any one product, so a blank-RULE_ID row in
+    # it is dropped (no signal at all for which product it belongs to)
+    # rather than guessed into either one.
+    product_registry.create_product("OTHERPROD", "Other Product", "", "tester")
+    yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
+    yaml_service.save_rules([_rule(rule_id="OAR-OTHERPROD-001", name="R2", product="OTHERPROD")], actor="tester")
+    csv_path = _write_live_csv(tmp_path, [
+        ("OAR-TESTPROD-001", "ALERT", "X"),
+        ("OAR-OTHERPROD-001", "ALERT", "X"),
+        ("", "ALERT", "UNMATCHED"),
+    ])
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
+
+    usage = rule_usage_service.compute_usage()
+    assert usage.total_rows == 2  # blank-RULE_ID row dropped — mixed file, no safe attribution
+    assert usage.rule_hits == {"OAR-TESTPROD-001": 1, "OAR-OTHERPROD-001": 1}
+    assert usage.product_totals == {TEST_PRODUCT: 1, "OTHERPROD": 1}
+
+
+def test_rule_usage_file_with_no_resolvable_rule_ids_is_dropped(tmp_path, monkeypatch):
+    csv_path = _write_live_csv(tmp_path, [("", "ALERT", "X"), ("GARBAGE_ID", "ALERT", "X")])
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
+
+    usage = rule_usage_service.compute_usage()
+    assert usage.available is True
+    assert usage.total_rows == 0
+    assert usage.rule_hits == {}
+    assert usage.product_totals == {}
 
 
 def test_rule_usage_tolerates_header_casing(tmp_path, monkeypatch):

@@ -32,6 +32,7 @@ import csv
 import os
 import re
 import threading
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
@@ -62,7 +63,10 @@ _cache: Dict[str, object] = {"key": None, "parsed": None}
 
 @dataclass
 class UsageRecord:
-    rule_id: str
+    # rule_id is None for a row exception_analysis didn't attribute to any
+    # specific rule (e.g. a fail-safe/unmatched ALERT) — still real product
+    # volume, just not a hit for any one rule.
+    rule_id: Optional[str]
     product: str
     ts: Optional[datetime]
 
@@ -155,6 +159,56 @@ def _read_rows(file_path: str) -> Tuple[List[str], List[dict]]:
     raise last_err  # every encoding failed — surface the last attempt's error
 
 
+def _parse_file(rows: List[dict], rule_id_col: Optional[str], ts_col: Optional[str]) -> List[UsageRecord]:
+    """One file's rows -> records. A validation-results row is real product
+    volume whether or not a specific rule claimed it (a fail-safe/unmatched
+    ALERT has no RULE_ID at all) — dropping those un-attributed rows would
+    shrink a product's total down to just its rule-tagged rows and make a
+    single active rule's hit% look like ~100% of "everything" when it's
+    really a small slice of real traffic (confirmed live: IRD showed
+    OAR-IRD-001 at 100%/21 hits while the real tool showed 121 total rows
+    for IRD — only the 21 CLEAR rows carried a RULE_ID). So attribution
+    happens PER FILE, not per row: which product owns every row in this
+    file is decided from whichever rule_ids in it actually resolve (never
+    from the filename — see module docstring), and every row — tagged or
+    not — then counts toward that product's total.
+
+    The one exception is a file whose resolvable rule_ids point at MORE
+    THAN ONE product — the "one big combined CSV" shape this module also
+    supports (GLOBAL_LIVE_CSV_PATH pointing at a single multi-product
+    file) rather than one-file-per-product. There, per-file attribution
+    would be a guess, so it falls back to the old per-row behavior: each
+    row counts only when its own rule_id resolves, un-attributed rows are
+    dropped (same limitation as before — there's no product signal at all
+    on a row with no rule_id in a file that mixes products)."""
+    tagged: List[Tuple[dict, str, str]] = []  # (row, rule_id, product)
+    for row in rows:
+        rule_id = (row.get(rule_id_col) or "").strip() if rule_id_col else ""
+        if not rule_id:
+            continue
+        product = _product_for_rule_id(rule_id)
+        if product:
+            tagged.append((row, rule_id, product))
+
+    def _ts(row: dict) -> Optional[datetime]:
+        return _parse_ts(row.get(ts_col)) if ts_col else None
+
+    distinct_products = {p for _, _, p in tagged}
+    if len(distinct_products) > 1:
+        # mixed-product file — no safe file-level attribution, row-level only
+        return [UsageRecord(rule_id=rid, product=p, ts=_ts(row)) for row, rid, p in tagged]
+
+    if not distinct_products:
+        return []  # nothing in this file resolves to any product at all
+
+    file_product = Counter(p for _, _, p in tagged).most_common(1)[0][0]
+    records: List[UsageRecord] = []
+    for row in rows:
+        rule_id = (row.get(rule_id_col) or "").strip() if rule_id_col else ""
+        records.append(UsageRecord(rule_id=rule_id or None, product=file_product, ts=_ts(row)))
+    return records
+
+
 def _parse_all(csv_path: str, files: List[str]) -> _ParsedData:
     records: List[UsageRecord] = []
     as_of = 0.0
@@ -164,15 +218,7 @@ def _parse_all(csv_path: str, files: List[str]) -> _ParsedData:
         header_map = {(h or "").strip().lower(): h for h in fieldnames}
         rule_id_col = header_map.get("rule_id")
         ts_col = header_map.get("exceptiontimestamp")
-        for row in rows:
-            rule_id = (row.get(rule_id_col) or "").strip() if rule_id_col else ""
-            if not rule_id:
-                continue
-            product = _product_for_rule_id(rule_id)
-            if not product:
-                continue
-            ts = _parse_ts(row.get(ts_col)) if ts_col else None
-            records.append(UsageRecord(rule_id=rule_id, product=product, ts=ts))
+        records.extend(_parse_file(rows, rule_id_col, ts_col))
     return _ParsedData(available=True, csv_path=csv_path, as_of=as_of, records=records)
 
 
@@ -227,7 +273,8 @@ def compute_usage(date_from: Optional[date] = None, date_to: Optional[date] = No
     rule_hits: Dict[str, int] = {}
     product_totals: Dict[str, int] = {}
     for r in in_range:
-        rule_hits[r.rule_id] = rule_hits.get(r.rule_id, 0) + 1
+        if r.rule_id:
+            rule_hits[r.rule_id] = rule_hits.get(r.rule_id, 0) + 1
         product_totals[r.product] = product_totals.get(r.product, 0) + 1
 
     return UsageSnapshot(available=True, csv_path=parsed.csv_path, as_of=parsed.as_of,
