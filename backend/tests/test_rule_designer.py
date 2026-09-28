@@ -1936,6 +1936,55 @@ def test_rule_usage_daily_product_counts_bucketed_by_day_and_product(tmp_path, m
     assert sum(c for (_, p), c in counts.items() if p == TEST_PRODUCT) == 3
 
 
+def test_rule_usage_status_categorizes_alerted_vs_cleared_business_vs_cleared_mkt(tmp_path, monkeypatch):
+    # STATUS=ALERT is a real exception regardless of rule attribution.
+    # STATUS=CLEAR splits on whether a RULE_ID claimed the row: a business
+    # rule evaluated it and its own logic cleared it ("cleared_business"),
+    # vs. no rule attribution at all — cleared by market-data validation
+    # rather than any one rule ("cleared_mkt").
+    yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
+    csv_path = _write_live_csv(tmp_path, [
+        ("OAR-TESTPROD-001", "ALERT", "X"),
+        ("OAR-TESTPROD-001", "CLEAR", ""),
+        ("", "CLEAR", ""),
+        ("", "ALERT", "FAILSAFE"),
+    ])
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
+
+    usage = rule_usage_service.compute_usage()
+    assert usage.status_totals == {"alerted": 2, "cleared_business": 1, "cleared_mkt": 1}
+
+
+def test_rule_usage_status_totals_excludes_rows_with_missing_or_unrecognized_status(tmp_path, monkeypatch):
+    csv_path = tmp_path / "testprod_validation_results.csv"
+    csv_path.write_text("RULE_ID,STATUS\nOAR-TESTPROD-001,\nOAR-TESTPROD-001,PENDING\n")
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
+
+    usage = rule_usage_service.compute_usage()
+    assert usage.status_totals == {}
+    assert usage.total_rows == 2  # still real volume, just no signal for this breakdown
+
+
+def test_rule_usage_daily_status_counts_bucketed_by_day_product_and_category(tmp_path, monkeypatch):
+    yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
+    (tmp_path / "testprod_validation_results.csv").write_text(
+        "RULE_ID,STATUS,EXCEPTIONTIMESTAMP\n"
+        "OAR-TESTPROD-001,ALERT,2026-09-10T09:00:00\n"
+        "OAR-TESTPROD-001,ALERT,2026-09-10T14:00:00\n"  # same day — one bucket
+        "OAR-TESTPROD-001,CLEAR,2026-09-10T09:00:00\n"
+        ",CLEAR,2026-09-11T09:00:00\n"
+    )
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(tmp_path))
+
+    usage = rule_usage_service.compute_usage()
+    counts = {(d["date"], d["product"], d["category"]): d["count"] for d in usage.daily_status_counts}
+    assert counts == {
+        ("2026-09-10", TEST_PRODUCT, "alerted"): 2,
+        ("2026-09-10", TEST_PRODUCT, "cleared_business"): 1,
+        ("2026-09-11", TEST_PRODUCT, "cleared_mkt"): 1,
+    }
+
+
 def test_rule_usage_date_range_excludes_rows_with_no_parseable_timestamp(tmp_path, monkeypatch):
     yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
     csv_path = tmp_path / "testprod_validation_results.csv"
@@ -1979,6 +2028,8 @@ def test_dashboard_rule_usage_route_flags_published_enabled_zero_hit_rule(tmp_pa
     assert by_id["OAR-TESTPROD-002"]["hits"] == 0
     assert by_id["OAR-TESTPROD-002"]["unused"] is True  # published + enabled + never hit
     assert by_id["OAR-TESTPROD-003"]["unused"] is False  # draft — not a signal
+    assert body["status_totals"] == {"alerted": 1}
+    assert body["daily_status_counts"] == []  # the one row carries no EXCEPTIONTIMESTAMP
 
 
 def test_dashboard_rule_usage_route_applies_date_from_date_to_query_params(tmp_path, monkeypatch):

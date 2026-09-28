@@ -69,6 +69,11 @@ class UsageRecord:
     rule_id: Optional[str]
     product: str
     ts: Optional[datetime]
+    # The row's own STATUS column, upper-cased ("ALERT" / "CLEAR"), or None
+    # when the file has no STATUS column or the row's value is missing/
+    # unrecognized — see exception_category() for how this (plus rule_id)
+    # becomes the three-way alerted/cleared_business/cleared_mkt split.
+    status: Optional[str] = None
 
 
 @dataclass
@@ -94,6 +99,21 @@ class UsageSnapshot:
     # with no parseable timestamp has no day to bucket into, so it's not
     # represented here even though it's still in total_rows/product_totals.
     daily_product_counts: List[Dict[str, object]] = field(default_factory=list)
+    # The business-benefit split of every row that carried a recognized
+    # STATUS: "alerted" (STATUS=ALERT — a real exception, nothing cleared
+    # it), "cleared_business" (STATUS=CLEAR with a RULE_ID — a business
+    # rule evaluated the record and its own logic cleared it) and
+    # "cleared_mkt" (STATUS=CLEAR with no RULE_ID — cleared by market-data
+    # validation, not attributable to any one rule). A row with no STATUS
+    # column, or a value that isn't ALERT/CLEAR, contributes to neither —
+    # still real volume (counted in total_rows/product_totals) but with no
+    # signal for this breakdown.
+    status_totals: Dict[str, int] = field(default_factory=dict)
+    # Same (day, product) shape as daily_product_counts, with an added
+    # category dimension — one entry per (day, product, category) — so the
+    # frontend can build the alerted/cleared_business/cleared_mkt trend
+    # either as an all-products total or narrowed to one product.
+    daily_status_counts: List[Dict[str, object]] = field(default_factory=list)
     earliest_date: Optional[str] = None
     latest_date: Optional[str] = None
     error: Optional[str] = None
@@ -165,7 +185,9 @@ def _read_rows(file_path: str) -> Tuple[List[str], List[dict]]:
     raise last_err  # every encoding failed — surface the last attempt's error
 
 
-def _parse_file(rows: List[dict], rule_id_col: Optional[str], ts_col: Optional[str]) -> List[UsageRecord]:
+def _parse_file(
+    rows: List[dict], rule_id_col: Optional[str], ts_col: Optional[str], status_col: Optional[str] = None,
+) -> List[UsageRecord]:
     """One file's rows -> records. A validation-results row is real product
     volume whether or not a specific rule claimed it (a fail-safe/unmatched
     ALERT has no RULE_ID at all) — dropping those un-attributed rows would
@@ -199,10 +221,15 @@ def _parse_file(rows: List[dict], rule_id_col: Optional[str], ts_col: Optional[s
     def _ts(row: dict) -> Optional[datetime]:
         return _parse_ts(row.get(ts_col)) if ts_col else None
 
+    def _status(row: dict) -> Optional[str]:
+        if not status_col:
+            return None
+        return (row.get(status_col) or "").strip().upper() or None
+
     distinct_products = {p for _, _, p in tagged}
     if len(distinct_products) > 1:
         # mixed-product file — no safe file-level attribution, row-level only
-        return [UsageRecord(rule_id=rid, product=p, ts=_ts(row)) for row, rid, p in tagged]
+        return [UsageRecord(rule_id=rid, product=p, ts=_ts(row), status=_status(row)) for row, rid, p in tagged]
 
     if not distinct_products:
         return []  # nothing in this file resolves to any product at all
@@ -211,7 +238,7 @@ def _parse_file(rows: List[dict], rule_id_col: Optional[str], ts_col: Optional[s
     records: List[UsageRecord] = []
     for row in rows:
         rule_id = (row.get(rule_id_col) or "").strip() if rule_id_col else ""
-        records.append(UsageRecord(rule_id=rule_id or None, product=file_product, ts=_ts(row)))
+        records.append(UsageRecord(rule_id=rule_id or None, product=file_product, ts=_ts(row), status=_status(row)))
     return records
 
 
@@ -224,7 +251,8 @@ def _parse_all(csv_path: str, files: List[str]) -> _ParsedData:
         header_map = {(h or "").strip().lower(): h for h in fieldnames}
         rule_id_col = header_map.get("rule_id")
         ts_col = header_map.get("exceptiontimestamp")
-        records.extend(_parse_file(rows, rule_id_col, ts_col))
+        status_col = header_map.get("status")
+        records.extend(_parse_file(rows, rule_id_col, ts_col, status_col))
     return _ParsedData(available=True, csv_path=csv_path, as_of=as_of, records=records)
 
 
@@ -254,6 +282,18 @@ def _load_parsed() -> _ParsedData:
         return parsed
 
 
+def _exception_category(r: UsageRecord) -> Optional[str]:
+    """The business-benefit bucket a row's own STATUS (plus whether a rule
+    claimed it) puts it in — see UsageSnapshot.status_totals. STATUS values
+    other than ALERT/CLEAR (or no STATUS column at all) categorize as
+    None — real volume, just no signal for this particular breakdown."""
+    if r.status == "ALERT":
+        return "alerted"
+    if r.status == "CLEAR":
+        return "cleared_business" if r.rule_id else "cleared_mkt"
+    return None
+
+
 def compute_usage(date_from: Optional[date] = None, date_to: Optional[date] = None) -> UsageSnapshot:
     parsed = _load_parsed()
     if not parsed.available:
@@ -279,6 +319,8 @@ def compute_usage(date_from: Optional[date] = None, date_to: Optional[date] = No
     rule_hits: Dict[str, int] = {}
     product_totals: Dict[str, int] = {}
     daily_product: Dict[Tuple[str, str], int] = {}
+    status_totals: Dict[str, int] = {}
+    daily_status: Dict[Tuple[str, str, str], int] = {}
     for r in in_range:
         if r.rule_id:
             rule_hits[r.rule_id] = rule_hits.get(r.rule_id, 0) + 1
@@ -286,12 +328,23 @@ def compute_usage(date_from: Optional[date] = None, date_to: Optional[date] = No
         if r.ts is not None:
             key = (r.ts.date().isoformat(), r.product)
             daily_product[key] = daily_product.get(key, 0) + 1
+        category = _exception_category(r)
+        if category:
+            status_totals[category] = status_totals.get(category, 0) + 1
+            if r.ts is not None:
+                skey = (r.ts.date().isoformat(), r.product, category)
+                daily_status[skey] = daily_status.get(skey, 0) + 1
 
     daily_product_counts = [
         {"date": d, "product": p, "count": c} for (d, p), c in sorted(daily_product.items())
+    ]
+    daily_status_counts = [
+        {"date": d, "product": p, "category": cat, "count": c}
+        for (d, p, cat), c in sorted(daily_status.items())
     ]
 
     return UsageSnapshot(available=True, csv_path=parsed.csv_path, as_of=parsed.as_of,
                           total_rows=len(in_range), rule_hits=rule_hits, product_totals=product_totals,
                           daily_product_counts=daily_product_counts,
+                          status_totals=status_totals, daily_status_counts=daily_status_counts,
                           earliest_date=earliest, latest_date=latest)

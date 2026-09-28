@@ -23,9 +23,15 @@ export const meta = {
   order: 5,
 };
 
+// Dashboard, Products and Rules are all view-safe for a non-admin — each
+// page already gates its own mutating controls behind isAdmin (Products
+// exactly mirrors how RuleWorkspace/RuleList do it: create/enable/rename
+// buttons hidden, toggles disabled, a "Viewing as User" banner shown), and
+// their GET routes carry no role check server-side. Only the genuinely
+// admin-only workflows stay tab-gated.
 const ALL_TOP_TABS = [
-  { id: "dashboard", label: "Dashboard", adminOnly: true },
-  { id: "products", label: "Products", adminOnly: true },
+  { id: "dashboard", label: "Dashboard" },
+  { id: "products", label: "Products" },
   { id: "rules", label: "Rules" },
   { id: "data", label: "Datasets & Lookups", adminOnly: true },
   { id: "versions", label: "Versions", adminOnly: true },
@@ -39,7 +45,8 @@ function RuleDesignerInner() {
   const TOP_TABS = ALL_TOP_TABS.filter((t) => isAdmin || !t.adminOnly);
 
   useEffect(() => {
-    if (!isAdmin && tab !== "rules") setTab("rules");
+    const current = ALL_TOP_TABS.find((t) => t.id === tab);
+    if (!isAdmin && current?.adminOnly) setTab("rules");
   }, [isAdmin, tab]);
 
   function openRule(id) { setSelectedRule(id); setTab("rules"); }

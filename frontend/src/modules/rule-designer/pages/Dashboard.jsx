@@ -34,37 +34,45 @@ function productColorMap(allProductCodes) {
   return map;
 }
 
-function buildDailyChartData(dailyProductCounts, colorMap) {
-  const otherSet = new Set(colorMap._other || []);
+// Every row's own STATUS (see rule_usage_service.compute_usage) collapses
+// to one of three business-meaningful buckets: "alerted" (STATUS=ALERT —
+// a real exception, nothing cleared it), "cleared_business" (STATUS=CLEAR
+// with a RULE_ID — a business rule evaluated the record and its own logic
+// cleared it) and "cleared_mkt" (STATUS=CLEAR with no RULE_ID — cleared by
+// market-data validation, not any one rule). Optionally narrowed to a
+// single product — this is what drives the trend chart when the Product
+// filter below has a value selected.
+function buildStatusChartData(dailyStatusCounts, productFilter) {
   const byDate = {};
-  for (const { date, product, count } of dailyProductCounts) {
-    const series = otherSet.has(product) ? "Other" : product;
-    byDate[date] = byDate[date] || { date };
-    byDate[date][series] = (byDate[date][series] || 0) + count;
+  for (const { date, product, category, count } of dailyStatusCounts) {
+    if (productFilter && product !== productFilter) continue;
+    const row = byDate[date] || { date, alerted: 0, cleared_business: 0, cleared_mkt: 0 };
+    row[category] = (row[category] || 0) + count;
+    byDate[date] = row;
   }
   return Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
 }
 
-function buildAggregateChartData(dailyProductCounts) {
-  const byDate = {};
-  for (const { date, count } of dailyProductCounts) {
-    byDate[date] = (byDate[date] || 0) + count;
+// Per-product ALERT totals (across whatever date window is loaded) for the
+// compact distribution legend shown beside the chart when it's showing the
+// all-products aggregate rather than one selected product.
+function buildProductAlertDistribution(dailyStatusCounts) {
+  const totals = {};
+  for (const { product, category, count } of dailyStatusCounts) {
+    if (category !== "alerted") continue;
+    totals[product] = (totals[product] || 0) + count;
   }
-  return Object.entries(byDate)
-    .map(([date, total]) => ({ date, total }))
-    .sort((a, b) => a.date.localeCompare(b.date));
+  return Object.entries(totals)
+    .map(([product, count]) => ({ product, count }))
+    .sort((a, b) => b.count - a.count);
 }
 
-// Total hits a rule-usage payload's rules accounted for — this is what
-// "exceptions caught" means for the KPI band: real product volume that a
-// specific rule matched, not exception_analysis's raw row count (which
-// also includes rows no rule claimed — see UsageRecord.rule_id in
-// rule_usage_service.py).
-function sumHits(usageData) {
+// "Exceptions caught" — the KPI band's headline number — means ALERT rows
+// specifically (see buildStatusChartData's comment): a CLEAR row, however
+// it got cleared, isn't an exception the system caught.
+function sumAlerts(usageData) {
   if (!usageData?.available) return null;
-  return usageData.products.reduce(
-    (sum, p) => sum + p.rules.reduce((s, r) => s + r.hits, 0), 0,
-  );
+  return usageData.status_totals?.alerted ?? 0;
 }
 
 // The [dateFrom, dateTo] window's own length, immediately preceding it —
@@ -108,7 +116,6 @@ export default function Dashboard({ onOpenRule }) {
   const [search, setSearch] = useState("");
   const [unusedOnly, setUnusedOnly] = useState(false);
   const [sort, setSort] = useState({ key: "hits", dir: "asc" });
-  const [showPerProduct, setShowPerProduct] = useState(false);
 
   const { loading, data, error } = useAsync(
     useCallback(() => rd.ruleUsage(dateFrom || undefined, dateTo || undefined), [dateFrom, dateTo]),
@@ -168,14 +175,14 @@ export default function Dashboard({ onOpenRule }) {
     });
   }, [filtered, sort]);
 
-  // "Exceptions caught" — real volume specific rules accounted for — plus
-  // its direction vs. the immediately preceding, equal-length window.
-  const totalHits = useMemo(() => sumHits(data), [data]);
-  const priorTotalHits = useMemo(() => sumHits(priorData), [priorData]);
-  const hitsDeltaPct = useMemo(() => {
-    if (totalHits == null || !priorTotalHits) return null;
-    return Math.round(((totalHits - priorTotalHits) / priorTotalHits) * 1000) / 10;
-  }, [totalHits, priorTotalHits]);
+  // "Exceptions caught" — ALERT rows specifically — plus its direction vs.
+  // the immediately preceding, equal-length window.
+  const totalAlerts = useMemo(() => sumAlerts(data), [data]);
+  const priorTotalAlerts = useMemo(() => sumAlerts(priorData), [priorData]);
+  const alertsDeltaPct = useMemo(() => {
+    if (totalAlerts == null || !priorTotalAlerts) return null;
+    return Math.round(((totalAlerts - priorTotalAlerts) / priorTotalAlerts) * 1000) / 10;
+  }, [totalAlerts, priorTotalAlerts]);
 
   // Coverage — of every published, enabled (i.e. actually live) rule, what
   // share caught at least one exception in this window. A published rule
@@ -199,8 +206,16 @@ export default function Dashboard({ onOpenRule }) {
   );
   const maxLeaderboardHits = leaderboardRules[0]?.hits || 1;
 
-  const aggregateChartData = useMemo(
-    () => (data?.available ? buildAggregateChartData(data.daily_product_counts) : []),
+  // Driven by the Product filter below: a product selected narrows the
+  // trend to that product's own three lines; "all products" (the default)
+  // aggregates every product into the same three lines, with a compact
+  // per-product distribution legend alongside for the alert share.
+  const statusChartData = useMemo(
+    () => (data?.available ? buildStatusChartData(data.daily_status_counts, productFilter) : []),
+    [data, productFilter],
+  );
+  const productAlertDistribution = useMemo(
+    () => (data?.available ? buildProductAlertDistribution(data.daily_status_counts) : []),
     [data],
   );
 
@@ -212,15 +227,6 @@ export default function Dashboard({ onOpenRule }) {
     () => productColorMap((data?.available ? data.products : []).map((p) => p.code)),
     [data],
   );
-  const chartData = useMemo(
-    () => (data?.available ? buildDailyChartData(data.daily_product_counts, colorMap) : []),
-    [data, colorMap],
-  );
-  const chartSeries = useMemo(() => {
-    const codes = (data?.available ? data.products : []).map((p) => p.code);
-    const known = codes.filter((c) => colorMap[c]);
-    return colorMap._other ? [...known, "Other"] : known;
-  }, [data, colorMap]);
   const chartWrapRef = useRef(null);
 
   function exportTableCsv() {
@@ -347,10 +353,12 @@ export default function Dashboard({ onOpenRule }) {
     );
   }
 
-  const activeChartData = showPerProduct ? chartData : aggregateChartData;
-  const hitsDeltaLabel = hitsDeltaPct == null
+  const alertsDeltaLabel = alertsDeltaPct == null
     ? null
-    : `${hitsDeltaPct > 0 ? "+" : ""}${hitsDeltaPct}% vs prior period`;
+    : `${alertsDeltaPct > 0 ? "+" : ""}${alertsDeltaPct}% vs prior period`;
+  const selectedProductName = productFilter
+    ? (data.products.find((p) => p.code === productFilter)?.name || productFilter)
+    : null;
 
   return (
     <>
@@ -359,7 +367,7 @@ export default function Dashboard({ onOpenRule }) {
       </p>
 
       <div className="stat-grid">
-        <Stat label="Exceptions caught" value={totalHits ?? "—"} sub={hitsDeltaLabel || "in the selected window"} />
+        <Stat label="Exceptions caught" value={totalAlerts ?? "—"} sub={alertsDeltaLabel || "ALERT rows in the selected window"} />
         <Stat label="Rule coverage" value={coveragePct == null ? "—" : `${coveragePct}%`}
               sub={`${liveRules.filter((r) => r.hits > 0).length} of ${liveRules.length} live rules caught ≥1`}
               status={coveragePct == null ? undefined : coveragePct >= 80 ? "pass" : coveragePct >= 50 ? "watch" : "breach"} />
@@ -402,49 +410,60 @@ export default function Dashboard({ onOpenRule }) {
       </Card>
 
       <Card>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16 }}>
           <div ref={chartWrapRef} style={{ flex: 1, minWidth: 0, background: "#ffffff" }}>
             <h2 className="card-title" style={{ margin: "0 0 14px" }}>
-              {showPerProduct ? "Exceptions caught by product" : "Exceptions caught over time"}
+              Exceptions caught over time — {selectedProductName || "all products"}
             </h2>
-            {activeChartData.length === 0 ? (
+            {statusChartData.length === 0 ? (
               <p className="empty-hint">No dated rows in the current window to chart.</p>
             ) : (
               <div style={{ width: "100%", height: 260 }}>
                 <ResponsiveContainer>
-                  {showPerProduct ? (
-                    <LineChart data={chartData} margin={{ top: 8, right: 12, bottom: 8, left: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#eef1f4" />
-                      <XAxis dataKey="date" tick={{ fontSize: 10 }} />
-                      <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-                      <Tooltip contentStyle={{ fontSize: 12 }} />
-                      <Legend wrapperStyle={{ fontSize: 12 }} />
-                      {chartSeries.map((code) => (
-                        <Line key={code} type="monotone" dataKey={code} name={code} dot={false}
-                              strokeWidth={2} connectNulls
-                              stroke={code === "Other" ? OTHER_COLOR : colorMap[code]} />
-                      ))}
-                    </LineChart>
-                  ) : (
-                    <LineChart data={aggregateChartData} margin={{ top: 8, right: 12, bottom: 8, left: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#eef1f4" />
-                      <XAxis dataKey="date" tick={{ fontSize: 10 }} />
-                      <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-                      <Tooltip contentStyle={{ fontSize: 12 }} />
-                      <Line type="monotone" dataKey="total" name="Exceptions caught" dot={false}
-                            strokeWidth={2} stroke="var(--accent, #0e7c7b)" />
-                    </LineChart>
-                  )}
+                  <LineChart data={statusChartData} margin={{ top: 8, right: 12, bottom: 8, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#eef1f4" />
+                    <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+                    <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                    <Tooltip contentStyle={{ fontSize: 12 }} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    <Line type="monotone" dataKey="alerted" name="Alerted" dot={false}
+                          strokeWidth={2} stroke="var(--breach, #c0392b)" />
+                    <Line type="monotone" dataKey="cleared_business" name="Cleared (business rule)" dot={false}
+                          strokeWidth={2} stroke="var(--pass, #1f8a4c)" />
+                    <Line type="monotone" dataKey="cleared_mkt" name="Cleared (market data)" dot={false}
+                          strokeWidth={2} stroke="var(--muted, #5b6775)" />
+                  </LineChart>
                 </ResponsiveContainer>
               </div>
             )}
           </div>
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8, flexShrink: 0 }}>
-            <label className="control" style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-              <input type="checkbox" checked={showPerProduct} onChange={(e) => setShowPerProduct(e.target.checked)} />
-              <span>Break down by product</span>
-            </label>
-            <button className="btn btn--ghost" onClick={exportChartPng} disabled={activeChartData.length === 0}>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "stretch", gap: 12, flexShrink: 0, width: 170 }}>
+            {!productFilter && productAlertDistribution.length > 0 && (
+              <div>
+                <div style={{
+                  fontSize: 11, fontWeight: 600, color: "var(--muted)",
+                  textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 8,
+                }}>
+                  Alerts by product
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {productAlertDistribution.map(({ product, count }) => (
+                    <div key={product} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                      <span style={{
+                        width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+                        background: colorMap[product] || OTHER_COLOR,
+                      }} />
+                      <span className="mono" style={{
+                        flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                      }}>{product}</span>
+                      <span className="mono">{count}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <button className="btn btn--ghost" onClick={exportChartPng} disabled={statusChartData.length === 0}
+                    style={{ alignSelf: "flex-end" }}>
               <ImageDown size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Export chart (PNG)
             </button>
           </div>
