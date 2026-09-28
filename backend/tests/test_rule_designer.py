@@ -167,6 +167,21 @@ def test_condition_missing_field_is_false_not_error():
     assert out.result is False
 
 
+def test_condition_eq_matches_float_record_value_against_int_static():
+    # A numeric field parsed off a CSV/JSON dataset commonly comes through
+    # as a Python float (100.0) even when every value it ever holds is a
+    # whole number — str(100.0) == "100.0" never equals str(100) == "100",
+    # so a naive str()-based EQ would fail here even though the record and
+    # the explain trail both display "100". Reproduces a live report: a
+    # condition rendered as "omrctradeDeallevel (100) = 100" in the
+    # explainability trail but was marked NO MATCH.
+    cond = Condition(field="omrctradeDeallevel", operator=Operator.EQ, value=ValueRef(type="static", value=100))
+    out = condition_engine.eval_tree(cond, {"omrctradeDeallevel": 100.0})
+    assert out.result is True
+    out2 = condition_engine.eval_tree(cond, {"omrctradeDeallevel": 101.0})
+    assert out2.result is False
+
+
 def test_condition_between_and_in():
     between = Condition(field="x", operator=Operator.BETWEEN,
                          value=ValueRef(type="static", value=1), value2=ValueRef(type="static", value=10))

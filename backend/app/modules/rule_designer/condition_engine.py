@@ -101,9 +101,17 @@ def eval_condition(cond: Condition, record: dict) -> ConditionExplain:
         expected = _resolve(cond.value, record)
 
         if op == Operator.EQ:
-            result = str(actual) == str(expected)
+            # _fmt(), not raw str(): a numeric field that comes off the
+            # record as a Python float (100.0, from CSV/JSON parsing) has
+            # str(100.0) == "100.0", which never equals str(100) == "100"
+            # even though they're the same value — and the explain text
+            # below already renders both through _fmt(), which normalizes
+            # 100.0 to "100". Comparing with anything other than what's
+            # displayed makes a condition shown as e.g. "(100) = 100" fail
+            # anyway, with nothing in the trace to explain why.
+            result = _fmt(actual) == _fmt(expected)
         elif op == Operator.NE:
-            result = str(actual) != str(expected)
+            result = _fmt(actual) != _fmt(expected)
         elif op == Operator.CONTAINS:
             result = str(expected) in str(actual)
         elif op == Operator.NOT_CONTAINS:
