@@ -33,6 +33,17 @@ from app.modules.rule_designer import yaml_service
 
 _RULE_ID_PRODUCT = re.compile(r"^OAR-(.+)-\d+$", re.IGNORECASE)
 
+# exception_analysis's own extracts are known to vary in encoding (the same
+# reasoning as the user's RiverIndex._load_csv: "River extracts can vary —
+# UTF-8, CP1252, etc."), and opening a file with no explicit encoding picks
+# up the platform default — cp1252 on the Windows deployment this actually
+# runs on, which raises UnicodeDecodeError on the first non-cp1252 byte
+# (confirmed live: a validation-results file failed to load this way).
+# Same fallback order and rationale as RiverIndex: BOM-aware UTF-8 first,
+# plain UTF-8, then the two single-byte encodings likely to round-trip
+# almost any byte without raising.
+_ENCODINGS_TO_TRY = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
+
 _cache_lock = threading.Lock()
 # Keyed on the sorted (file_path, mtime) pairs actually found, not path
 # alone — a directory's own mtime doesn't reliably change when a file
@@ -91,6 +102,27 @@ def _parse_row(row: dict, rule_id_col: Optional[str], rule_hits: Dict[str, int],
     product_totals[product] = product_totals.get(product, 0) + 1
 
 
+def _read_rows(file_path: str) -> Tuple[List[str], List[dict]]:
+    """(fieldnames, rows) for one file, trying each of _ENCODINGS_TO_TRY in
+    turn. Read fully (not lazily) inside the try — a wrong encoding can
+    decode the header fine and only raise UnicodeDecodeError partway
+    through the data rows, so the whole file has to be consumed before an
+    attempt can be trusted. fieldnames comes from the reader directly
+    (not row.keys()) so a header-only file with zero data rows still
+    reports its columns correctly."""
+    last_err: Optional[UnicodeDecodeError] = None
+    for enc in _ENCODINGS_TO_TRY:
+        try:
+            with open(file_path, encoding=enc, newline="") as fh:
+                reader = csv.DictReader(fh)
+                rows = list(reader)
+                return reader.fieldnames or [], rows
+        except UnicodeDecodeError as exc:
+            last_err = exc
+            continue
+    raise last_err  # every encoding failed — surface the last attempt's error
+
+
 def _parse_all(csv_path: str, files: List[str]) -> UsageSnapshot:
     rule_hits: Dict[str, int] = {}
     product_totals: Dict[str, int] = {}
@@ -98,13 +130,12 @@ def _parse_all(csv_path: str, files: List[str]) -> UsageSnapshot:
     as_of = 0.0
     for file_path in files:
         as_of = max(as_of, os.path.getmtime(file_path))
-        with open(file_path, newline="") as fh:
-            reader = csv.DictReader(fh)
-            header_map = {(h or "").strip().lower(): h for h in (reader.fieldnames or [])}
-            rule_id_col = header_map.get("rule_id")
-            for row in reader:
-                total_rows += 1
-                _parse_row(row, rule_id_col, rule_hits, product_totals)
+        fieldnames, rows = _read_rows(file_path)
+        header_map = {(h or "").strip().lower(): h for h in fieldnames}
+        rule_id_col = header_map.get("rule_id")
+        for row in rows:
+            total_rows += 1
+            _parse_row(row, rule_id_col, rule_hits, product_totals)
     return UsageSnapshot(available=True, csv_path=csv_path, as_of=as_of, total_rows=total_rows,
                           rule_hits=rule_hits, product_totals=product_totals)
 
@@ -128,7 +159,7 @@ def compute_usage() -> UsageSnapshot:
             return _cache["result"]
         try:
             result = _parse_all(path, files)
-        except (OSError, csv.Error) as exc:
+        except (OSError, csv.Error, UnicodeDecodeError) as exc:
             result = UsageSnapshot(available=False, csv_path=path, error=f"could not read '{path}': {exc}")
         _cache["key"] = key
         _cache["result"] = result

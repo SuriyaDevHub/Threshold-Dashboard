@@ -1894,6 +1894,24 @@ def test_rule_usage_aggregates_a_directory_of_per_product_files(tmp_path, monkey
     assert usage2.total_rows == 4
 
 
+def test_rule_usage_falls_back_across_encodings_for_non_utf8_file(tmp_path, monkeypatch):
+    # Live report: a validation-results file raised UnicodeDecodeError
+    # under cp1252 (the Windows deployment's platform-default encoding,
+    # picked up by opening the file with no explicit encoding) — same
+    # class of issue the user's own RiverIndex._load_csv already guards
+    # against for River extracts. A REASONCODE value with a byte that's
+    # valid latin-1 but not valid utf-8 (0xE9 standing in for an accented
+    # character some export tool wrote raw) reproduces it here.
+    yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
+    csv_path = tmp_path / "testprod_validation_results.csv"
+    csv_path.write_bytes(b"RULE_ID,REASONCODE\nOAR-TESTPROD-001,Caf\xe9 breach\n")
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(csv_path))
+
+    usage = rule_usage_service.compute_usage()
+    assert usage.available is True
+    assert usage.rule_hits == {"OAR-TESTPROD-001": 1}
+
+
 def test_dashboard_rule_usage_route_flags_published_enabled_zero_hit_rule(tmp_path, monkeypatch):
     yaml_service.save_rules([
         _rule(rule_id="OAR-TESTPROD-001", name="Live, hit", status=RuleStatus.PUBLISHED, enabled=True),
