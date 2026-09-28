@@ -47,9 +47,6 @@ export const rd = {
   getDryRun: (id) => get(`/dry-runs/${id}`),
   listDryRuns: (ruleId) => get(`/rules/${ruleId}/dry-runs`),
 
-  impactAnalysis: (id, body) => post(`/rules/${id}/impact-analysis`, body),
-  shadowTest: (id, body) => post(`/rules/${id}/shadow-test`, body),
-  listShadowTests: (ruleId) => get(`/rules/${ruleId}/shadow-tests`),
   explanation: (id) => get(`/rules/${id}/explanation`),
   diff: (id, against_version) => get(`/rules/${id}/diff`, { against_version }),
 

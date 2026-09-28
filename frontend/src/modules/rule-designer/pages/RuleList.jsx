@@ -16,6 +16,7 @@ function emptyWorkflow() {
 export default function RuleList({ onOpenRule }) {
   const { actor, role, isAdmin } = useActor();
   const [productFilter, setProductFilter] = useState("");
+  const [search, setSearch] = useState("");
   const { loading, data, error, reload } = useAsync(
     useCallback(() => rd.rules(productFilter || undefined), [productFilter]), [productFilter],
   );
@@ -76,7 +77,14 @@ export default function RuleList({ onOpenRule }) {
 
   if (loading) return <Loader label="Loading rules…" />;
   if (error) return <ErrorState error={error} />;
-  const rules = data?.rules || [];
+  const allRules = data?.rules || [];
+  const q = search.trim().toLowerCase();
+  const rules = q
+    ? allRules.filter((r) =>
+        (r.name || "").toLowerCase().includes(q)
+        || (r.rule_id || "").toLowerCase().includes(q)
+        || (r.reason_code || "").toLowerCase().includes(q))
+    : allRules;
 
   return (
     <>
@@ -94,6 +102,11 @@ export default function RuleList({ onOpenRule }) {
             <option value="">all products</option>
             {productList.map((p) => <option key={p.code} value={p.code}>{p.name}</option>)}
           </select>
+        </label>
+        <label className="control" style={{ minWidth: 240 }}>
+          <span>Search</span>
+          <input value={search} onChange={(e) => setSearch(e.target.value)}
+                 placeholder="Name, rule ID or reason code…" />
         </label>
       </div>
 
@@ -170,7 +183,11 @@ export default function RuleList({ onOpenRule }) {
               ))}
             </tbody>
           </table>
-          {rules.length === 0 && <p className="empty-hint" style={{ padding: 16 }}>No rules yet.</p>}
+          {rules.length === 0 && (
+            <p className="empty-hint" style={{ padding: 16 }}>
+              {q ? "No rules match your search." : "No rules yet."}
+            </p>
+          )}
         </div>
       </Card>
     </>

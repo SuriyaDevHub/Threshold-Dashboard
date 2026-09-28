@@ -10,15 +10,11 @@ import { useActor } from "../RoleContext.jsx";
 import { fmtDate, STATUS_LABEL } from "../format.js";
 import WorkflowCanvas from "../components/WorkflowCanvas.jsx";
 import DryRunResults from "../components/DryRunResults.jsx";
-import ImpactView from "../components/ImpactView.jsx";
 import DiffView from "../components/DiffView.jsx";
-import ShadowTestView from "../components/ShadowTestView.jsx";
 
-const TABS = [
-  { id: "workflow", label: "Workflow / Rule builder" },
+const ALL_TABS = [
+  { id: "workflow", label: "Workflow / Rule builder", adminOnly: true },
   { id: "dryrun", label: "Dry run" },
-  { id: "shadow", label: "Shadow test (vs legacy)" },
-  { id: "impact", label: "Impact analysis" },
   { id: "review", label: "Review" },
   { id: "history", label: "History" },
 ];
@@ -29,7 +25,12 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [dirty, setDirty] = useState(false);
-  const [tab, setTab] = useState("workflow");
+  const [tab, setTab] = useState(isAdmin ? "workflow" : "dryrun");
+  const TABS = ALL_TABS.filter((t) => isAdmin || !t.adminOnly);
+
+  useEffect(() => {
+    if (!isAdmin && tab === "workflow") setTab("dryrun");
+  }, [isAdmin, tab]);
   const [datasets, setDatasets] = useState([]);
   const [schema, setSchema] = useState([]);
   const [datasetId, setDatasetId] = useState("");
@@ -186,7 +187,7 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
 
       {!isAdmin && (
         <div className="preview-note" style={{ marginBottom: 14 }}>
-          Viewing as User — you can dry-run and shadow-test this rule; editing, submitting, approving and publishing are Admin-only.
+          Viewing as User — you can dry-run this rule; editing the workflow, submitting, approving and publishing are Admin-only.
         </div>
       )}
       {notice && <div className={notice.kind === "breach" ? "errorbox" : "benefit-note"}>{notice.text}</div>}
@@ -225,12 +226,10 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
         ))}
       </div>
 
-      {tab === "workflow" && (
+      {tab === "workflow" && isAdmin && (
         <WorkflowTab rule={rule} schema={schema} datasetId={datasetId} mutateWorkflow={mutateWorkflow} setNotice={setNotice} meta={meta} />
       )}
       {tab === "dryrun" && <DryRunTab ruleId={ruleId} datasetId={datasetId} schema={schema} onRan={(r) => setRule((prev) => ({ ...prev, status: prev.status === "VALIDATED" ? "DRY_RUN_COMPLETED" : prev.status }))} />}
-      {tab === "shadow" && <ShadowTestView ruleId={ruleId} datasetId={datasetId} />}
-      {tab === "impact" && <ImpactTab ruleId={ruleId} datasetId={datasetId} schema={schema} />}
       {tab === "review" && <ReviewTab ruleId={ruleId} />}
       {tab === "history" && <HistoryTab rule={rule} />}
     </>
@@ -332,29 +331,6 @@ function DryRunTab({ ruleId, datasetId, onRan }) {
         {!datasetId && <p className="empty-hint">Select a dataset above first.</p>}
       </Card>
       <DryRunResults result={result} />
-    </>
-  );
-}
-
-function ImpactTab({ ruleId, datasetId }) {
-  const [result, setResult] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const { actor, role } = useActor();
-
-  async function run() {
-    if (!datasetId) return;
-    setBusy(true);
-    try {
-      setResult(await rd.impactAnalysis(ruleId, { actor, role, dataset_id: datasetId, record_id_field: "trade_id" }));
-    } finally { setBusy(false); }
-  }
-
-  return (
-    <>
-      <Card title="Compare current production rule vs. this proposed version">
-        <button className="btn" disabled={busy || !datasetId} onClick={run}>{busy ? "Running…" : "Run impact analysis"}</button>
-      </Card>
-      <ImpactView result={result} />
     </>
   );
 }

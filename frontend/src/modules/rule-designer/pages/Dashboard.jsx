@@ -150,14 +150,81 @@ export default function Dashboard({ onOpenRule }) {
   }
 
   function exportChartPng() {
-    const svg = chartWrapRef.current?.querySelector("svg");
-    if (!svg) return;
-    const { width, height } = svg.getBoundingClientRect();
-    const clone = svg.cloneNode(true);
-    clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-    clone.setAttribute("width", width);
-    clone.setAttribute("height", height);
-    const svgText = new XMLSerializer().serializeToString(clone);
+    // The wrapped node holds the title *and* the chart — recharts renders
+    // its <Legend> as an HTML <ul> sibling of the <svg> (not inside it), so
+    // grabbing just the inner <svg> (the old approach) silently drops the
+    // legend and the title lives outside the chart wrapper entirely.
+    // Serializing the whole node inside an <svg><foreignObject> is the
+    // standard way to rasterize mixed HTML+SVG DOM without a new dependency.
+    const node = chartWrapRef.current;
+    if (!node) return;
+    const width = node.getBoundingClientRect().width;
+
+    const clone = node.cloneNode(true);
+    clone.setAttribute("xmlns", "http://www.w3.org/1999/xhtml");
+    clone.style.width = `${width}px`;
+    clone.style.height = "auto";
+    clone.style.background = "#ffffff";
+    // The isolated, data-URI'd SVG has no access to the page's stylesheet,
+    // so text would otherwise fall back to the browser's serif default —
+    // set the font explicitly (inherited by every descendant) and let
+    // color/other properties fall back to their (black-ish) initial values.
+    // Changing the font can itself reflow text (e.g. wrap the legend onto
+    // an extra line), so this must happen *before* the clone's height is
+    // measured below — measuring the unstyled live node first and reusing
+    // that number here previously clipped exactly that extra line.
+    clone.style.fontFamily = "system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif";
+    clone.style.color = "#1a2027";
+
+    // Lay the clone out for real (off-screen) so its height reflects the
+    // fonts/styles it will actually render with, including any content —
+    // like recharts' absolutely-positioned <Legend> — that overflows the
+    // wrapper's own box without enlarging it.
+    clone.style.position = "fixed";
+    clone.style.top = "-10000px";
+    clone.style.left = "-10000px";
+    clone.style.visibility = "hidden";
+    document.body.appendChild(clone);
+    const cloneRect = clone.getBoundingClientRect();
+    let maxBottom = cloneRect.bottom;
+    for (const el of clone.querySelectorAll("*")) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) continue;
+      if (r.bottom > maxBottom) maxBottom = r.bottom;
+    }
+    // Chromium's offscreen rasterization of a foreignObject (the path
+    // canvas.drawImage takes) measures text a few pixels taller than the
+    // same markup's on-screen paint — a bottom row that fits exactly on
+    // screen can still get clipped in the exported bitmap. A fixed safety
+    // margin absorbs that discrepancy; it's blank canvas, so it costs
+    // nothing but a sliver of white space below the legend.
+    const SAFETY_MARGIN = 32;
+    const height = (maxBottom - cloneRect.top) + SAFETY_MARGIN;
+    document.body.removeChild(clone);
+    clone.style.position = "";
+    clone.style.top = "";
+    clone.style.left = "";
+    clone.style.visibility = "";
+    clone.style.height = `${maxBottom - cloneRect.top}px`;
+
+    const svgNS = "http://www.w3.org/2000/svg";
+    const outer = document.createElementNS(svgNS, "svg");
+    outer.setAttribute("xmlns", svgNS);
+    outer.setAttribute("width", width);
+    outer.setAttribute("height", height);
+    outer.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    const bg = document.createElementNS(svgNS, "rect");
+    bg.setAttribute("width", "100%");
+    bg.setAttribute("height", "100%");
+    bg.setAttribute("fill", "#ffffff");
+    outer.appendChild(bg);
+    const foreignObject = document.createElementNS(svgNS, "foreignObject");
+    foreignObject.setAttribute("width", "100%");
+    foreignObject.setAttribute("height", `${height}`);
+    foreignObject.appendChild(clone);
+    outer.appendChild(foreignObject);
+    const svgText = new XMLSerializer().serializeToString(outer);
+
     const img = new Image();
     img.onload = () => {
       const scale = 2; // export at 2x for a crisper paste into a slide
@@ -170,6 +237,9 @@ export default function Dashboard({ onOpenRule }) {
       ctx.drawImage(img, 0, 0, width, height);
       canvas.toBlob((blob) => blob && downloadBlob(blob, "rule_usage_trend.png"));
     };
+    // A blob: object URL here taints the canvas ("Tainted canvases may not
+    // be exported") for this specific foreignObject-SVG-to-canvas path in
+    // Chromium — a data: URI does not.
     img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svgText);
   }
 
@@ -202,31 +272,33 @@ export default function Dashboard({ onOpenRule }) {
       </div>
 
       <Card>
-        <div className="controls controls--row" style={{ marginBottom: 14, justifyContent: "space-between" }}>
-          <h2 className="card-title" style={{ margin: 0 }}>Daily volume by product</h2>
-          <button className="btn btn--ghost" onClick={exportChartPng} disabled={chartData.length === 0}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+          <div ref={chartWrapRef} style={{ flex: 1, minWidth: 0, background: "#ffffff" }}>
+            <h2 className="card-title" style={{ margin: "0 0 14px" }}>Daily volume by product</h2>
+            {chartData.length === 0 ? (
+              <p className="empty-hint">No dated rows in the current window to chart.</p>
+            ) : (
+              <div style={{ width: "100%", height: 260 }}>
+                <ResponsiveContainer>
+                  <BarChart data={chartData} margin={{ top: 8, right: 12, bottom: 8, left: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#eef1f4" />
+                    <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+                    <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                    <Tooltip contentStyle={{ fontSize: 12 }} />
+                    <Legend wrapperStyle={{ fontSize: 12 }} />
+                    {chartSeries.map((code) => (
+                      <Bar key={code} dataKey={code} name={code} stackId="vol" radius={[2, 2, 2, 2]}
+                           fill={code === "Other" ? OTHER_COLOR : colorMap[code]} />
+                    ))}
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            )}
+          </div>
+          <button className="btn btn--ghost" onClick={exportChartPng} disabled={chartData.length === 0} style={{ flexShrink: 0 }}>
             <ImageDown size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Export chart (PNG)
           </button>
         </div>
-        {chartData.length === 0 ? (
-          <p className="empty-hint">No dated rows in the current window to chart.</p>
-        ) : (
-          <div ref={chartWrapRef} style={{ width: "100%", height: 260 }}>
-            <ResponsiveContainer>
-              <BarChart data={chartData} margin={{ top: 8, right: 12, bottom: 8, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#eef1f4" />
-                <XAxis dataKey="date" tick={{ fontSize: 10 }} />
-                <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
-                <Tooltip contentStyle={{ fontSize: 12 }} />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                {chartSeries.map((code) => (
-                  <Bar key={code} dataKey={code} name={code} stackId="vol" radius={[2, 2, 2, 2]}
-                       fill={code === "Other" ? OTHER_COLOR : colorMap[code]} />
-                ))}
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        )}
       </Card>
 
       <Card>

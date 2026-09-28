@@ -1,10 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 // Module-scoped styles — self-contained, see styles.css's own header
 // comment. This is the only wiring this module's CSS needs; nothing is
 // written into the host app's global stylesheet.
 import "./styles.css";
 import { ModuleHeader } from "../../components/ui.jsx";
-import { RoleProvider } from "./RoleContext.jsx";
+import { RoleProvider, useActor } from "./RoleContext.jsx";
 import RoleBar from "./components/RoleBar.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
 import Products from "./pages/Products.jsx";
@@ -23,18 +23,24 @@ export const meta = {
   order: 5,
 };
 
-const TOP_TABS = [
-  { id: "dashboard", label: "Dashboard" },
-  { id: "products", label: "Products" },
+const ALL_TOP_TABS = [
+  { id: "dashboard", label: "Dashboard", adminOnly: true },
+  { id: "products", label: "Products", adminOnly: true },
   { id: "rules", label: "Rules" },
-  { id: "data", label: "Datasets & Lookups" },
-  { id: "versions", label: "Versions" },
-  { id: "audit", label: "Audit" },
+  { id: "data", label: "Datasets & Lookups", adminOnly: true },
+  { id: "versions", label: "Versions", adminOnly: true },
+  { id: "audit", label: "Audit", adminOnly: true },
 ];
 
 function RuleDesignerInner() {
-  const [tab, setTab] = useState("dashboard");
+  const { isAdmin } = useActor();
+  const [tab, setTab] = useState(isAdmin ? "dashboard" : "rules");
   const [selectedRule, setSelectedRule] = useState(null);
+  const TOP_TABS = ALL_TOP_TABS.filter((t) => isAdmin || !t.adminOnly);
+
+  useEffect(() => {
+    if (!isAdmin && tab !== "rules") setTab("rules");
+  }, [isAdmin, tab]);
 
   function openRule(id) { setSelectedRule(id); setTab("rules"); }
 

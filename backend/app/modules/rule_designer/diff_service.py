@@ -5,7 +5,20 @@ from __future__ import annotations
 import difflib
 from typing import List, Optional
 
+from app.modules.rule_designer import version_service, yaml_service
 from app.modules.rule_designer.models import NodeType, Rule
+
+
+def _published_rule_from_version(product: str, rule_id: str, version: int) -> Optional[Rule]:
+    text = version_service.get_version_yaml_text(product, version)
+    if text is None:
+        return None
+    raw = yaml_service.load_text(text)
+    for item in raw.get("rules", []) or []:
+        plain = yaml_service._plain(item)  # noqa: SLF001
+        if plain.get("rule_id") == rule_id:
+            return Rule.model_validate(plain)
+    return None
 
 
 def yaml_diff(before_text: str, after_text: str) -> List[str]:

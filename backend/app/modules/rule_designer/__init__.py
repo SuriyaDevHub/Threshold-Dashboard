@@ -24,9 +24,9 @@ from pydantic import BaseModel
 
 from app.core import store as dataset_store
 from app.modules.rule_designer import (
-    audit_service, diff_service, dry_run_service, explain_service, impact_service,
+    audit_service, diff_service, dry_run_service, explain_service,
     nlp_parser, product_engine, product_registry, reference_store, rule_store, rule_usage_service,
-    shadow_test_service, validation_service, version_service, yaml_service,
+    validation_service, version_service, yaml_service,
 )
 from app.modules.rule_designer.models import (
     LEGAL_TRANSITIONS, ROLE_ALLOWED_ACTIONS, ConditionGroup, MigrationStatus, NodeType, Operator,
@@ -686,81 +686,6 @@ async def list_dry_runs(rule_id: str):
 
 
 # --------------------------------------------------------------------------
-# Impact analysis
-# --------------------------------------------------------------------------
-
-class ImpactBody(Actor):
-    dataset_id: str
-    record_id_field: Optional[str] = None
-
-
-@router.post("/rules/{rule_id}/impact-analysis")
-async def impact_analysis(rule_id: str, body: ImpactBody):
-    _require(body, "dry_run")
-    rule = rule_store.get_rule(rule_id)
-    if rule is None:
-        raise HTTPException(404, "rule not found")
-    try:
-        result = impact_service.run_impact_analysis(rule, body.dataset_id, body.actor, body.record_id_field)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    return result.model_dump(mode="json")
-
-
-# --------------------------------------------------------------------------
-# Shadow / parallel test — new engine vs. an already-produced legacy
-# validator output (spec: migration off hardcoded {product}_validator.py)
-# --------------------------------------------------------------------------
-
-class ShadowTestBody(Actor):
-    dataset_id: str
-    record_id_field: str
-    legacy_csv_text: str
-    legacy_alert_values: List[str]
-    record_id_col: str = "record_id"
-    status_col: str = "status"
-    reason_col: Optional[str] = "reason_code"
-    commentary_col: Optional[str] = "commentary"
-
-
-@router.post("/rules/{rule_id}/shadow-test")
-async def shadow_test(rule_id: str, body: ShadowTestBody):
-    _require(body, "dry_run")
-    rule = rule_store.get_rule(rule_id)
-    if rule is None:
-        raise HTTPException(404, "rule not found")
-    try:
-        legacy_rows = shadow_test_service.parse_legacy_csv(
-            body.legacy_csv_text, body.record_id_col, body.status_col, body.reason_col, body.commentary_col,
-        )
-        if not legacy_rows:
-            raise HTTPException(400, "no legacy rows parsed — check record_id_col/status_col")
-        result = shadow_test_service.run_shadow_test(
-            rule, body.dataset_id, legacy_rows, body.legacy_alert_values, body.actor, body.record_id_field,
-        )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    audit_service.log(body.actor, "DRY_RUN", role=body.role.value, rule_id=rule_id,
-                       dataset_id=body.dataset_id,
-                       detail=f"shadow test vs legacy: {result.summary.agreement_rate_pct}% agreement, "
-                              f"{result.summary.legacy_only} legacy-only, {result.summary.new_only} new-only")
-    return result.model_dump(mode="json")
-
-
-@router.get("/shadow-tests/{shadow_id}")
-async def get_shadow_test(shadow_id: str):
-    r = shadow_test_service.get_shadow_test(shadow_id)
-    if r is None:
-        raise HTTPException(404, "shadow test not found")
-    return r.model_dump(mode="json")
-
-
-@router.get("/rules/{rule_id}/shadow-tests")
-async def list_shadow_tests(rule_id: str):
-    return {"shadow_tests": [r.model_dump(mode="json") for r in shadow_test_service.list_shadow_tests(rule_id)]}
-
-
-# --------------------------------------------------------------------------
 # Explanation + diff
 # --------------------------------------------------------------------------
 
@@ -783,7 +708,7 @@ async def rule_diff(rule_id: str, against_version: Optional[int] = None):
     target_version = against_version or (versions[-1].version if versions else None)
     if target_version:
         before_text = version_service.get_version_yaml_text(rule.product, target_version) or ""
-        before_rule = impact_service._published_rule_from_version(rule.product, rule_id, target_version)
+        before_rule = diff_service._published_rule_from_version(rule.product, rule_id, target_version)
     after_text = yaml_service.rules_yaml_text(rule.product)
     return {
         "against_version": target_version,

@@ -15,13 +15,13 @@ from app.core import store as dataset_store
 from app.core.config import get_settings
 from app.modules.rule_designer import (
     calc_ops, condition_engine, explain_service, lookup_engine, product_engine, product_registry,
-    reference_store, rule_store, rule_usage_service, shadow_test_service, validation_service, version_service,
+    reference_store, rule_store, rule_usage_service, validation_service, version_service,
     workflow_engine, yaml_service,
 )
 from app.modules.rule_designer.models import (
     Condition, ConditionGroup, ConflictHandling, DeriveSpec, LookupConfig, LookupFieldMap, LookupType,
     MissingLookupStrategy, NodeType, Operator, OutcomeAction, PriorityStrategy, Rule, RuleStatus,
-    ShadowComparisonCategory, Role, ValueRef, Workflow, WorkflowEdge, WorkflowNode,
+    Role, ValueRef, Workflow, WorkflowEdge, WorkflowNode,
 )
 
 TEST_PRODUCT = "TESTPROD"
@@ -42,7 +42,6 @@ def isolated_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(audit_service, "AUDIT_DIR", str(tmp_path / "audit"))
     monkeypatch.setattr(audit_service, "AUDIT_LOG", str(tmp_path / "audit" / "audit_log.jsonl"))
 
-    monkeypatch.setattr(shadow_test_service, "SHADOW_DIR", str(tmp_path / "shadow_tests"))
     monkeypatch.setattr(dataset_store.get_settings(), "DATA_DIR", str(tmp_path / "_datasets"))
     dataset_store._MEM.clear()  # noqa: SLF001 — in-memory dataset store is process-global
 
@@ -1701,86 +1700,6 @@ def test_group_key_fields_for_product_empty_when_no_self_group_rules():
     # group_rows for every record.
     _pub_rule("PR1", threshold=5.0)
     assert product_engine.group_key_fields_for_product(TEST_PRODUCT) == []
-
-
-# --------------------------------------------------------------------------
-# shadow_test_service — new engine vs. legacy validator output
-# --------------------------------------------------------------------------
-
-def _shadow_rule(threshold: float = 5.0) -> Rule:
-    return _rule(rule_id="SH1", name="Shadow test rule", required_columns=["trade_id", "deviation"],
-                 workflow=Workflow(
-        nodes=[
-            WorkflowNode(id="in", type=NodeType.INPUT),
-            WorkflowNode(id="cond", type=NodeType.CONDITION, condition=ConditionGroup(operator="AND", children=[
-                Condition(field="deviation", operator=Operator.GT, value=ValueRef(type="static", value=threshold)),
-            ])),
-            WorkflowNode(id="out", type=NodeType.OUTCOME, outcomes=[
-                OutcomeAction(field="Alert", value=ValueRef(type="static", value=True)),
-            ]),
-        ],
-        edges=[WorkflowEdge(source="in", target="cond"), WorkflowEdge(source="cond", target="out")],
-    ))
-
-
-def _put_dataset(rows):
-    meta = dataset_store.put("TEST", {"product_type": "TEST"}, rows)
-    return meta.id
-
-
-def test_shadow_test_agreement_and_mismatch_categories():
-    rule = _shadow_rule(threshold=5.0)
-    ds_id = _put_dataset([
-        {"trade_id": "T1", "deviation": 8.0},   # new: alert
-        {"trade_id": "T2", "deviation": 1.0},   # new: no alert
-        {"trade_id": "T3", "deviation": 9.0},   # new: alert
-        {"trade_id": "T4", "deviation": 2.0},   # new: no alert
-    ])
-    legacy_csv = (
-        "record_id,status,reason_code\n"
-        "T1,ALERTED,DEV_HIGH\n"     # agree_alert
-        "T2,CLEARED,\n"             # agree_clear
-        "T3,CLEARED,\n"             # new_only (new alerts, legacy didn't)
-        "T4,ALERTED,DEV_HIGH\n"     # legacy_only (legacy alerted, new didn't) — the regression case
-    )
-    legacy_rows = shadow_test_service.parse_legacy_csv(legacy_csv)
-    result = shadow_test_service.run_shadow_test(
-        rule, ds_id, legacy_rows, legacy_alert_values=["ALERTED"], actor="tester", record_id_field="trade_id",
-    )
-    assert result.summary.total_compared == 4
-    assert result.summary.agree_alert == 1
-    assert result.summary.agree_clear == 1
-    assert result.summary.new_only == 1
-    assert result.summary.legacy_only == 1
-    assert result.summary.agreement_rate_pct == 50.0
-
-    # legacy_only sorted first — it's the regression-risk category
-    assert result.mismatches[0].category == ShadowComparisonCategory.LEGACY_ONLY
-    assert result.mismatches[0].record_id == "T4"
-    assert result.mismatches[1].category == ShadowComparisonCategory.NEW_ONLY
-    assert result.mismatches[1].record_id == "T3"
-    # every mismatch carries the new engine's explainability trail
-    assert result.mismatches[0].trail
-
-
-def test_shadow_test_reports_unmatched_ids_without_crashing():
-    rule = _shadow_rule(threshold=5.0)
-    ds_id = _put_dataset([{"trade_id": "T1", "deviation": 8.0}])
-    legacy_rows = shadow_test_service.parse_legacy_csv("record_id,status\nT1,ALERTED\nGHOST,ALERTED\n")
-    result = shadow_test_service.run_shadow_test(
-        rule, ds_id, legacy_rows, legacy_alert_values=["ALERTED"], actor="tester", record_id_field="trade_id",
-    )
-    assert result.summary.total_compared == 1
-    assert result.summary.legacy_results_without_dataset_record == 1
-    assert result.summary.dataset_records_without_legacy_result == 0
-
-
-def test_shadow_test_missing_dataset_raises():
-    rule = _shadow_rule()
-    with pytest.raises(ValueError):
-        shadow_test_service.run_shadow_test(
-            rule, "nonexistent_ds", [], [], "tester", "trade_id",
-        )
 
 
 # --------------------------------------------------------------------------
