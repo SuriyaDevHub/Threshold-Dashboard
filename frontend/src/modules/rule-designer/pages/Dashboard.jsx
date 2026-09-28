@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowDown, ArrowUp, ArrowUpDown, Download, ImageDown } from "lucide-react";
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid,
+  LineChart, Line, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid,
 } from "recharts";
 import { useAsync } from "../../../lib/useAsync.js";
 import { Card, Stat, Loader, ErrorState } from "../../../components/ui.jsx";
@@ -19,8 +19,8 @@ const COLUMNS = [
 // Fixed categorical order (never cycled/reassigned by rank — a product
 // keeps its color whether or not it's currently filtered in, and however
 // many other series happen to be visible), validated for adjacent-pair
-// colorblind safety on stacked bars up to 8 series (dataviz skill's
-// reference palette, used unmodified — see references/palette.md).
+// colorblind safety up to 8 series (dataviz skill's reference palette,
+// used unmodified — see references/palette.md).
 const CATEGORICAL_PALETTE = [
   "#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948",
 ];
@@ -280,17 +280,18 @@ export default function Dashboard({ onOpenRule }) {
             ) : (
               <div style={{ width: "100%", height: 260 }}>
                 <ResponsiveContainer>
-                  <BarChart data={chartData} margin={{ top: 8, right: 12, bottom: 8, left: 0 }}>
+                  <LineChart data={chartData} margin={{ top: 8, right: 12, bottom: 8, left: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" stroke="#eef1f4" />
                     <XAxis dataKey="date" tick={{ fontSize: 10 }} />
                     <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
                     <Tooltip contentStyle={{ fontSize: 12 }} />
                     <Legend wrapperStyle={{ fontSize: 12 }} />
                     {chartSeries.map((code) => (
-                      <Bar key={code} dataKey={code} name={code} stackId="vol" radius={[2, 2, 2, 2]}
-                           fill={code === "Other" ? OTHER_COLOR : colorMap[code]} />
+                      <Line key={code} type="monotone" dataKey={code} name={code} dot={false}
+                            strokeWidth={2} connectNulls
+                            stroke={code === "Other" ? OTHER_COLOR : colorMap[code]} />
                     ))}
-                  </BarChart>
+                  </LineChart>
                 </ResponsiveContainer>
               </div>
             )}
