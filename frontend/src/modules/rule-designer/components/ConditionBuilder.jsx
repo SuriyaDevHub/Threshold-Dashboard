@@ -22,6 +22,21 @@ function fieldType(fields, name) {
   return fields.find((f) => f.field === name)?.type;
 }
 
+// `fields` reflects the bound dataset's schema, which isn't always available
+// (e.g. the dataset expired or the backend's DATA_DIR moved after a restart —
+// GET /datasets/{id}/schema comes back empty). A plain `fields.map(...)`
+// option list then has no entry matching an already-configured field, so the
+// native <select> renders as blank and there's nothing to click to see or
+// change what's actually saved — the rule's own condition.field value is
+// still intact, it's just invisible and unselectable in this dropdown. Always
+// keep the currently-configured value present as an option so it stays
+// visible and re-selectable (a no-op re-select) even when the schema that
+// would normally list it isn't available right now.
+function withCurrent(fields, current) {
+  if (!current || fields.some((f) => f.field === current)) return fields;
+  return [...fields, { field: current, type: "?", unavailable: true }];
+}
+
 function opsForField(meta, fields, name) {
   const t = fieldType(fields, name);
   if (t && meta?.operators?.[t]) return meta.operators[t];
@@ -44,7 +59,9 @@ function ValueEditor({ value, onChange, fields, placeholder }) {
       </select>
       {kind === "field" ? (
         <select value={value?.name || ""} onChange={(e) => onChange({ type: "column", name: e.target.value })}>
-          {fields.map((f) => <option key={f.field} value={f.field}>{f.field}</option>)}
+          {withCurrent(fields, value?.name).map((f) => (
+            <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
+          ))}
         </select>
       ) : (
         <input
@@ -71,7 +88,9 @@ function ConditionRow({ cond, fields, meta, onChange, onDelete, onDuplicate }) {
     <div className="cb-row">
       <select value={cond.field} onChange={(e) => set({ field: e.target.value })}>
         <option value="" disabled>field…</option>
-        {fields.map((f) => <option key={f.field} value={f.field}>{f.field} ({f.type})</option>)}
+        {withCurrent(fields, cond.field).map((f) => (
+          <option key={f.field} value={f.field}>{f.field} ({f.type}){f.unavailable ? " — unavailable" : ""}</option>
+        ))}
       </select>
       <select value={cond.operator} onChange={(e) => set({ operator: e.target.value })}>
         {ops.map((op) => <option key={op} value={op}>{op.replace(/_/g, " ")}</option>)}
@@ -173,4 +192,4 @@ export default function ConditionBuilder({ group, onChange, fields, meta, depth 
   );
 }
 
-export { newCondition, newGroup };
+export { newCondition, newGroup, withCurrent };

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Plus, Trash2 } from "lucide-react";
 import { rd } from "../api.js";
-import ConditionBuilder, { newGroup } from "./ConditionBuilder.jsx";
+import ConditionBuilder, { newGroup, withCurrent } from "./ConditionBuilder.jsx";
 import TransformOpFields, { transformHint } from "./TransformOpFields.jsx";
 
 // Visual lookup/enrichment designer (spec §11-15, §29): exact / composite /
@@ -90,7 +90,9 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
             <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>group rows where</span>
             <select value={lookup.group_by_field || ""} onChange={(e) => set({ group_by_field: e.target.value })}>
               <option value="" disabled>field…</option>
-              {sourceFields.map((f) => <option key={f.field} value={f.field}>{f.field}</option>)}
+              {withCurrent(sourceFields, lookup.group_by_field).map((f) => (
+                <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
+              ))}
             </select>
             <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>is the same</span>
           </div>
@@ -113,7 +115,9 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
               <div className="lk-row" style={{ marginBottom: 0 }}>
                 <span className="mono">source</span>
                 <select value={jk.source} onChange={(e) => updateJoinKey(i, { source: e.target.value })}>
-                  {sourceFields.map((f) => <option key={f.field} value={f.field}>{f.field}</option>)}
+                  {withCurrent(sourceFields, jk.source).map((f) => (
+                    <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
+                  ))}
                 </select>
                 <span className="mono">=</span>
                 <select value={jk.reference} onChange={(e) => updateJoinKey(i, { reference: e.target.value })}>
@@ -144,7 +148,9 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
           <div className="lk-row">
             <label className="control"><span>Source field</span>
               <select value={lookup.range_field || ""} onChange={(e) => set({ range_field: e.target.value })}>
-                {sourceFields.map((f) => <option key={f.field} value={f.field}>{f.field}</option>)}
+                {withCurrent(sourceFields, lookup.range_field).map((f) => (
+                  <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
+                ))}
               </select>
             </label>
             <label className="control"><span>Reference lower-bound column</span>
@@ -167,7 +173,9 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
           <div className="lk-row">
             <label className="control"><span>Source date field</span>
               <select value={lookup.date_field || ""} onChange={(e) => set({ date_field: e.target.value })}>
-                {sourceFields.map((f) => <option key={f.field} value={f.field}>{f.field}</option>)}
+                {withCurrent(sourceFields, lookup.date_field).map((f) => (
+                  <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
+                ))}
               </select>
             </label>
             <label className="control"><span>Effective-from column</span>

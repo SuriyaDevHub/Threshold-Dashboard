@@ -51,7 +51,23 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
   useEffect(() => { load(); }, [load]);
 
   useEffect(() => {
-    if (datasetId) rd.datasetSchema(datasetId).then((d) => setSchema(d.columns || [])).catch(() => setSchema([]));
+    if (!datasetId) return;
+    rd.datasetSchema(datasetId).then((d) => setSchema(d.columns || [])).catch(() => {
+      // The bound dataset can't be read (expired, or the backend was
+      // restarted from a different working directory and its dataset
+      // cache moved) — every node's field dropdown falls back to just the
+      // fields already configured on that node (see ConditionBuilder's
+      // withCurrent), so existing config stays visible/editable, but new
+      // fields can't be picked until a live dataset is bound again. Say so
+      // plainly rather than letting the field lists silently go empty with
+      // no explanation.
+      setSchema([]);
+      setNotice({
+        kind: "breach",
+        text: "Bound dataset's schema couldn't be loaded (it may have expired) — "
+          + "already-configured fields still show and work, but pick a dataset below to add new ones or dry-run.",
+      });
+    });
   }, [datasetId]);
 
   function mutateWorkflow(next) {

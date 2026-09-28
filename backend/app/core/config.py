@@ -10,6 +10,18 @@ import os
 from functools import lru_cache
 from typing import List
 
+# Anchored to this file, not the process's cwd — same pattern already used
+# by yaml_service.py/product_registry.py/version_service.py's own
+# _BACKEND_DIR. A bare "./_datasets" default resolves against whatever
+# directory the process happened to be launched from, which isn't
+# guaranteed stable across a stop/restart (a different shortcut, launcher,
+# or working directory on the next run silently points DATA_DIR at an
+# empty folder) — confirmed as the cause of a real report: after
+# restarting, a published rule's bound dataset could no longer be found
+# (GET /datasets/{id}/schema 404s), even though its JSON was sitting
+# untouched under the OLD cwd's ./_datasets.
+_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+
 
 def _split(value: str) -> List[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
@@ -27,7 +39,7 @@ class Settings:
     )
 
     # Server-side dataset cache lives here (JSON per dataset, survives reload).
-    DATA_DIR: str = os.getenv("DATA_DIR", "./_datasets")
+    DATA_DIR: str = os.getenv("DATA_DIR", os.path.join(_BACKEND_DIR, "_datasets"))
 
     # --- EPE API (exception data) ---
     EPE_BASE_URL: str = os.getenv("EPE_BASE_URL", "https://epe.internal/api")

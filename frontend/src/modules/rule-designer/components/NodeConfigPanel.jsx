@@ -1,7 +1,7 @@
 import { useEffect } from "react";
 import { Plus, Trash2, X } from "lucide-react";
 import CalcBuilder from "./CalcBuilder.jsx";
-import ConditionBuilder, { newGroup } from "./ConditionBuilder.jsx";
+import ConditionBuilder, { newGroup, withCurrent } from "./ConditionBuilder.jsx";
 import LookupConfigForm from "./LookupConfigForm.jsx";
 import TransformOpFields, { transformHint } from "./TransformOpFields.jsx";
 
@@ -86,7 +86,9 @@ function OutcomeEditor({ outcomes, onChange, fields }) {
           </select>
           {a.value?.type === "column" ? (
             <select value={a.value?.name || ""} onChange={(e) => update(i, { value: { type: "column", name: e.target.value } })}>
-              {fields.map((f) => <option key={f.field} value={f.field}>{f.field}</option>)}
+              {withCurrent(fields, a.value?.name).map((f) => (
+                <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
+              ))}
             </select>
           ) : (
             <input value={a.value?.value ?? ""} onChange={(e) => {
@@ -171,7 +173,9 @@ export default function NodeConfigPanel({ node, fields, meta, onChange, onClose,
             <div className="lk-row">
               <select value={node.transform?.field || ""} onChange={(e) => set({ transform: { ...node.transform, field: e.target.value } })}>
                 <option value="" disabled>field…</option>
-                {fields.map((f) => <option key={f.field} value={f.field}>{f.field}</option>)}
+                {withCurrent(fields, node.transform?.field).map((f) => (
+                  <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
+                ))}
               </select>
               <TransformOpFields transform={node.transform} onChange={(t) => set({ transform: t })} />
               <input placeholder="output field (optional)" value={node.transform?.output_field || ""}

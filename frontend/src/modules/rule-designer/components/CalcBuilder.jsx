@@ -1,4 +1,5 @@
 import { Plus, Trash2 } from "lucide-react";
+import { withCurrent } from "./ConditionBuilder.jsx";
 
 // CALCULATE-node formula editor — a recursive operand tree built entirely
 // by picking a field, a constant, or a nested operation, never by typing.
@@ -70,7 +71,9 @@ function OperandEditor({ operand, onChange, onRemove, fields, depth, canRemove }
           {kind === "field" && (
             <select value={operand?.field || ""} onChange={(e) => onChange({ kind: "field", field: e.target.value })}>
               <option value="" disabled>field…</option>
-              {fields.map((f) => <option key={f.field} value={f.field}>{f.field} ({f.type})</option>)}
+              {withCurrent(fields, operand?.field).map((f) => (
+                <option key={f.field} value={f.field}>{f.field} ({f.type}){f.unavailable ? " — unavailable" : ""}</option>
+              ))}
             </select>
           )}
           {kind === "constant" && (
