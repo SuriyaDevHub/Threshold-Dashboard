@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, ArrowUpDown } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowDown, ArrowUp, ArrowUpDown, Download, ImageDown } from "lucide-react";
+import {
+  BarChart, Bar, XAxis, YAxis, Tooltip, Legend, ResponsiveContainer, CartesianGrid,
+} from "recharts";
 import { useAsync } from "../../../lib/useAsync.js";
 import { Card, Stat, Loader, ErrorState } from "../../../components/ui.jsx";
 import { rd } from "../api.js";
@@ -12,6 +15,47 @@ const COLUMNS = [
   { key: "hits", label: "Hits" },
   { key: "hit_pct", label: "Hit %" },
 ];
+
+// Fixed categorical order (never cycled/reassigned by rank — a product
+// keeps its color whether or not it's currently filtered in, and however
+// many other series happen to be visible), validated for adjacent-pair
+// colorblind safety on stacked bars up to 8 series (dataviz skill's
+// reference palette, used unmodified — see references/palette.md).
+const CATEGORICAL_PALETTE = [
+  "#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948",
+];
+const OTHER_COLOR = "#898781"; // muted ink — palette's own "axis/labels" role, for the fold-in bucket
+
+function productColorMap(allProductCodes) {
+  const sorted = [...allProductCodes].sort();
+  const map = {};
+  sorted.slice(0, CATEGORICAL_PALETTE.length).forEach((code, i) => { map[code] = CATEGORICAL_PALETTE[i]; });
+  if (sorted.length > CATEGORICAL_PALETTE.length) map._other = sorted.slice(CATEGORICAL_PALETTE.length);
+  return map;
+}
+
+function buildDailyChartData(dailyProductCounts, colorMap) {
+  const otherSet = new Set(colorMap._other || []);
+  const byDate = {};
+  for (const { date, product, count } of dailyProductCounts) {
+    const series = otherSet.has(product) ? "Other" : product;
+    byDate[date] = byDate[date] || { date };
+    byDate[date][series] = (byDate[date][series] || 0) + count;
+  }
+  return Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function csvEscape(v) {
+  const s = String(v ?? "");
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
 
 function SortIcon({ active, dir }) {
   if (!active) return <ArrowUpDown size={12} style={{ opacity: 0.35, marginLeft: 4, verticalAlign: "-2px" }} />;
@@ -78,6 +122,57 @@ export default function Dashboard({ onOpenRule }) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
   }
 
+  const colorMap = useMemo(
+    () => productColorMap((data?.available ? data.products : []).map((p) => p.code)),
+    [data],
+  );
+  const chartData = useMemo(
+    () => (data?.available ? buildDailyChartData(data.daily_product_counts, colorMap) : []),
+    [data, colorMap],
+  );
+  const chartSeries = useMemo(() => {
+    const codes = (data?.available ? data.products : []).map((p) => p.code);
+    const known = codes.filter((c) => colorMap[c]);
+    return colorMap._other ? [...known, "Other"] : known;
+  }, [data, colorMap]);
+  const chartWrapRef = useRef(null);
+
+  function exportTableCsv() {
+    const headers = ["Rule", "Rule ID", "Product", "Status", "Enabled", "Hits", "Hit %", "Not seen"];
+    const lines = [headers.join(",")];
+    for (const r of sorted) {
+      lines.push([
+        r.name, r.rule_id, r.productCode, r.status, r.enabled ? "yes" : "no",
+        r.hits, r.hit_pct !== null ? r.hit_pct : "", r.unused ? "yes" : "no",
+      ].map(csvEscape).join(","));
+    }
+    downloadBlob(new Blob([lines.join("\n")], { type: "text/csv" }), "rule_usage.csv");
+  }
+
+  function exportChartPng() {
+    const svg = chartWrapRef.current?.querySelector("svg");
+    if (!svg) return;
+    const { width, height } = svg.getBoundingClientRect();
+    const clone = svg.cloneNode(true);
+    clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+    clone.setAttribute("width", width);
+    clone.setAttribute("height", height);
+    const svgText = new XMLSerializer().serializeToString(clone);
+    const img = new Image();
+    img.onload = () => {
+      const scale = 2; // export at 2x for a crisper paste into a slide
+      const canvas = document.createElement("canvas");
+      canvas.width = width * scale; canvas.height = height * scale;
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.scale(scale, scale);
+      ctx.drawImage(img, 0, 0, width, height);
+      canvas.toBlob((blob) => blob && downloadBlob(blob, "rule_usage_trend.png"));
+    };
+    img.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svgText);
+  }
+
   if (loading && !data) return <Loader label="Loading rule usage…" />;
   if (error) return <ErrorState error={error} />;
   if (!data) return null;
@@ -107,6 +202,34 @@ export default function Dashboard({ onOpenRule }) {
       </div>
 
       <Card>
+        <div className="controls controls--row" style={{ marginBottom: 14, justifyContent: "space-between" }}>
+          <h2 className="card-title" style={{ margin: 0 }}>Daily volume by product</h2>
+          <button className="btn btn--ghost" onClick={exportChartPng} disabled={chartData.length === 0}>
+            <ImageDown size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Export chart (PNG)
+          </button>
+        </div>
+        {chartData.length === 0 ? (
+          <p className="empty-hint">No dated rows in the current window to chart.</p>
+        ) : (
+          <div ref={chartWrapRef} style={{ width: "100%", height: 260 }}>
+            <ResponsiveContainer>
+              <BarChart data={chartData} margin={{ top: 8, right: 12, bottom: 8, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#eef1f4" />
+                <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+                <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                <Tooltip contentStyle={{ fontSize: 12 }} />
+                <Legend wrapperStyle={{ fontSize: 12 }} />
+                {chartSeries.map((code) => (
+                  <Bar key={code} dataKey={code} name={code} stackId="vol" radius={[2, 2, 2, 2]}
+                       fill={code === "Other" ? OTHER_COLOR : colorMap[code]} />
+                ))}
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </Card>
+
+      <Card>
         <div className="controls controls--row" style={{ marginBottom: 14 }}>
           <label className="control"><span>From</span>
             <input type="date" value={dateFrom} min={data.earliest_date || undefined} max={dateTo || data.latest_date || undefined}
@@ -129,6 +252,11 @@ export default function Dashboard({ onOpenRule }) {
             <input type="checkbox" checked={unusedOnly} onChange={(e) => setUnusedOnly(e.target.checked)} />
             <span>Not seen only</span>
           </label>
+          <div className="control" style={{ justifyContent: "flex-end" }}>
+            <button className="btn btn--ghost" onClick={exportTableCsv} disabled={sorted.length === 0}>
+              <Download size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Export table (CSV)
+            </button>
+          </div>
         </div>
 
         {loading && <p className="empty-hint">Refreshing…</p>}

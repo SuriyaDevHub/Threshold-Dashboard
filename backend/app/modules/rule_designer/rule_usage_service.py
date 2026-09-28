@@ -88,6 +88,12 @@ class UsageSnapshot:
     total_rows: int = 0
     rule_hits: Dict[str, int] = field(default_factory=dict)
     product_totals: Dict[str, int] = field(default_factory=dict)
+    # One entry per (day, product) with any volume in the requested window —
+    # a flat list rather than a day->product->count nesting so the frontend
+    # can pivot it into whatever chart-library row shape it needs. A record
+    # with no parseable timestamp has no day to bucket into, so it's not
+    # represented here even though it's still in total_rows/product_totals.
+    daily_product_counts: List[Dict[str, object]] = field(default_factory=list)
     earliest_date: Optional[str] = None
     latest_date: Optional[str] = None
     error: Optional[str] = None
@@ -272,11 +278,20 @@ def compute_usage(date_from: Optional[date] = None, date_to: Optional[date] = No
 
     rule_hits: Dict[str, int] = {}
     product_totals: Dict[str, int] = {}
+    daily_product: Dict[Tuple[str, str], int] = {}
     for r in in_range:
         if r.rule_id:
             rule_hits[r.rule_id] = rule_hits.get(r.rule_id, 0) + 1
         product_totals[r.product] = product_totals.get(r.product, 0) + 1
+        if r.ts is not None:
+            key = (r.ts.date().isoformat(), r.product)
+            daily_product[key] = daily_product.get(key, 0) + 1
+
+    daily_product_counts = [
+        {"date": d, "product": p, "count": c} for (d, p), c in sorted(daily_product.items())
+    ]
 
     return UsageSnapshot(available=True, csv_path=parsed.csv_path, as_of=parsed.as_of,
                           total_rows=len(in_range), rule_hits=rule_hits, product_totals=product_totals,
+                          daily_product_counts=daily_product_counts,
                           earliest_date=earliest, latest_date=latest)

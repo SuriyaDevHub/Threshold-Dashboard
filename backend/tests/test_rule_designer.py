@@ -1988,6 +1988,35 @@ def test_rule_usage_date_range_recomputes_hits_and_reports_span(tmp_path, monkey
     assert exact.rule_hits == {"OAR-TESTPROD-001": 1}
 
 
+def test_rule_usage_daily_product_counts_bucketed_by_day_and_product(tmp_path, monkeypatch):
+    product_registry.create_product("OTHERPROD", "Other Product", "", "tester")
+    yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
+    yaml_service.save_rules([_rule(rule_id="OAR-OTHERPROD-001", name="R2", product="OTHERPROD")], actor="tester")
+    (tmp_path / "testprod_validation_results.csv").write_text(
+        "RULE_ID,EXCEPTIONTIMESTAMP\n"
+        "OAR-TESTPROD-001,2026-09-10T09:00:00\n"
+        "OAR-TESTPROD-001,2026-09-10T14:00:00\n"  # same day — one bucket
+        "OAR-TESTPROD-001,2026-09-11T09:00:00\n"
+        "OAR-TESTPROD-001,\n"  # no timestamp — counted in totals, not in daily buckets
+    )
+    (tmp_path / "otherprod_validation_results.csv").write_text(
+        "RULE_ID,EXCEPTIONTIMESTAMP\nOAR-OTHERPROD-001,2026-09-10T09:00:00\n"
+    )
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(tmp_path))
+
+    usage = rule_usage_service.compute_usage()
+    counts = {(d["date"], d["product"]): d["count"] for d in usage.daily_product_counts}
+    assert counts == {
+        ("2026-09-10", TEST_PRODUCT): 2,
+        ("2026-09-11", TEST_PRODUCT): 1,
+        ("2026-09-10", "OTHERPROD"): 1,
+    }
+    # the no-timestamp row still counts toward the product total...
+    assert usage.product_totals[TEST_PRODUCT] == 4
+    # ...but doesn't appear anywhere in the daily buckets (2 + 1 == 3, not 4)
+    assert sum(c for (_, p), c in counts.items() if p == TEST_PRODUCT) == 3
+
+
 def test_rule_usage_date_range_excludes_rows_with_no_parseable_timestamp(tmp_path, monkeypatch):
     yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
     csv_path = tmp_path / "testprod_validation_results.csv"

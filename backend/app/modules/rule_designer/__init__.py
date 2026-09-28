@@ -138,6 +138,7 @@ async def dashboard_rule_usage(date_from: Optional[str] = None, date_to: Optiona
     return {
         "available": usage.available, "csv_path": usage.csv_path,
         "as_of": usage.as_of, "total_rows": usage.total_rows,
+        "daily_product_counts": usage.daily_product_counts,
         "earliest_date": usage.earliest_date, "latest_date": usage.latest_date,
         "error": usage.error, "products": out,
     }
