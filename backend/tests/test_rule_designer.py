@@ -1861,6 +1861,39 @@ def test_rule_usage_caches_until_mtime_changes(tmp_path, monkeypatch):
     assert third.rule_hits == {"OAR-TESTPROD-001": 2}
 
 
+def test_rule_usage_aggregates_a_directory_of_per_product_files(tmp_path, monkeypatch):
+    # Live shape: GLOBAL_LIVE_CSV_PATH is a DIRECTORY holding one file per
+    # product (fxo_validation_results.csv, cashbonds_validation_results.csv,
+    # ...), not one combined file — and the filename doesn't reliably name
+    # its product (confirmed live: "gfx_validation_results.csv" for product
+    # GFXCASH), so attribution must come purely from each row's own
+    # RULE_ID, never the filename.
+    product_registry.create_product("OTHERPROD", "Other Product", "", "tester")
+    yaml_service.save_rules([_rule(rule_id="OAR-TESTPROD-001", name="R1")], actor="tester")
+    yaml_service.save_rules([_rule(rule_id="OAR-OTHERPROD-001", name="R2", product="OTHERPROD")], actor="tester")
+
+    (tmp_path / "testprod_validation_results.csv").write_text(
+        "RULE_ID,STATUS\nOAR-TESTPROD-001,ALERT\nOAR-TESTPROD-001,ALERT\n"
+    )
+    (tmp_path / "otherprod_validation_results.csv").write_text(
+        "RULE_ID,STATUS\nOAR-OTHERPROD-001,ALERT\n"
+    )
+    (tmp_path / "not_a_csv.txt").write_text("ignore me")
+    monkeypatch.setattr(get_settings(), "GLOBAL_LIVE_CSV_PATH", str(tmp_path))
+
+    usage = rule_usage_service.compute_usage()
+    assert usage.available is True
+    assert usage.total_rows == 3
+    assert usage.rule_hits == {"OAR-TESTPROD-001": 2, "OAR-OTHERPROD-001": 1}
+    assert usage.product_totals == {TEST_PRODUCT: 2, "OTHERPROD": 1}
+
+    # adding a new per-product file invalidates the cache
+    (tmp_path / "thirdprod_validation_results.csv").write_text("RULE_ID,STATUS\nSOME_OTHER_ID,ALERT\n")
+    usage2 = rule_usage_service.compute_usage()
+    assert usage2 is not usage
+    assert usage2.total_rows == 4
+
+
 def test_dashboard_rule_usage_route_flags_published_enabled_zero_hit_rule(tmp_path, monkeypatch):
     yaml_service.save_rules([
         _rule(rule_id="OAR-TESTPROD-001", name="Live, hit", status=RuleStatus.PUBLISHED, enabled=True),

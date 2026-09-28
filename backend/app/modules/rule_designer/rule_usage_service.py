@@ -1,13 +1,23 @@
-"""Reads exception_analysis's committed "Global Live CSV" (every validated
-record it's ever approved, across every product, with a RULE_ID column
-naming which published rule produced it — see GLOBAL_LIVE_CSV_PATH in
-app/core/config.py) and turns it into per-rule/per-product hit counts, so
-the Dashboard can show what fraction of a product's live traffic each of
-its rules actually accounts for, and flag a published rule nobody's data
-has ever matched.
+"""Reads exception_analysis's committed validation-result CSVs (every
+validated record it's ever approved, with a RULE_ID column naming which
+published rule produced it — see GLOBAL_LIVE_CSV_PATH in app/core/config.py)
+and turns them into per-rule/per-product hit counts, so the Dashboard can
+show what fraction of a product's live traffic each of its rules actually
+accounts for, and flag a published rule nobody's data has ever matched.
 
-The file lives outside this repo/deployment's own storage and is owned by
-exception_analysis, not Rule Designer — this module only ever reads it.
+GLOBAL_LIVE_CSV_PATH is a DIRECTORY of per-product files (one per product,
+e.g. fxo_validation_results.csv, cashbonds_validation_results.csv,
+gfx_validation_results.csv — confirmed live: exception_analysis writes one
+result file per product, not a single combined file) — every *.csv file
+found directly under it is read and aggregated. A row's product is never
+inferred from its filename (the file-naming convention doesn't reliably
+match Rule Designer's own product codes, e.g. "gfx_validation_results.csv"
+for product GFXCASH) — it's always resolved from the row's own RULE_ID,
+exactly like the single-file case. GLOBAL_LIVE_CSV_PATH pointing at one
+CSV file directly (rather than a directory) is also still supported.
+
+These files live outside this repo/deployment's own storage and are owned
+by exception_analysis, not Rule Designer — this module only ever reads them.
 """
 from __future__ import annotations
 
@@ -16,7 +26,7 @@ import os
 import re
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 from app.core.config import get_settings
 from app.modules.rule_designer import yaml_service
@@ -24,10 +34,10 @@ from app.modules.rule_designer import yaml_service
 _RULE_ID_PRODUCT = re.compile(r"^OAR-(.+)-\d+$", re.IGNORECASE)
 
 _cache_lock = threading.Lock()
-# Keyed on (path, mtime), not mtime alone — GLOBAL_LIVE_CSV_PATH can change
-# between calls (tests monkeypatch it; an admin could repoint it), and two
-# different paths landing on the same mtime would otherwise silently serve
-# one path's cached result for the other.
+# Keyed on the sorted (file_path, mtime) pairs actually found, not path
+# alone — a directory's own mtime doesn't reliably change when a file
+# inside it is appended to, and this also invalidates correctly when a
+# per-product file is added or removed.
 _cache: Dict[str, object] = {"key": None, "result": None}
 
 
@@ -56,26 +66,47 @@ def _product_for_rule_id(rule_id: str) -> Optional[str]:
     return m.group(1).upper() if m else None
 
 
-def _parse(path: str) -> UsageSnapshot:
+def _csv_files(path: str) -> List[str]:
+    if os.path.isdir(path):
+        return sorted(
+            os.path.join(path, fn) for fn in os.listdir(path)
+            if fn.lower().endswith(".csv")
+        )
+    return [path]
+
+
+def _cache_key(files: List[str]) -> Tuple[Tuple[str, float], ...]:
+    return tuple(sorted((f, os.path.getmtime(f)) for f in files))
+
+
+def _parse_row(row: dict, rule_id_col: Optional[str], rule_hits: Dict[str, int],
+                product_totals: Dict[str, int]) -> None:
+    rule_id = (row.get(rule_id_col) or "").strip() if rule_id_col else ""
+    if not rule_id:
+        return
+    product = _product_for_rule_id(rule_id)
+    if not product:
+        return
+    rule_hits[rule_id] = rule_hits.get(rule_id, 0) + 1
+    product_totals[product] = product_totals.get(product, 0) + 1
+
+
+def _parse_all(csv_path: str, files: List[str]) -> UsageSnapshot:
     rule_hits: Dict[str, int] = {}
     product_totals: Dict[str, int] = {}
     total_rows = 0
-    with open(path, newline="") as fh:
-        reader = csv.DictReader(fh)
-        header_map = {(h or "").strip().lower(): h for h in (reader.fieldnames or [])}
-        rule_id_col = header_map.get("rule_id")
-        for row in reader:
-            total_rows += 1
-            rule_id = (row.get(rule_id_col) or "").strip() if rule_id_col else ""
-            if not rule_id:
-                continue
-            product = _product_for_rule_id(rule_id)
-            if not product:
-                continue
-            rule_hits[rule_id] = rule_hits.get(rule_id, 0) + 1
-            product_totals[product] = product_totals.get(product, 0) + 1
-    return UsageSnapshot(available=True, csv_path=path, as_of=os.path.getmtime(path),
-                          total_rows=total_rows, rule_hits=rule_hits, product_totals=product_totals)
+    as_of = 0.0
+    for file_path in files:
+        as_of = max(as_of, os.path.getmtime(file_path))
+        with open(file_path, newline="") as fh:
+            reader = csv.DictReader(fh)
+            header_map = {(h or "").strip().lower(): h for h in (reader.fieldnames or [])}
+            rule_id_col = header_map.get("rule_id")
+            for row in reader:
+                total_rows += 1
+                _parse_row(row, rule_id_col, rule_hits, product_totals)
+    return UsageSnapshot(available=True, csv_path=csv_path, as_of=as_of, total_rows=total_rows,
+                          rule_hits=rule_hits, product_totals=product_totals)
 
 
 def compute_usage() -> UsageSnapshot:
@@ -87,14 +118,16 @@ def compute_usage() -> UsageSnapshot:
 
     with _cache_lock:
         try:
-            mtime = os.path.getmtime(path)
+            files = _csv_files(path)
+            if not files:
+                return UsageSnapshot(available=False, csv_path=path, error=f"no .csv files found under '{path}'")
+            key = _cache_key(files)
         except OSError as exc:
             return UsageSnapshot(available=False, csv_path=path, error=str(exc))
-        key = (path, mtime)
         if _cache["key"] == key and _cache["result"] is not None:
             return _cache["result"]
         try:
-            result = _parse(path)
+            result = _parse_all(path, files)
         except (OSError, csv.Error) as exc:
             result = UsageSnapshot(available=False, csv_path=path, error=f"could not read '{path}': {exc}")
         _cache["key"] = key
