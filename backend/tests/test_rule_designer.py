@@ -15,9 +15,9 @@ from moto import mock_aws
 from app.core import store as dataset_store
 from app.core.config import get_settings
 from app.modules.rule_designer import (
-    calc_ops, condition_engine, dry_run_service, explain_service, lookup_engine, product_engine,
-    product_registry, reference_store, rule_store, rule_usage_service, s3_store, validation_service,
-    version_service, workflow_engine, yaml_service,
+    calc_ops, condition_engine, draft_store, dry_run_service, explain_service, lookup_engine,
+    product_engine, product_registry, reference_store, rule_store, rule_usage_service, s3_store,
+    validation_service, version_service, workflow_engine, yaml_service,
 )
 from app.modules.rule_designer.models import (
     Condition, ConditionGroup, ConflictHandling, DeriveSpec, LookupConfig, LookupFieldMap, LookupType,
@@ -32,14 +32,17 @@ TEST_S3_BUCKET = "test-rule-designer-bucket"
 @pytest.fixture(autouse=True)
 def isolated_storage(tmp_path, monkeypatch):
     """Every test gets a fresh, fully isolated mocked S3 bucket (via moto)
-    for Rule Designer's own storage, so tests never see each other's state
-    or real data, plus a clean product registry seeded with one TESTPROD
-    entry. Rule Designer's in-memory dry-run results and the (unrelated,
-    still local-disk) dataset cache are reset the same way."""
+    for Rule Designer's own durable storage, plus its own local-disk
+    directory for pre-submission rule drafts (draft_store), so tests never
+    see each other's state or real data — plus a clean product registry
+    seeded with one TESTPROD entry. Rule Designer's in-memory dry-run
+    results and the (unrelated, still local-disk) dataset cache are reset
+    the same way."""
     with mock_aws():
         settings = get_settings()
         monkeypatch.setattr(settings, "S3_BUCKET", TEST_S3_BUCKET)
         monkeypatch.setattr(settings, "RULE_DESIGNER_S3_PREFIX", "rule-designer/")
+        monkeypatch.setattr(draft_store, "DRAFTS_DIR", str(tmp_path / "_local_drafts"))
 
         import boto3
         boto3.client("s3", region_name=settings.S3_REGION).create_bucket(
@@ -691,19 +694,22 @@ def test_load_rules_cache_never_serves_stale_data():
     caching, unlike the old rules_singleton the hardcoded validators used.
     This asserts the cache is still always correct: a save (or a rollback-
     style direct _atomic_write) must be visible on the very next
-    load_rules() call, never stale by even one read."""
+    load_rules() call, never stale by even one read. Exercises
+    yaml_service.save_rules()/delete_rule() directly — rule_store's
+    pre-submission statuses now route to draft_store instead, which is
+    covered separately (see the "local working copy" test section)."""
     rule = _rule(rule_id="CACHE1", name="v1", priority=10)
-    rule_store.upsert_rule(rule, "tester")
+    yaml_service.save_rules([rule], actor="tester")
 
     rules, _ = yaml_service.load_rules(TEST_PRODUCT)
     assert next(r for r in rules if r.rule_id == "CACHE1").name == "v1"
 
     rule.name = "v2"
-    rule_store.upsert_rule(rule, "tester")
+    yaml_service.save_rules([rule], actor="tester")
     rules, _ = yaml_service.load_rules(TEST_PRODUCT)
     assert next(r for r in rules if r.rule_id == "CACHE1").name == "v2"
 
-    rule_store.delete_rule("CACHE1", "tester", product=TEST_PRODUCT)
+    yaml_service.delete_rule("CACHE1", TEST_PRODUCT, actor="tester")
     rules, _ = yaml_service.load_rules(TEST_PRODUCT)
     assert all(r.rule_id != "CACHE1" for r in rules)
 
@@ -919,8 +925,12 @@ def test_rename_product_rules_collision_checked_against_renamed_ids():
 # --------------------------------------------------------------------------
 
 def test_get_rule_resolves_product_automatically():
+    # A fresh rule stays DRAFT -> local-only, so this resolves via
+    # draft_store (which carries its own product) rather than the S3
+    # rule_id index — test_submit_writes_through_to_s3_and_clears_local_draft
+    # below covers the S3-index resolution path for a submitted rule.
     rule_store.upsert_rule(_rule(rule_id="L0", name="L0"), "tester")
-    found = rule_store.get_rule("L0")  # no product passed — resolved via index
+    found = rule_store.get_rule("L0")  # no product passed
     assert found is not None and found.product == TEST_PRODUCT
 
 
@@ -941,6 +951,95 @@ def test_lifecycle_happy_path():
     rule = rule_store.transition(rule, RuleStatus.PUBLISHED, "admin", Role.ADMIN)
     assert rule.status == RuleStatus.PUBLISHED
     assert len(rule.approvals) == 5
+
+
+# --------------------------------------------------------------------------
+# rule_store — local (pre-submission) working copy vs. S3, see draft_store.py
+# --------------------------------------------------------------------------
+
+class _S3CallCounter:
+    """Counts s3_store.get_text/put_text/head calls while active, so a test
+    can assert a code path never touched S3 at all."""
+
+    def __enter__(self):
+        self.n = 0
+        self._real = (s3_store.get_text, s3_store.put_text, s3_store.head)
+
+        def wrap(fn):
+            def wrapped(*a, **kw):
+                self.n += 1
+                return fn(*a, **kw)
+            return wrapped
+
+        s3_store.get_text, s3_store.put_text, s3_store.head = (wrap(f) for f in self._real)
+        return self
+
+    def __exit__(self, *exc):
+        s3_store.get_text, s3_store.put_text, s3_store.head = self._real
+
+
+def test_draft_rule_creation_and_edits_never_touch_s3():
+    with _S3CallCounter() as counter:
+        rule = _rule(rule_id="LOCAL1", name="v1")
+        rule_store.upsert_rule(rule, "tester")
+        rule.name = "v2"
+        rule_store.upsert_rule(rule, "tester")
+    assert counter.n == 0
+    assert draft_store.get("LOCAL1") is not None
+    s3_rules, _ = yaml_service.load_rules(TEST_PRODUCT)
+    assert "LOCAL1" not in {r.rule_id for r in s3_rules}
+
+
+def test_validate_and_dry_run_status_bumps_stay_local():
+    rule = _rule(rule_id="LOCAL2", name="LOCAL2")
+    rule_store.upsert_rule(rule, "tester")
+    with _S3CallCounter() as counter:
+        rule = rule_store.transition(rule, RuleStatus.VALIDATED, "tester", Role.ADMIN)
+        rule = rule_store.transition(rule, RuleStatus.DRY_RUN_COMPLETED, "tester", Role.ADMIN)
+    assert counter.n == 0
+    assert draft_store.get("LOCAL2").status == RuleStatus.DRY_RUN_COMPLETED
+
+
+def test_submit_writes_through_to_s3_and_clears_local_draft():
+    rule = _rule(rule_id="LOCAL3", name="LOCAL3")
+    rule_store.upsert_rule(rule, "tester")
+    rule = rule_store.transition(rule, RuleStatus.VALIDATED, "tester", Role.ADMIN)
+    rule = rule_store.transition(rule, RuleStatus.DRY_RUN_COMPLETED, "tester", Role.ADMIN)
+    rule = rule_store.transition(rule, RuleStatus.PENDING_APPROVAL, "tester", Role.ADMIN)
+
+    assert draft_store.get("LOCAL3") is None  # promoted — no longer local-only
+    s3_rules, _ = yaml_service.load_rules(TEST_PRODUCT)
+    assert "LOCAL3" in {r.rule_id for r in s3_rules}
+    assert yaml_service.resolve_product("LOCAL3") == TEST_PRODUCT  # S3 index resolves it now
+
+
+def test_reediting_a_published_rule_goes_local_until_resubmitted():
+    rule = _rule(rule_id="LOCAL4", name="v1")
+    rule_store.upsert_rule(rule, "tester")
+    rule.status = RuleStatus.PUBLISHED
+    rule_store.upsert_rule(rule, "tester")  # S3-resident, as a real publish would leave it
+
+    edited = rule.model_copy(deep=True)
+    edited.name = "v2 (amended)"
+    edited.status = RuleStatus.DRAFT  # what __init__.update_rule() does on an APPROVED/PUBLISHED edit
+    with _S3CallCounter() as counter:
+        rule_store.upsert_rule(edited, "tester")
+    assert counter.n == 0
+
+    s3_rules, _ = yaml_service.load_rules(TEST_PRODUCT)
+    assert next(r for r in s3_rules if r.rule_id == "LOCAL4").status == RuleStatus.PUBLISHED
+    assert next(r for r in s3_rules if r.rule_id == "LOCAL4").name == "v1"
+    assert draft_store.get("LOCAL4").name == "v2 (amended)"
+    # the merged read-path favors the local draft over the stale S3 copy
+    assert rule_store.get_rule("LOCAL4").name == "v2 (amended)"
+
+
+def test_build_product_yaml_text_includes_local_draft_content():
+    rule = _rule(rule_id="LOCAL5", name="LOCAL5", notes="only in the local draft")
+    rule_store.upsert_rule(rule, "tester")
+
+    assert "LOCAL5" not in yaml_service.rules_yaml_text(TEST_PRODUCT)
+    assert "LOCAL5" in rule_store.build_product_yaml_text(TEST_PRODUCT)
 
 
 def test_structural_diff_fields_ignores_priority_and_bookkeeping():

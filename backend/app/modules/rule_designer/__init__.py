@@ -712,7 +712,7 @@ async def rule_diff(rule_id: str, against_version: Optional[int] = None):
     if target_version:
         before_text = version_service.get_version_yaml_text(rule.product, target_version) or ""
         before_rule = diff_service._published_rule_from_version(rule.product, rule_id, target_version)
-    after_text = yaml_service.rules_yaml_text(rule.product)
+    after_text = rule_store.build_product_yaml_text(rule.product)
     return {
         "against_version": target_version,
         "business_logic": diff_service.business_logic_diff(before_rule, rule),

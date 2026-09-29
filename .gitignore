@@ -10,6 +10,7 @@ __pycache__/
 backend/_datasets/
 backend/_dry_runs/
 backend/_shadow_tests/
+backend/_local_drafts/
 
 # --- Node / frontend ---
 frontend/node_modules/
