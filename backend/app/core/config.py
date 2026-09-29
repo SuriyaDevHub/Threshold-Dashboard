@@ -69,6 +69,10 @@ class Settings:
     S3_FORMAT: str = os.getenv("S3_FORMAT", "parquet")  # parquet | csv
     S3_ENDPOINT_URL: str = os.getenv("S3_ENDPOINT_URL", "")  # for S3-compatible stores
 
+    # --- Rule Designer persistence (rules, versions, reference data, audit,
+    # product registry) — same bucket/region/endpoint as above, own prefix.
+    RULE_DESIGNER_S3_PREFIX: str = os.getenv("RULE_DESIGNER_S3_PREFIX", "rule-designer/")
+
 
 @lru_cache
 def get_settings() -> Settings:

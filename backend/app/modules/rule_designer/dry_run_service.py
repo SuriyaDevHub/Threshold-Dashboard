@@ -5,25 +5,24 @@ in this app are already cached server-side (app.core.store) and are small
 enough (mock/sample scale) that a background job queue would be pure
 overhead; the response shape already matches what §46's progress UI would
 need if a real async job runner is swapped in later.
+
+Results are deliberately NOT persisted to S3 (or anywhere durable) — a dry
+run is a throwaway exploration, not part of the rule's record of truth, so
+results live only in this process's memory and are gone on the next
+backend restart.
 """
 from __future__ import annotations
 
-import json
-import os
 import random
-import time
+import threading
 from typing import Any, Dict, List, Optional
 
 from app.core import store as dataset_store
 from app.modules.rule_designer import condition_engine, reference_store, workflow_engine
 from app.modules.rule_designer.models import ConditionGroup, DryRunResult, Rule
 
-_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-DRYRUN_DIR = os.path.join(_BACKEND_DIR, "_dry_runs")
-
-
-def _ensure_dir() -> None:
-    os.makedirs(DRYRUN_DIR, exist_ok=True)
+_lock = threading.Lock()
+_results: Dict[str, DryRunResult] = {}
 
 
 def _select_sample(rows: List[dict], sample_mode: str, filter_condition: Optional[ConditionGroup],
@@ -76,28 +75,18 @@ def run_dry_run(rule: Rule, dataset_id: str, actor: str, sample_mode: str = "ful
 
 
 def _save(result: DryRunResult) -> None:
-    _ensure_dir()
-    with open(os.path.join(DRYRUN_DIR, f"{result.id}.json"), "w") as fh:
-        fh.write(result.model_dump_json())
+    with _lock:
+        _results[result.id] = result
 
 
 def get_dry_run(dry_run_id: str) -> Optional[DryRunResult]:
-    path = os.path.join(DRYRUN_DIR, f"{dry_run_id}.json")
-    if not os.path.exists(path):
-        return None
-    with open(path) as fh:
-        return DryRunResult.model_validate(json.load(fh))
+    with _lock:
+        return _results.get(dry_run_id)
 
 
 def list_dry_runs(rule_id: Optional[str] = None) -> List[DryRunResult]:
-    _ensure_dir()
-    out = []
-    for fn in os.listdir(DRYRUN_DIR):
-        if not fn.endswith(".json"):
-            continue
-        with open(os.path.join(DRYRUN_DIR, fn)) as fh:
-            r = DryRunResult.model_validate(json.load(fh))
-        if rule_id and r.rule_id != rule_id:
-            continue
-        out.append(r)
+    with _lock:
+        out = list(_results.values())
+    if rule_id:
+        out = [r for r in out if r.rule_id == rule_id]
     return sorted(out, key=lambda r: r.created_at, reverse=True)

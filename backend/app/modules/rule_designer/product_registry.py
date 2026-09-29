@@ -9,21 +9,22 @@ this is not a second, drifting list of product names. Field vocabulary
 per product is deliberately NOT hardcoded here: it's inferred from
 whichever dataset a rule is bound to (schema.py), per the standing
 requirement to inspect data rather than assume a fixed schema.
+
+Stored on S3 (keys relative to Settings.RULE_DESIGNER_S3_PREFIX — see
+s3_store.py).
 """
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
-import uuid
 from typing import Dict, List, Optional, Set, Tuple
 
 from app.core.asset_classes import ASSET_CLASSES
+from app.modules.rule_designer import s3_store
 from app.modules.rule_designer.models import MigrationStatus, Product
 
-_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-REGISTRY_PATH = os.path.join(_BACKEND_DIR, "rules", "products.json")
+REGISTRY_KEY = "rules/products.json"
 # Tombstone for a code that was deliberately renamed/merged away (see
 # rename_product()) — without this, _load()'s own "reseed any missing
 # ASSET_CLASSES code" reconciliation below has no way to tell "this code
@@ -31,22 +32,18 @@ REGISTRY_PATH = os.path.join(_BACKEND_DIR, "rules", "products.json")
 # purpose", and will silently resurrect it as a fresh blank duplicate on
 # the very next call (confirmed: a rename away from an ASSET_CLASSES-
 # seeded code, e.g. CASH_BONDS, reappeared within one subsequent
-# list_products() call). A separate small file, not a key inside
-# products.json itself, so every existing `for v in data.values()` /
+# list_products() call). A separate key, not a key inside products.json
+# itself, so every existing `for v in data.values()` /
 # `Product.model_validate(v)` call site keeps working unchanged.
-REMOVED_CODES_PATH = os.path.join(_BACKEND_DIR, "rules", "_removed_product_codes.json")
+REMOVED_CODES_KEY = "rules/_removed_product_codes.json"
 
 # Guards the read-modify-write sequence every mutating function below does
-# — _save()'s atomic replace prevents a torn file, but doesn't prevent two
-# concurrent callers both reading the same pre-mutation state and one
-# silently losing the other's change (this module runs inside the same
+# — S3 PUT prevents a torn object, but doesn't prevent two concurrent
+# callers both reading the same pre-mutation state and one silently
+# losing the other's change (this module runs inside the same
 # multi-threaded process as data_fetch/exception_analysis, same as
 # yaml_service.py — see that module's own concurrency-fix history).
 _write_lock = threading.Lock()
-
-
-def _ensure_dir() -> None:
-    os.makedirs(os.path.dirname(REGISTRY_PATH), exist_ok=True)
 
 
 def _seed_defaults() -> Dict[str, dict]:
@@ -61,18 +58,14 @@ def _seed_defaults() -> Dict[str, dict]:
 
 
 def _load_removed_codes() -> Set[str]:
-    if not os.path.exists(REMOVED_CODES_PATH):
+    text = s3_store.get_text(REMOVED_CODES_KEY)
+    if text is None:
         return set()
-    with open(REMOVED_CODES_PATH) as fh:
-        return set(json.load(fh))
+    return set(json.loads(text))
 
 
 def _save_removed_codes(codes: Set[str]) -> None:
-    _ensure_dir()
-    tmp = REMOVED_CODES_PATH + f".tmp{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
-    with open(tmp, "w") as fh:
-        json.dump(sorted(codes), fh, indent=2)
-    os.replace(tmp, REMOVED_CODES_PATH)
+    s3_store.put_text(REMOVED_CODES_KEY, json.dumps(sorted(codes), indent=2))
 
 
 def _mark_removed(code: str) -> None:
@@ -89,17 +82,16 @@ def _unmark_removed(code: str) -> None:
 
 
 def _load() -> Dict[str, dict]:
-    _ensure_dir()
-    if not os.path.exists(REGISTRY_PATH):
+    text = s3_store.get_text(REGISTRY_KEY)
+    if text is None:
         data = _seed_defaults()
         _save(data)
         return data
-    with open(REGISTRY_PATH) as fh:
-        data = json.load(fh)
+    data = json.loads(text)
     # products.json is additive-only for known asset classes: a code added to
     # ASSET_CLASSES later shows up here automatically without clobbering any
     # admin-set enabled/migration_status on existing entries — EXCEPT a code
-    # an admin explicitly renamed/merged away (see REMOVED_CODES_PATH above),
+    # an admin explicitly renamed/merged away (see REMOVED_CODES_KEY above),
     # which stays gone until deliberately re-created via create_product().
     removed = _load_removed_codes()
     changed = False
@@ -113,11 +105,7 @@ def _load() -> Dict[str, dict]:
 
 
 def _save(data: Dict[str, dict]) -> None:
-    _ensure_dir()
-    tmp = REGISTRY_PATH + f".tmp{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
-    with open(tmp, "w") as fh:
-        json.dump(data, fh, indent=2)
-    os.replace(tmp, REGISTRY_PATH)
+    s3_store.put_text(REGISTRY_KEY, json.dumps(data, indent=2))
 
 
 def list_products() -> List[Product]:
@@ -210,7 +198,7 @@ def rename_product(old_code: str, new_code: str, actor: str) -> Tuple[Product, b
     registry pointing at a code with no rules moved to it yet.
 
     old_code does NOT have to already be a registered product — the other
-    real-world shape this fixes is a rules directory that was never
+    real-world shape this fixes is a rules prefix that was never
     registered at all (an orphan, e.g. GFXCASH sitting next to the
     registered GFX_CASH; see product_registry.consistency_report()). In
     that case there's no old config to carry over, so new_code is
@@ -224,7 +212,7 @@ def rename_product(old_code: str, new_code: str, actor: str) -> Tuple[Product, b
     mismatched one was the mistake — so only the old entry is discarded,
     nothing about the target is overwritten.
 
-    old_code is tombstoned (see REMOVED_CODES_PATH) so it doesn't get
+    old_code is tombstoned (see REMOVED_CODES_KEY) so it doesn't get
     silently re-created — confirmed via reproduction: without this, if
     old_code is also one of ASSET_CLASSES's seeded defaults (e.g.
     CASH_BONDS), _load()'s own reconciliation resurrects it as a fresh
@@ -259,7 +247,7 @@ def rename_product(old_code: str, new_code: str, actor: str) -> Tuple[Product, b
 
 def consistency_report() -> Dict[str, list]:
     """Backend validation for exactly the mismatch this module's rename
-    action fixes: a rules directory on disk whose code isn't registered
+    action fixes: a rules prefix on S3 whose code isn't registered
     (GenericValidator would find nothing there, or the reverse — the
     registered product has no rules yet). Deferred yaml_service import:
     not a circular dependency today, but this module owns product
@@ -267,24 +255,20 @@ def consistency_report() -> Dict[str, list]:
     to import product_registry instead.
 
     Returns:
-      orphaned_with_rules: on-disk code, not registered, WITH real rule
+      orphaned_with_rules: on-S3 code, not registered, WITH real rule
         content — the actual problem (e.g. GFXCASH sitting next to the
         registered GFX_CASH). Needs a rename to fix.
-      empty_scaffold_dirs: on-disk code, not registered, no rule content
-        — harmless directory-creation-on-first-touch clutter, not a rename
-        candidate (there's nothing in it to move).
+      empty_scaffold_dirs: on-S3 code, not registered, no rule content
+        — harmless leftover (e.g. a stray history backup with no live
+        business_rules.yml), not a rename candidate (there's nothing in
+        it to move).
       registered_without_rules: registered product with no rules file yet
         — informational only (normal for a newly-created product).
     """
     from app.modules.rule_designer import yaml_service
 
     registered = {p.code for p in list_products()}
-    on_disk: List[str] = []
-    if os.path.isdir(yaml_service.RULES_DIR):
-        on_disk = [
-            d for d in os.listdir(yaml_service.RULES_DIR)
-            if os.path.isdir(os.path.join(yaml_service.RULES_DIR, d))
-        ]
+    on_disk = yaml_service.list_product_codes()
 
     orphaned_with_rules = []
     empty_scaffold_dirs = []

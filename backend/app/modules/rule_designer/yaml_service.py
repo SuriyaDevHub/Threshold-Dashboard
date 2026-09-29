@@ -3,11 +3,12 @@ machine-readable source of truth. This module is the ONLY place that reads
 or writes it — nothing in the API layer or the frontend touches it
 directly, and the frontend never sees YAML at all.
 
-Storage is per product: `rules/<product>/business_rules.yml`. A single
+Storage is per product, on S3: `rules/<product>/business_rules.yml` (keys
+relative to Settings.RULE_DESIGNER_S3_PREFIX — see s3_store.py). A single
 monolithic file works for one worked example; it stops working the moment
-two products' rule authors touch it in the same window — atomic file
-writes mean one publish blocks or corrupts the other. Splitting by product
-also makes the admin "enable/disable a whole product's rules" action and
+two products' rule authors touch it in the same window — atomic writes
+mean one publish blocks or corrupts the other. Splitting by product also
+makes the admin "enable/disable a whole product's rules" action and
 per-product version history (versioned independently, rolled back
 independently) a natural consequence of the storage layout rather than
 something layered on top.
@@ -22,28 +23,27 @@ Load path:  existing YAML -> raw dict (ruamel round-trip, comments/order
 Save path:  canonical Rule models -> merged into the raw round-trip
             document (only the `rules` list is touched; every other
             top-level key, comment and ordering is left exactly as read)
-            -> atomic write (temp file + os.replace) with a timestamped
-            backup, never a partial write.
+            -> a single S3 PUT (already atomic — a GET sees either the
+            fully-old or fully-new object, never a partial write) with a
+            timestamped backup written first.
 """
 from __future__ import annotations
 
 import io
 import json
-import os
 import re
-import shutil
 import threading
 import time
-import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import ValidationError
 from ruamel.yaml import YAML
 
+from app.modules.rule_designer import s3_store
 from app.modules.rule_designer.models import Rule
 
-_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-RULES_DIR = os.path.join(_BACKEND_DIR, "rules")
+RULES_PREFIX = "rules/"
+
 
 def _new_yaml() -> YAML:
     """A fresh ruamel YAML() instance per call — deliberately not a shared
@@ -68,20 +68,21 @@ def _new_yaml() -> YAML:
 
 
 def _product_dir(product: str) -> str:
-    return os.path.join(RULES_DIR, product.upper())
+    return f"{RULES_PREFIX}{product.upper()}"
 
 
 def _history_dir(product: str) -> str:
-    return os.path.join(_product_dir(product), "_history")
+    return f"{_product_dir(product)}/_history"
 
 
 def _rules_file(product: str) -> str:
-    return os.path.join(_product_dir(product), "business_rules.yml")
+    return f"{_product_dir(product)}/business_rules.yml"
 
 
 def _ensure_dirs(product: str) -> None:
-    os.makedirs(_product_dir(product), exist_ok=True)
-    os.makedirs(_history_dir(product), exist_ok=True)
+    """No-op under S3 — there's no directory to pre-create, a key simply
+    exists or doesn't. Kept so existing call sites (version_service,
+    tests) don't need to change."""
 
 
 # --------------------------------------------------------------------------
@@ -90,7 +91,7 @@ def _ensure_dirs(product: str) -> None:
 # load_rules() is called on every single evaluate_record()/evaluate_rows()
 # call (rule_store.list_rules() -> active_rules_for_product(), i.e. every
 # validation), so with no caching it re-reads and re-parses a product's
-# whole business_rules.yml from disk every time — the old hardcoded
+# whole business_rules.yml on every call — the old hardcoded
 # {product}_validator.py files never paid this cost because they loaded
 # rules once via a process-wide singleton (rules_singleton.get_rules())
 # and reused it. This cache is that same idea, generalized per product so
@@ -102,43 +103,45 @@ def _ensure_dirs(product: str) -> None:
 # instances from the cached dicts on every call, which is cheap (no I/O,
 # no YAML tokenizing) and means callers never share a mutable Rule object.
 #
-# Invalidation: _atomic_write() (the sole write path for these files)
-# updates the cache immediately after a successful write, using the raw
-# dict it already has in hand — no re-read needed, and no window where a
-# just-published rule could still read stale. The mtime check below is a
-# secondary safety net only, for the (not expected, per this module's own
-# "sole reader/writer" contract) case of the file changing outside this
-# process.
+# Bounded-staleness TTL cache: within _CACHE_TTL_SECONDS of the last check,
+# a call returns the cached value with NO S3 call at all — the hot path's
+# whole point. Once the TTL expires, a cheap S3 HEAD (ETag only, no body)
+# decides whether a re-fetch is actually needed. The write path
+# (_atomic_write) updates the cache immediately after a successful PUT
+# using the ETag the PUT itself returned — no re-read, no window where a
+# just-published rule could read stale.
+_CACHE_TTL_SECONDS = 30.0
 _rules_cache_lock = threading.Lock()
-_rules_cache: Dict[str, Tuple[Optional[float], List[Dict[str, Any]]]] = {}
-
-
-def _file_mtime(product: str) -> Optional[float]:
-    try:
-        return os.path.getmtime(_rules_file(product))
-    except OSError:
-        return None
+_rules_cache: Dict[str, Tuple[Optional[str], float, List[Dict[str, Any]]]] = {}
 
 
 def _load_plain_rules_cached(product: str) -> List[Dict[str, Any]]:
     product = product.upper()
-    mtime = _file_mtime(product)
+    now = time.monotonic()
     with _rules_cache_lock:
         cached = _rules_cache.get(product)
-        if cached is not None and cached[0] == mtime:
-            return cached[1]
+        if cached is not None and (now - cached[1]) < _CACHE_TTL_SECONDS:
+            return cached[2]
+
+    etag = s3_store.head(_rules_file(product))
+    with _rules_cache_lock:
+        cached = _rules_cache.get(product)
+        if cached is not None and cached[0] == etag:
+            _rules_cache[product] = (etag, now, cached[2])
+            return cached[2]
+
     raw = load_raw(product)
     plain_rules = [_plain(item) for item in (raw.get("rules") or [])]
     with _rules_cache_lock:
-        _rules_cache[product] = (mtime, plain_rules)
+        _rules_cache[product] = (etag, now, plain_rules)
     return plain_rules
 
 
-def _update_rules_cache(product: str, raw: Dict[str, Any]) -> None:
+def _update_rules_cache(product: str, raw: Dict[str, Any], etag: Optional[str]) -> None:
     product = product.upper()
     plain_rules = [_plain(item) for item in (raw.get("rules") or [])]
     with _rules_cache_lock:
-        _rules_cache[product] = (_file_mtime(product), plain_rules)
+        _rules_cache[product] = (etag, time.monotonic(), plain_rules)
 
 
 # --------------------------------------------------------------------------
@@ -146,24 +149,18 @@ def _update_rules_cache(product: str, raw: Dict[str, Any]) -> None:
 # --------------------------------------------------------------------------
 
 def _index_path() -> str:
-    return os.path.join(RULES_DIR, "_index.json")
+    return f"{RULES_PREFIX}_index.json"
 
 
 def _load_index() -> Dict[str, str]:
-    path = _index_path()
-    if not os.path.exists(path):
+    text = s3_store.get_text(_index_path())
+    if text is None:
         return {}
-    with open(path) as fh:
-        return json.load(fh)
+    return json.loads(text)
 
 
 def _save_index(idx: Dict[str, str]) -> None:
-    os.makedirs(RULES_DIR, exist_ok=True)
-    path = _index_path()
-    tmp = path + f".tmp{os.getpid()}"
-    with open(tmp, "w") as fh:
-        json.dump(idx, fh, indent=2)
-    os.replace(tmp, path)
+    s3_store.put_text(_index_path(), json.dumps(idx, indent=2))
 
 
 def resolve_product(rule_id: str) -> Optional[str]:
@@ -190,12 +187,10 @@ def _index_remove(rule_id: str) -> None:
 def load_raw(product: str) -> Dict[str, Any]:
     """The existing YAML for one product, parsed as-is. Never assumes
     `rules` exists."""
-    _ensure_dirs(product)
-    path = _rules_file(product)
-    if not os.path.exists(path):
+    text = s3_store.get_text(_rules_file(product))
+    if text is None:
         return {"schema_version": 1, "product": product.upper(), "rules": []}
-    with open(path) as fh:
-        data = _new_yaml().load(fh)
+    data = _new_yaml().load(text)
     return data if data is not None else {"schema_version": 1, "product": product.upper(), "rules": []}
 
 
@@ -205,7 +200,7 @@ def inspect_yaml(product: str) -> Dict[str, Any]:
     report: Dict[str, Any] = {
         "product": product.upper(),
         "path": _rules_file(product),
-        "exists": os.path.exists(_rules_file(product)),
+        "exists": s3_store.exists(_rules_file(product)),
         "top_level_keys": list(raw.keys()) if isinstance(raw, dict) else [],
         "rule_count": 0,
         "parsed_ok": 0,
@@ -239,7 +234,7 @@ def load_rules(product: str) -> Tuple[List[Rule], List[Dict[str, Any]]]:
     """Returns (rules that parsed, [{rule_id, errors}] for ones that didn't).
     This is the hot path (every evaluate_record()/evaluate_rows() call goes
     through it via rule_store.list_rules()) — see _load_plain_rules_cached()
-    for why it doesn't hit disk/re-parse YAML on every call."""
+    for why it doesn't hit S3/re-parse YAML on every call."""
     plain_rules = _load_plain_rules_cached(product)
     rules: List[Rule] = []
     failures: List[Dict[str, Any]] = []
@@ -256,39 +251,24 @@ def _rule_to_plain(rule: Rule) -> dict:
 
 
 def _backup(product: str) -> None:
-    path = _rules_file(product)
-    if os.path.exists(path):
-        backup = os.path.join(_history_dir(product), f"business_rules_{int(time.time() * 1000)}.yml")
-        with open(path) as src, open(backup, "w") as dst:
-            dst.write(src.read())
+    text = s3_store.get_text(_rules_file(product))
+    if text is not None:
+        backup_key = f"{_history_dir(product)}/business_rules_{int(time.time() * 1000)}.yml"
+        s3_store.put_text(backup_key, text)
 
 
 def _atomic_write(product: str, raw: Dict[str, Any]) -> None:
-    path = _rules_file(product)
-    # Unique per call, not just per process: os.getpid() alone collides
-    # across threads of the same process (this app runs rule_designer,
-    # data_fetch, and exception_analysis in one PyInstaller process, with
-    # request handling dispatched through a thread pool), which let two
-    # concurrent saves for the same product clobber each other's temp file.
-    tmp_path = f"{path}.tmp{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
-    try:
-        with open(tmp_path, "w") as fh:
-            _new_yaml().dump(raw, fh)
-        os.replace(tmp_path, path)
-    except Exception:
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)
-        raise
-    _update_rules_cache(product, raw)
+    product = product.upper()
+    etag = s3_store.put_text(_rules_file(product), dump_to_text(raw))
+    _update_rules_cache(product, raw, etag)
 
 
 def save_rules(rules: List[Rule], actor: str = "system") -> None:
-    """Merge the given rules into their product's on-disk YAML, touching
-    only the `rules` list and only the entries whose rule_id is in `rules`
-    — every other top-level key and every other rule entry is preserved
-    verbatim. Atomic: written to a temp file in the same directory, then
-    renamed. Every rule in `rules` must share one product — mixing
-    products in one call is almost always a bug at the caller.
+    """Merge the given rules into their product's YAML, touching only the
+    `rules` list and only the entries whose rule_id is in `rules` — every
+    other top-level key and every other rule entry is preserved verbatim.
+    Every rule in `rules` must share one product — mixing products in one
+    call is almost always a bug at the caller.
     """
     if not rules:
         return
@@ -297,7 +277,6 @@ def save_rules(rules: List[Rule], actor: str = "system") -> None:
         raise ValueError(f"save_rules() received rules from multiple products: {sorted(products)}")
     product = next(iter(products))
 
-    _ensure_dirs(product)
     raw = load_raw(product)
     if "rules" not in raw or raw.get("rules") is None:
         raw["rules"] = []
@@ -335,7 +314,6 @@ def delete_rule(rule_id: str, product: str, actor: str = "system") -> bool:
         return False
     raw["last_updated_at"] = time.time()
     raw["last_updated_by"] = actor
-    _ensure_dirs(product)
     _backup(product)
     _atomic_write(product, raw)
     _index_remove(rule_id)
@@ -367,10 +345,10 @@ def rename_product_rules(old_code: str, new_code: str, actor: str = "system") ->
 
     Reuses save_rules() for the actual merge rather than writing new
     rules-file logic: retagging each rule's `product` and calling
-    save_rules() gets the target directory created, the target's current
-    file backed up, the rules merged into its `rules` list by rule_id,
-    the atomic write, and rules/_index.json updated — all for free,
-    exactly like a normal multi-rule save would.
+    save_rules() gets the target's current file backed up, the rules
+    merged into its `rules` list by rule_id, the atomic write, and
+    rules/_index.json updated — all for free, exactly like a normal
+    multi-rule save would.
 
     Each rule's rule_id is renamed alongside its product when it follows
     the OAR-{PRODUCT}-NNN convention (see _rule_id_for_new_product) —
@@ -389,13 +367,10 @@ def rename_product_rules(old_code: str, new_code: str, actor: str = "system") ->
     old_code, new_code = old_code.upper(), new_code.upper()
     old_rules, _ = load_rules(old_code)
     if not old_rules:
-        # No rules to retag, but the old directory (e.g. an empty
-        # scaffold created by _ensure_dirs() the first time anything
-        # touched this code) should still go — otherwise it lingers as
-        # clutter that a later consistency check would flag.
-        old_dir = _product_dir(old_code)
-        if os.path.exists(old_dir):
-            shutil.rmtree(old_dir)
+        # No rules to retag — clear out anything that may have accumulated
+        # under old_code (e.g. a stray history backup) so it doesn't linger
+        # as clutter a later consistency check would flag.
+        s3_store.delete_prefix(_product_dir(old_code) + "/")
         with _rules_cache_lock:
             _rules_cache.pop(old_code, None)
         _move_or_merge_version_history(old_code, new_code)
@@ -425,13 +400,18 @@ def rename_product_rules(old_code: str, new_code: str, actor: str = "system") ->
     for old_id in id_changes:
         _index_remove(old_id)
 
-    old_dir = _product_dir(old_code)
-    if os.path.exists(old_dir):
-        shutil.rmtree(old_dir)
+    s3_store.delete_prefix(_product_dir(old_code) + "/")
     with _rules_cache_lock:
         _rules_cache.pop(old_code, None)
     _move_or_merge_version_history(old_code, new_code)
     return len(retagged)
+
+
+def list_product_codes() -> List[str]:
+    """Every product code with at least one key under rules/ — the S3
+    equivalent of os.listdir(RULES_DIR)+os.path.isdir(). Used by
+    product_registry.consistency_report() to find on-disk codes."""
+    return s3_store.list_dirs(RULES_PREFIX)
 
 
 def _move_or_merge_version_history(old_code: str, new_code: str) -> None:
@@ -441,18 +421,18 @@ def _move_or_merge_version_history(old_code: str, new_code: str) -> None:
     just a style preference)."""
     from app.modules.rule_designer import version_service
 
-    old_dir = version_service._product_dir(old_code)  # noqa: SLF001
-    if not os.path.exists(old_dir):
+    old_prefix = version_service._product_dir(old_code) + "/"  # noqa: SLF001
+    if not s3_store.list_keys(old_prefix):
         return
-    new_dir = version_service._product_dir(new_code)  # noqa: SLF001
-    if os.path.exists(new_dir):
+    new_prefix = version_service._product_dir(new_code) + "/"  # noqa: SLF001
+    if s3_store.list_keys(new_prefix):
         # Target already has its own version history — splicing two
         # independently-numbered sequences together is more likely to
         # confuse than help, so old_code's history is left in place,
-        # still on disk and inspectable, just not merged into new_code's
+        # still on S3 and inspectable, just not merged into new_code's
         # next_version_number() sequence.
         return
-    os.rename(old_dir, new_dir)
+    s3_store.copy_prefix(old_prefix, new_prefix)
 
 
 def dump_to_text(raw: Dict[str, Any]) -> str:

@@ -1,61 +1,55 @@
 """YAML versioning (spec §32) and rollback (spec §37) — per product.
 
 Every publish snapshots the *entire* current rules YAML for one product to
-versions/<product>/rules_vNNN.yml plus a metadata sidecar — independent of
-the live business_rules.yml that yaml_service edits going forward, so a
-published version is immutable once written. Rollback restores an old
-snapshot's content into that product's live file and creates a NEW
-version on top (history is never deleted or rewritten). Version numbers
-are independent per product — CASHBONDS v7 and FX v2 are unrelated.
+versions/<product>/rules_vNNN.yml plus a metadata sidecar (on S3, keys
+relative to Settings.RULE_DESIGNER_S3_PREFIX — see s3_store.py) —
+independent of the live business_rules.yml that yaml_service edits going
+forward, so a published version is immutable once written. Rollback
+restores an old snapshot's content into that product's live file and
+creates a NEW version on top (history is never deleted or rewritten).
+Version numbers are independent per product — CASHBONDS v7 and FX v2 are
+unrelated.
 """
 from __future__ import annotations
 
 import json
-import os
 import time
 from typing import List, Optional
 
-from app.modules.rule_designer import yaml_service
+from app.modules.rule_designer import s3_store, yaml_service
 from app.modules.rule_designer.models import RuleSetVersion
 
-_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-VERSIONS_DIR = os.path.join(_BACKEND_DIR, "versions")
+VERSIONS_PREFIX = "versions/"
 
 
 def _product_dir(product: str) -> str:
-    return os.path.join(VERSIONS_DIR, product.upper())
-
-
-def _ensure_dir(product: str) -> None:
-    os.makedirs(_product_dir(product), exist_ok=True)
+    return f"{VERSIONS_PREFIX}{product.upper()}"
 
 
 def _meta_path(product: str, version: int) -> str:
-    return os.path.join(_product_dir(product), f"rules_v{version:03d}.json")
+    return f"{_product_dir(product)}/rules_v{version:03d}.json"
 
 
 def _yaml_path(product: str, version: int) -> str:
-    return os.path.join(_product_dir(product), f"rules_v{version:03d}.yml")
+    return f"{_product_dir(product)}/rules_v{version:03d}.yml"
 
 
 def list_versions(product: str) -> List[RuleSetVersion]:
-    _ensure_dir(product)
     out = []
-    for fn in sorted(os.listdir(_product_dir(product))):
-        if fn.endswith(".json"):
-            with open(os.path.join(_product_dir(product), fn)) as fh:
-                out.append(RuleSetVersion(**json.load(fh)))
+    for key in s3_store.list_keys(_product_dir(product) + "/"):
+        if key.endswith(".json"):
+            text = s3_store.get_text(key)
+            if text is not None:
+                out.append(RuleSetVersion(**json.loads(text)))
     return sorted(out, key=lambda v: v.version)
 
 
 def list_all_versions() -> List[RuleSetVersion]:
     """Across every product that has published at least once — for a
     cross-product versions view."""
-    os.makedirs(VERSIONS_DIR, exist_ok=True)
     out: List[RuleSetVersion] = []
-    for product in os.listdir(VERSIONS_DIR):
-        if os.path.isdir(os.path.join(VERSIONS_DIR, product)):
-            out.extend(list_versions(product))
+    for product in s3_store.list_dirs(VERSIONS_PREFIX):
+        out.extend(list_versions(product))
     return sorted(out, key=lambda v: v.published_at or 0, reverse=True)
 
 
@@ -65,38 +59,30 @@ def next_version_number(product: str) -> int:
 
 
 def get_version(product: str, version: int) -> Optional[RuleSetVersion]:
-    path = _meta_path(product, version)
-    if not os.path.exists(path):
+    text = s3_store.get_text(_meta_path(product, version))
+    if text is None:
         return None
-    with open(path) as fh:
-        return RuleSetVersion(**json.load(fh))
+    return RuleSetVersion(**json.loads(text))
 
 
 def get_version_yaml_text(product: str, version: int) -> Optional[str]:
-    path = _yaml_path(product, version)
-    if not os.path.exists(path):
-        return None
-    with open(path) as fh:
-        return fh.read()
+    return s3_store.get_text(_yaml_path(product, version))
 
 
 def publish_snapshot(product: str, created_by: str, description: str, rule_ids_changed: List[str],
                       dry_run_dataset_id: Optional[str] = None,
                       dry_run_result_id: Optional[str] = None,
                       approved_by: Optional[str] = None) -> RuleSetVersion:
-    _ensure_dir(product)
     version_no = next_version_number(product)
     yaml_text = yaml_service.rules_yaml_text(product)
-    with open(_yaml_path(product, version_no), "w") as fh:
-        fh.write(yaml_text)
+    s3_store.put_text(_yaml_path(product, version_no), yaml_text)
     meta = RuleSetVersion(
         product=product.upper(), version=version_no, file=f"rules_v{version_no:03d}.yml",
         created_by=created_by, description=description, rule_ids_changed=rule_ids_changed,
         dry_run_dataset_id=dry_run_dataset_id, dry_run_result_id=dry_run_result_id,
         approved_by=approved_by, published_at=time.time(),
     )
-    with open(_meta_path(product, version_no), "w") as fh:
-        fh.write(meta.model_dump_json(indent=2))
+    s3_store.put_text(_meta_path(product, version_no), meta.model_dump_json(indent=2))
     return meta
 
 

@@ -1,26 +1,32 @@
 """Append-only audit log (spec §36). Every mutation is logged; nothing is
-ever rewritten or deleted from this file."""
+ever rewritten or deleted.
+
+Stored on S3 as one object per entry under `audit/` (keys relative to
+Settings.RULE_DESIGNER_S3_PREFIX — see s3_store.py), since S3 has no native
+append. Each key is prefixed with the entry's own millisecond timestamp
+(zero-padded, so it sorts lexicographically the same as numerically),
+which gives chronological order for free from list_objects_v2 without
+needing to read every entry just to sort them.
+"""
 from __future__ import annotations
 
 import json
-import os
+import uuid
 from typing import List, Optional
 
+from app.modules.rule_designer import s3_store
 from app.modules.rule_designer.models import AuditEntry
 
-_BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-AUDIT_DIR = os.path.join(_BACKEND_DIR, "audit")
-AUDIT_LOG = os.path.join(AUDIT_DIR, "audit_log.jsonl")
+AUDIT_PREFIX = "audit/"
 
 
-def _ensure_dir() -> None:
-    os.makedirs(AUDIT_DIR, exist_ok=True)
+def _entry_key(entry: AuditEntry) -> str:
+    ts_ms = int(entry.timestamp * 1000)
+    return f"{AUDIT_PREFIX}{ts_ms:020d}_{uuid.uuid4().hex[:8]}.json"
 
 
 def record(entry: AuditEntry) -> AuditEntry:
-    _ensure_dir()
-    with open(AUDIT_LOG, "a") as fh:
-        fh.write(entry.model_dump_json() + "\n")
+    s3_store.put_text(_entry_key(entry), entry.model_dump_json())
     return entry
 
 
@@ -39,22 +45,19 @@ def log(actor: str, action: str, role: Optional[str] = None, rule_id: Optional[s
 
 def query(rule_id: Optional[str] = None, action: Optional[str] = None,
           actor: Optional[str] = None, limit: int = 500) -> List[AuditEntry]:
-    _ensure_dir()
-    if not os.path.exists(AUDIT_LOG):
-        return []
     out: List[AuditEntry] = []
-    with open(AUDIT_LOG) as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            entry = AuditEntry.model_validate(json.loads(line))
-            if rule_id and entry.rule_id != rule_id:
-                continue
-            if action and entry.action != action:
-                continue
-            if actor and entry.actor != actor:
-                continue
-            out.append(entry)
-    out.sort(key=lambda e: e.timestamp, reverse=True)
-    return out[:limit]
+    for key in sorted(s3_store.list_keys(AUDIT_PREFIX), reverse=True):  # newest first
+        text = s3_store.get_text(key)
+        if text is None:
+            continue
+        entry = AuditEntry.model_validate(json.loads(text))
+        if rule_id and entry.rule_id != rule_id:
+            continue
+        if action and entry.action != action:
+            continue
+        if actor and entry.actor != actor:
+            continue
+        out.append(entry)
+        if len(out) >= limit:
+            break
+    return out

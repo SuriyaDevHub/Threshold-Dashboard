@@ -3,47 +3,39 @@
 Every reference file gets an id; every upload against that id (same name)
 creates a new, immutable version. A published rule pins the exact version
 it was validated against, so results stay reproducible even if the
-reference file is updated later (spec §40).
+reference file is updated later (spec §40). Stored on S3 under
+`reference_data/` (keys relative to Settings.RULE_DESIGNER_S3_PREFIX —
+see s3_store.py).
 """
 from __future__ import annotations
 
 import csv
 import io
 import json
-import os
 import time
 import uuid
 from typing import Dict, List, Optional
 
+from app.modules.rule_designer import s3_store
 from app.modules.rule_designer.models import FieldType, ReferenceFile, ReferenceFileVersion
 from app.modules.rule_designer.schema import infer_schema
 
-BASE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__)))), "reference_data")
-
-
-def _base_dir() -> str:
-    os.makedirs(BASE_DIR, exist_ok=True)
-    return BASE_DIR
+BASE_PREFIX = "reference_data/"
 
 
 def _index_path() -> str:
-    return os.path.join(_base_dir(), "_index.json")
+    return f"{BASE_PREFIX}_index.json"
 
 
 def _load_index() -> Dict[str, dict]:
-    path = _index_path()
-    if not os.path.exists(path):
+    text = s3_store.get_text(_index_path())
+    if text is None:
         return {}
-    with open(path) as fh:
-        return json.load(fh)
+    return json.loads(text)
 
 
 def _save_index(idx: Dict[str, dict]) -> None:
-    path = _index_path()
-    tmp = path + f".tmp{uuid.uuid4().hex[:6]}"
-    with open(tmp, "w") as fh:
-        json.dump(idx, fh, indent=2)
-    os.replace(tmp, path)
+    s3_store.put_text(_index_path(), json.dumps(idx, indent=2))
 
 
 def parse_csv_text(text: str) -> List[dict]:
@@ -52,9 +44,7 @@ def parse_csv_text(text: str) -> List[dict]:
 
 
 def _rows_path(file_id: str, version: int) -> str:
-    d = os.path.join(_base_dir(), file_id)
-    os.makedirs(d, exist_ok=True)
-    return os.path.join(d, f"v{version}.json")
+    return f"{BASE_PREFIX}{file_id}/v{version}.json"
 
 
 def list_files() -> List[ReferenceFile]:
@@ -95,9 +85,8 @@ def upload_version(name: str, rows: List[dict], uploaded_by: str,
 
     schema = infer_schema(rows)
     columns = list(schema.keys())
-    rel_path = os.path.relpath(_rows_path(file_id, version_no), _base_dir())
-    with open(_rows_path(file_id, version_no), "w") as fh:
-        json.dump(rows, fh)
+    rel_path = _rows_path(file_id, version_no)
+    s3_store.put_text(rel_path, json.dumps(rows))
 
     for v in blob["versions"]:
         v["status"] = "superseded"
@@ -120,11 +109,10 @@ def get_rows(file_id: str, version: Optional[int] = None) -> Optional[List[dict]
     ver = next((v for v in f.versions if v.version == version), None) if version else f.latest
     if ver is None:
         return None
-    path = os.path.join(_base_dir(), ver.file_path)
-    if not os.path.exists(path):
+    text = s3_store.get_text(ver.file_path)
+    if text is None:
         return None
-    with open(path) as fh:
-        return json.load(fh)
+    return json.loads(text)
 
 
 def reference_loader(file_id: str, version: Optional[int] = None) -> Optional[List[dict]]:

@@ -10,13 +10,14 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
+from moto import mock_aws
 
 from app.core import store as dataset_store
 from app.core.config import get_settings
 from app.modules.rule_designer import (
-    calc_ops, condition_engine, explain_service, lookup_engine, product_engine, product_registry,
-    reference_store, rule_store, rule_usage_service, validation_service, version_service,
-    workflow_engine, yaml_service,
+    calc_ops, condition_engine, dry_run_service, explain_service, lookup_engine, product_engine,
+    product_registry, reference_store, rule_store, rule_usage_service, s3_store, validation_service,
+    version_service, workflow_engine, yaml_service,
 )
 from app.modules.rule_designer.models import (
     Condition, ConditionGroup, ConflictHandling, DeriveSpec, LookupConfig, LookupFieldMap, LookupType,
@@ -25,30 +26,37 @@ from app.modules.rule_designer.models import (
 )
 
 TEST_PRODUCT = "TESTPROD"
+TEST_S3_BUCKET = "test-rule-designer-bucket"
 
 
 @pytest.fixture(autouse=True)
 def isolated_storage(tmp_path, monkeypatch):
-    """Every test gets its own rules/versions/reference_data/audit dirs so
-    tests never see each other's state or the real seeded data, plus a
-    clean product registry seeded with one TESTPROD entry."""
-    monkeypatch.setattr(yaml_service, "RULES_DIR", str(tmp_path / "rules"))
-    monkeypatch.setattr(version_service, "VERSIONS_DIR", str(tmp_path / "versions"))
-    monkeypatch.setattr(reference_store, "BASE_DIR", str(tmp_path / "reference_data"))
-    monkeypatch.setattr(product_registry, "REGISTRY_PATH", str(tmp_path / "rules" / "products.json"))
-    monkeypatch.setattr(product_registry, "REMOVED_CODES_PATH", str(tmp_path / "rules" / "_removed_product_codes.json"))
+    """Every test gets a fresh, fully isolated mocked S3 bucket (via moto)
+    for Rule Designer's own storage, so tests never see each other's state
+    or real data, plus a clean product registry seeded with one TESTPROD
+    entry. Rule Designer's in-memory dry-run results and the (unrelated,
+    still local-disk) dataset cache are reset the same way."""
+    with mock_aws():
+        settings = get_settings()
+        monkeypatch.setattr(settings, "S3_BUCKET", TEST_S3_BUCKET)
+        monkeypatch.setattr(settings, "RULE_DESIGNER_S3_PREFIX", "rule-designer/")
 
-    import app.modules.rule_designer.audit_service as audit_service
-    monkeypatch.setattr(audit_service, "AUDIT_DIR", str(tmp_path / "audit"))
-    monkeypatch.setattr(audit_service, "AUDIT_LOG", str(tmp_path / "audit" / "audit_log.jsonl"))
+        import boto3
+        boto3.client("s3", region_name=settings.S3_REGION).create_bucket(
+            Bucket=TEST_S3_BUCKET,
+            CreateBucketConfiguration={"LocationConstraint": settings.S3_REGION},
+        )
 
-    monkeypatch.setattr(dataset_store.get_settings(), "DATA_DIR", str(tmp_path / "_datasets"))
-    dataset_store._MEM.clear()  # noqa: SLF001 — in-memory dataset store is process-global
+        monkeypatch.setattr(dataset_store.get_settings(), "DATA_DIR", str(tmp_path / "_datasets"))
+        dataset_store._MEM.clear()  # noqa: SLF001 — in-memory dataset store is process-global
+        dry_run_service._results.clear()  # noqa: SLF001 — in-memory dry-run store is process-global
+        yaml_service._rules_cache.clear()  # noqa: SLF001 — bounded-staleness cache is process-global
 
-    os.makedirs(tmp_path / "rules", exist_ok=True)
-    product_registry.create_product(TEST_PRODUCT, "Test Product", "seeded for tests", "tester")
-    yield
-    dataset_store._MEM.clear()  # noqa: SLF001
+        product_registry.create_product(TEST_PRODUCT, "Test Product", "seeded for tests", "tester")
+        yield
+        dataset_store._MEM.clear()  # noqa: SLF001
+        dry_run_service._results.clear()  # noqa: SLF001
+        yaml_service._rules_cache.clear()  # noqa: SLF001
 
 
 def _rule(**kw) -> Rule:
@@ -602,8 +610,7 @@ def test_yaml_round_trip_and_preserves_unrelated_keys():
                           "workflow": {"nodes": [], "edges": []}, "required_columns": [],
                           "version": 1, "created_by": "x", "created_at": 0, "updated_by": "x",
                           "updated_at": 0, "notes": "", "approvals": [], "depends_on": []})
-    with open(yaml_service._rules_file(TEST_PRODUCT), "w") as fh:  # noqa: SLF001
-        yaml_service._new_yaml().dump(raw, fh)  # noqa: SLF001
+    s3_store.put_text(yaml_service._rules_file(TEST_PRODUCT), yaml_service.dump_to_text(raw))  # noqa: SLF001
 
     rule.name = "Rule A1 (edited)"
     yaml_service.save_rules([rule], actor="tester2")
@@ -719,36 +726,42 @@ def test_load_rules_cache_never_serves_stale_data():
 
 def test_load_rules_cache_avoids_repeated_disk_reads():
     """The whole point of the cache: repeated load_rules() calls for an
-    unchanged product must not keep hitting disk. Patches open() to count
-    calls against this product's file specifically."""
+    unchanged product must not keep hitting S3 — not even a HEAD — while
+    still inside the bounded-staleness TTL window. Patches s3_store.head/
+    get_text to count calls against this product's key specifically."""
     rule = _rule(rule_id="CACHEPERF1", name="x")
     rule_store.upsert_rule(rule, "tester")
     yaml_service.load_rules(TEST_PRODUCT)  # warm the cache
 
-    path = yaml_service._rules_file(TEST_PRODUCT)  # noqa: SLF001
-    real_open = open
-    open_count = {"n": 0}
+    key = yaml_service._rules_file(TEST_PRODUCT)  # noqa: SLF001
+    real_head, real_get_text = s3_store.head, s3_store.get_text
+    call_count = {"n": 0}
 
-    def counting_open(file, *args, **kwargs):
-        if str(file) == path:
-            open_count["n"] += 1
-        return real_open(file, *args, **kwargs)
+    def counting_head(k, *args, **kwargs):
+        if k == key:
+            call_count["n"] += 1
+        return real_head(k, *args, **kwargs)
 
-    import builtins
-    builtins.open = counting_open
+    def counting_get_text(k, *args, **kwargs):
+        if k == key:
+            call_count["n"] += 1
+        return real_get_text(k, *args, **kwargs)
+
+    s3_store.head = counting_head
+    s3_store.get_text = counting_get_text
     try:
         for _ in range(20):
             yaml_service.load_rules(TEST_PRODUCT)
     finally:
-        builtins.open = real_open
+        s3_store.head = real_head
+        s3_store.get_text = real_get_text
 
-    assert open_count["n"] == 0
+    assert call_count["n"] == 0
 
 
 def test_yaml_inspect_reports_parse_errors_without_crashing():
-    os.makedirs(yaml_service._product_dir(TEST_PRODUCT), exist_ok=True)  # noqa: SLF001
-    with open(yaml_service._rules_file(TEST_PRODUCT), "w") as fh:  # noqa: SLF001
-        fh.write("rules:\n  - rule_id: 'bad rule!'\n    name: Bad\n")  # invalid rule_id chars
+    s3_store.put_text(yaml_service._rules_file(TEST_PRODUCT),  # noqa: SLF001
+                       "rules:\n  - rule_id: 'bad rule!'\n    name: Bad\n")  # invalid rule_id chars
     report = yaml_service.inspect_yaml(TEST_PRODUCT)
     assert report["rule_count"] == 1
     assert report["parsed_ok"] == 0
@@ -792,7 +805,7 @@ def test_rename_product_rules_pure_rename_moves_rules_and_index():
     assert {r.rule_id for r in new_rules} == {"RN1", "RN2"}
     assert all(r.product == "NEW_CODE" for r in new_rules)
     assert yaml_service.resolve_product("RN1") == "NEW_CODE"
-    assert not os.path.exists(yaml_service._rules_file(TEST_PRODUCT))  # noqa: SLF001
+    assert not s3_store.exists(yaml_service._rules_file(TEST_PRODUCT))  # noqa: SLF001
 
     # version history moved with it on a pure rename
     assert version_service.next_version_number("NEW_CODE") == 2
@@ -1171,7 +1184,10 @@ def test_consistency_report_flags_orphaned_dir_with_rules():
 
 
 def test_consistency_report_separates_empty_scaffold_dirs_from_real_orphans():
-    os.makedirs(yaml_service._product_dir("EMPTY_SCAFFOLD"), exist_ok=True)  # noqa: SLF001
+    # A stray key under the product's prefix (e.g. a leftover history
+    # backup) with no live business_rules.yml — the S3 equivalent of an
+    # empty-but-created local directory.
+    s3_store.put_text(f"{yaml_service._product_dir('EMPTY_SCAFFOLD')}/_history/.keep", "")  # noqa: SLF001
     report = product_registry.consistency_report()
     assert "EMPTY_SCAFFOLD" in report["empty_scaffold_dirs"]
     assert "EMPTY_SCAFFOLD" not in [o["code"] for o in report["orphaned_with_rules"]]
