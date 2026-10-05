@@ -215,9 +215,7 @@ def _build_indexes(workflow: Workflow, rows: List[dict], reference_loader: Refer
                 days = {r.get(cfg.day_partition_field) for r in rows if r.get(cfg.day_partition_field)}
                 day_indexes = {
                     day: lookup_engine.build_index(
-                        day_partitioned_source.load_day_rows(
-                            cfg.day_partition_path_template, day, cfg.day_partition_format, key_columns,
-                        ),
+                        day_partitioned_source.load_day_rows(cfg.day_partition_path_template, day, key_columns),
                         cfg,
                     )
                     for day in days
@@ -342,7 +340,7 @@ def run_workflow(
                         cfg = node.lookup
                         key_columns = [jk["reference"] for jk in cfg.join_keys]
                         day_rows = day_partitioned_source.load_day_rows(
-                            cfg.day_partition_path_template, day_value, cfg.day_partition_format, key_columns,
+                            cfg.day_partition_path_template, day_value, key_columns,
                         )
                         day_idx = lookup_engine.build_index(day_rows, cfg)
                         nidx.day_indexes[day_value] = day_idx

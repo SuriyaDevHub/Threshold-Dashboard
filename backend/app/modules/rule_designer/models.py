@@ -355,9 +355,12 @@ class LookupConfig(BaseModel):
     # reference_file_id is unused when this is "day_partitioned", same as
     # it's unused for self_group.
     reference_source: str = "file"  # "file" | "day_partitioned"
-    day_partition_path_template: Optional[str] = None  # e.g. "/mnt/river/{day}/All trades.csv"
-    day_partition_field: Optional[str] = None  # record field holding the COB date to resolve {day} from
-    day_partition_format: str = "%Y%m%d"  # strftime pattern the parsed day is rendered with
+    # A strftime pattern applied directly to the parsed day — not a single
+    # placeholder — so year/month/date can each be formatted independently
+    # wherever they fall in the path, including inside the filename itself:
+    # "/mnt/river/%Y/%m/%d/All trades.csv", "/mnt/river/%Y/%B/trades_%Y%m%d.csv", etc.
+    day_partition_path_template: Optional[str] = None
+    day_partition_field: Optional[str] = None  # record field holding the COB date
 
     # self_group only: which field groups input rows together (e.g. a deal
     # reference or exception id), and which row within each group is the

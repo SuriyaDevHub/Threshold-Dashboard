@@ -49,13 +49,20 @@ def parse_day(value: Optional[str]) -> Optional[datetime]:
             return None
 
 
-def resolve_path(template: str, day_value: Optional[str], day_format: str) -> Optional[str]:
-    """`template` with its "{day}" placeholder filled in from `day_value`,
-    or None if `day_value` doesn't parse as a date at all."""
+def resolve_path(template: str, day_value: Optional[str]) -> Optional[str]:
+    """`template` is a strftime pattern applied directly to the parsed
+    day — not a single `{day}` placeholder — so year/month/date can each
+    be formatted independently wherever they fall in the path, including
+    inside the filename itself:
+      "/mnt/river/%Y/%m/%d/All trades.csv"       (nested Y/m/d folders)
+      "/mnt/river/%Y/%B/All trades_%Y%m%d.csv"    (full month name folder,
+                                                     date embedded in the filename)
+      "/mnt/river/%Y-%m-%d/All trades.csv"        (one flat dashed folder)
+    Returns None if `day_value` doesn't parse as a date at all."""
     parsed = parse_day(day_value)
     if parsed is None:
         return None
-    return template.format(day=parsed.strftime(day_format))
+    return parsed.strftime(template)
 
 
 def _load_csv(path: str, key_columns: List[str]) -> List[dict]:
@@ -86,15 +93,14 @@ def _load_csv(path: str, key_columns: List[str]) -> List[dict]:
     raise last_err or ValueError(f"could not read {path}")
 
 
-def load_day_rows(template: str, day_value: Optional[str], day_format: str,
-                   key_columns: List[str]) -> List[dict]:
+def load_day_rows(template: str, day_value: Optional[str], key_columns: List[str]) -> List[dict]:
     """Rows for the file `day_value` resolves to, cached per (resolved
     path, mtime) so repeated records for the same day — in one batch, or
     across dry runs — never re-read the file from disk. Returns []
     (never raises) when the day doesn't parse or the file doesn't exist —
     that record's lookup simply misses, handled the same as any other
     unmatched record by lookup_engine.apply_lookup()'s missing_strategy."""
-    path = resolve_path(template, day_value, day_format)
+    path = resolve_path(template, day_value)
     if path is None or not os.path.exists(path):
         return []
     mtime = os.path.getmtime(path)

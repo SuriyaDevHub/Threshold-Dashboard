@@ -533,13 +533,19 @@ def test_workflow_engine_end_to_end(tmp_path):
 # --------------------------------------------------------------------------
 
 def test_resolve_path_substitutes_strftime_formatted_day(tmp_path):
-    template = str(tmp_path / "{day}" / "All trades.csv")
-    path = day_partitioned_source.resolve_path(template, "2026-09-24", "%Y%m%d")
+    template = str(tmp_path / "%Y%m%d" / "All trades.csv")
+    path = day_partitioned_source.resolve_path(template, "2026-09-24")
     assert path == str(tmp_path / "20260924" / "All trades.csv")
 
 
+def test_resolve_path_handles_strftime_codes_anywhere_including_the_filename(tmp_path):
+    template = str(tmp_path / "%Y" / "%B" / "trades_%Y%m%d.csv")
+    path = day_partitioned_source.resolve_path(template, "2026-09-24")
+    assert path == str(tmp_path / "2026" / "September" / "trades_20260924.csv")
+
+
 def test_resolve_path_returns_none_for_unparseable_day():
-    assert day_partitioned_source.resolve_path("/x/{day}/f.csv", "not-a-date", "%Y%m%d") is None
+    assert day_partitioned_source.resolve_path("/x/%Y%m%d/f.csv", "not-a-date") is None
 
 
 def test_load_day_rows_scans_past_preamble_to_find_header(tmp_path):
@@ -551,19 +557,19 @@ def test_load_day_rows_scans_past_preamble_to_find_header(tmp_path):
         "ABC,1000000\n"
         "XYZ,2000000\n"
     )
-    template = str(tmp_path / "{day}" / "All trades.csv")
-    rows = day_partitioned_source.load_day_rows(template, "2026-09-24", "%Y%m%d", ["UTI"])
+    template = str(tmp_path / "%Y%m%d" / "All trades.csv")
+    rows = day_partitioned_source.load_day_rows(template, "2026-09-24", ["UTI"])
     assert rows == [{"UTI": "ABC", "Notional": "1000000"}, {"UTI": "XYZ", "Notional": "2000000"}]
 
 
 def test_load_day_rows_returns_empty_for_missing_file(tmp_path):
-    template = str(tmp_path / "{day}" / "All trades.csv")
-    assert day_partitioned_source.load_day_rows(template, "2026-09-24", "%Y%m%d", ["UTI"]) == []
+    template = str(tmp_path / "%Y%m%d" / "All trades.csv")
+    assert day_partitioned_source.load_day_rows(template, "2026-09-24", ["UTI"]) == []
 
 
 def test_load_day_rows_returns_empty_for_unparseable_day(tmp_path):
-    template = str(tmp_path / "{day}" / "All trades.csv")
-    assert day_partitioned_source.load_day_rows(template, "not-a-date", "%Y%m%d", ["UTI"]) == []
+    template = str(tmp_path / "%Y%m%d" / "All trades.csv")
+    assert day_partitioned_source.load_day_rows(template, "not-a-date", ["UTI"]) == []
 
 
 def test_load_day_rows_caches_by_mtime_not_re_reading_unless_changed(tmp_path):
@@ -571,7 +577,7 @@ def test_load_day_rows_caches_by_mtime_not_re_reading_unless_changed(tmp_path):
     day_dir.mkdir()
     csv_path = day_dir / "All trades.csv"
     csv_path.write_text("UTI,Notional\nABC,1000000\n")
-    template = str(tmp_path / "{day}" / "All trades.csv")
+    template = str(tmp_path / "%Y%m%d" / "All trades.csv")
 
     real_load = day_partitioned_source._load_csv  # noqa: SLF001
     calls = {"n": 0}
@@ -583,11 +589,11 @@ def test_load_day_rows_caches_by_mtime_not_re_reading_unless_changed(tmp_path):
     day_partitioned_source._load_csv = counting_load  # noqa: SLF001
     try:
         for _ in range(5):
-            day_partitioned_source.load_day_rows(template, "2026-09-24", "%Y%m%d", ["UTI"])
+            day_partitioned_source.load_day_rows(template, "2026-09-24", ["UTI"])
         assert calls["n"] == 1  # unchanged file -> one real read, rest served from cache
 
         csv_path.write_text("UTI,Notional\nABC,1000000\nXYZ,2000000\n")
-        rows = day_partitioned_source.load_day_rows(template, "2026-09-24", "%Y%m%d", ["UTI"])
+        rows = day_partitioned_source.load_day_rows(template, "2026-09-24", ["UTI"])
         assert calls["n"] == 2  # mtime changed -> re-read
         assert len(rows) == 2
     finally:
@@ -602,8 +608,8 @@ def test_workflow_lookup_day_partitioned_resolves_each_record_against_its_own_da
 
     lookup = LookupConfig(
         lookup_type=LookupType.EXACT, reference_source="day_partitioned",
-        day_partition_path_template=str(tmp_path / "{day}" / "All trades.csv"),
-        day_partition_field="OMRCTRADECLOSEOFBUSINESSDATE", day_partition_format="%Y%m%d",
+        day_partition_path_template=str(tmp_path / "%Y%m%d" / "All trades.csv"),
+        day_partition_field="OMRCTRADECLOSEOFBUSINESSDATE",
         join_keys=[{"source": "UTI", "reference": "UTI"}],
         fields=[LookupFieldMap(source_column="Notional", output_field="RiverNotional")],
     )

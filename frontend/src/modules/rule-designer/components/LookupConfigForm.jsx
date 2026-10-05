@@ -128,10 +128,10 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
         <div className="lk-block">
           <div className="lk-block-title">Day-partitioned source</div>
           <div className="lk-row">
-            <label className="control" style={{ minWidth: 280 }}><span>Path template</span>
+            <label className="control" style={{ minWidth: 320 }}><span>Path template</span>
               <input value={lookup.day_partition_path_template || ""}
                      onChange={(e) => set({ day_partition_path_template: e.target.value })}
-                     placeholder="/mnt/river/{day}/All trades.csv" /></label>
+                     placeholder="/mnt/river/%Y/%m/%d/All trades.csv" /></label>
             <label className="control"><span>Day field</span>
               <select value={lookup.day_partition_field || ""} onChange={(e) => set({ day_partition_field: e.target.value })}>
                 <option value="" disabled>field…</option>
@@ -140,15 +140,13 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
                 ))}
               </select>
             </label>
-            <label className="control"><span>Day format</span>
-              <input value={lookup.day_partition_format || "%Y%m%d"}
-                     onChange={(e) => set({ day_partition_format: e.target.value })}
-                     placeholder="%Y%m%d" /></label>
           </div>
           <p className="empty-hint" style={{ marginTop: 6 }}>
-            For each record, the Day field's value (e.g. OMRCTRADECLOSEOFBUSINESSDATE) is parsed as a date,
-            formatted with Day format, and substituted into the path template's "{"{day}"}" placeholder —
-            so each record is looked up against its own day's file.
+            For each record, the Day field's value (e.g. OMRCTRADECLOSEOFBUSINESSDATE) is parsed as a date and
+            the path template is rendered as a strftime pattern against it — standard codes anywhere in the
+            path, including the filename: %Y (4-digit year), %y (2-digit year), %m (01-12), %b/%B (Sep/September),
+            %d (01-31). E.g. "/mnt/river/%Y/%B/trades_%Y%m%d.csv" → "/mnt/river/2026/September/trades_20260924.csv".
+            So each record is looked up against its own day's file, however that file's path is actually laid out.
           </p>
         </div>
       )}
