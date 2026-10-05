@@ -456,6 +456,47 @@ async def upload_reference_file(body: UploadReferenceBody):
     return f.model_dump()
 
 
+class ConfigureReferenceSourceBody(Actor):
+    name: str
+    path: str
+    file_id: Optional[str] = None
+    auto_refresh_minutes: Optional[int] = None
+
+
+@router.post("/reference-files/configure-source")
+async def configure_reference_source(body: ConfigureReferenceSourceBody):
+    """Points a reference file at a local/network file this app reads
+    itself (instead of a browser upload), and syncs it immediately — the
+    production-grade alternative to upload for an end user, see
+    reference_store.configure_source()."""
+    _require(body, "manage_lookups")
+    try:
+        f = reference_store.configure_source(
+            body.name, body.path, body.auto_refresh_minutes, body.actor, file_id=body.file_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    audit_service.log(body.actor, "CREATE", role=body.role.value,
+                       detail=f"configured reference file '{body.name}' from path '{body.path}' -> v{f.latest.version}",
+                       lookup_files=[f.id])
+    return f.model_dump()
+
+
+@router.post("/reference-files/{file_id}/sync")
+async def sync_reference_file(file_id: str, actor: str = "unknown", role: Role = Role.ADMIN):
+    """Manual "Sync now" for a path-sourced reference file — re-reads its
+    configured source_path and creates a new version if it parses."""
+    _require(Actor(actor=actor, role=role), "manage_lookups")
+    try:
+        f = reference_store.sync_now(file_id, actor)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    audit_service.log(actor, "EDIT", role=role.value,
+                       detail=f"synced reference file '{f.name}' from path -> v{f.latest.version}",
+                       lookup_files=[f.id])
+    return f.model_dump()
+
+
 @router.get("/reference-files/{file_id}/rows")
 async def reference_file_rows(file_id: str, version: Optional[int] = None, limit: int = 100):
     rows = reference_store.get_rows(file_id, version)

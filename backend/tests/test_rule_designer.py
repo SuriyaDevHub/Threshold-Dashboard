@@ -16,8 +16,8 @@ from app.core import store as dataset_store
 from app.core.config import get_settings
 from app.modules.rule_designer import (
     calc_ops, condition_engine, draft_store, dry_run_service, explain_service, lookup_engine,
-    product_engine, product_registry, reference_store, rule_store, rule_usage_service, s3_store,
-    validation_service, version_service, workflow_engine, yaml_service,
+    product_engine, product_registry, reference_store, reference_sync_scheduler, rule_store,
+    rule_usage_service, s3_store, validation_service, version_service, workflow_engine, yaml_service,
 )
 from app.modules.rule_designer.models import (
     Condition, ConditionGroup, ConflictHandling, DeriveSpec, LookupConfig, LookupFieldMap, LookupType,
@@ -594,6 +594,85 @@ def test_validation_between_requires_two_values():
     ))
     result = validation_service.validate_workflow(rule, {})
     assert not result.ok
+
+
+# --------------------------------------------------------------------------
+# reference_store — path-based sources (configure_source/sync_now), and
+# reference_sync_scheduler's automatic refresh tick
+# --------------------------------------------------------------------------
+
+def test_configure_source_syncs_immediately_and_records_source_metadata(tmp_path):
+    csv_path = tmp_path / "ccy.csv"
+    csv_path.write_text("Currency,Threshold\nUSD,2.0\nEUR,3.0\n")
+
+    f = reference_store.configure_source("ccy_path", str(csv_path), None, "tester")
+    assert f.source_mode == "path"
+    assert f.source_path == str(csv_path)
+    assert f.last_sync_error is None
+    assert f.last_synced_at is not None
+    assert f.latest.version == 1
+    assert f.latest.records == 2
+
+
+def test_sync_now_creates_a_new_version_on_each_call(tmp_path):
+    csv_path = tmp_path / "ccy.csv"
+    csv_path.write_text("Currency,Threshold\nUSD,2.0\n")
+    f = reference_store.configure_source("ccy_path2", str(csv_path), None, "tester")
+    assert f.latest.version == 1
+
+    csv_path.write_text("Currency,Threshold\nUSD,2.0\nEUR,3.0\n")
+    f = reference_store.sync_now(f.id, "tester")
+    assert f.latest.version == 2
+    assert f.latest.records == 2
+
+
+def test_configure_source_with_bad_path_raises_but_still_registers_the_file():
+    with pytest.raises(ValueError):
+        reference_store.configure_source("ccy_path3", "/nonexistent/path/x.csv", None, "tester")
+    f = reference_store.find_by_name("ccy_path3")
+    assert f is not None
+    assert f.source_mode == "path"
+    assert f.last_sync_error is not None
+    assert f.versions == []
+
+
+def test_sync_now_missing_path_records_error_without_crashing(tmp_path):
+    csv_path = tmp_path / "ccy.csv"
+    csv_path.write_text("Currency,Threshold\nUSD,2.0\n")
+    f = reference_store.configure_source("ccy_path4", str(csv_path), None, "tester")
+    assert f.last_sync_error is None
+
+    csv_path.unlink()
+    with pytest.raises(ValueError):
+        reference_store.sync_now(f.id, "tester")
+    f2 = reference_store.get_file(f.id)
+    assert f2.last_sync_error is not None
+    assert f2.latest.version == 1  # no new (broken) version created
+
+
+def test_scheduler_tick_syncs_when_due_and_skips_when_not(tmp_path):
+    import time
+
+    csv_path = tmp_path / "ccy.csv"
+    csv_path.write_text("Currency,Threshold\nUSD,2.0\n")
+    f = reference_store.configure_source("ccy_auto", str(csv_path), 10, "tester")  # every 10 minutes
+    assert f.latest.version == 1
+
+    reference_sync_scheduler._tick()  # noqa: SLF001
+    assert reference_store.get_file(f.id).latest.version == 1  # not due yet
+
+    idx = reference_store._load_index()  # noqa: SLF001
+    idx[f.id]["last_synced_at"] = time.time() - 700  # > 10 minutes ago
+    reference_store._save_index(idx)  # noqa: SLF001
+    csv_path.write_text("Currency,Threshold\nUSD,2.0\nEUR,3.0\n")
+
+    reference_sync_scheduler._tick()  # noqa: SLF001
+    assert reference_store.get_file(f.id).latest.version == 2
+
+
+def test_scheduler_tick_ignores_upload_mode_and_disabled_auto_refresh():
+    reference_store.upload_version("plain_upload", [{"a": "1"}], "tester")
+    reference_sync_scheduler._tick()  # noqa: SLF001 — should be a no-op, not raise
 
 
 # --------------------------------------------------------------------------

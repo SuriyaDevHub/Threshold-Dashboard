@@ -6,14 +6,29 @@ a module never touches the shell.
 """
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.plugin_loader import register_modules
+from app.modules.rule_designer import reference_sync_scheduler
 
 settings = get_settings()
-app = FastAPI(title=settings.APP_NAME)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Polls path-sourced reference files for auto-refresh — see
+    # reference_sync_scheduler.py / reference_store.configure_source().
+    task = asyncio.create_task(reference_sync_scheduler.run_forever())
+    yield
+    task.cancel()
+
+
+app = FastAPI(title=settings.APP_NAME, lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

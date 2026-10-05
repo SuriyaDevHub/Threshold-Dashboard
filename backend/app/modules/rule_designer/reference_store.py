@@ -47,14 +47,24 @@ def _rows_path(file_id: str, version: int) -> str:
     return f"{BASE_PREFIX}{file_id}/v{version}.json"
 
 
+def _to_model(file_id: str, blob: dict) -> ReferenceFile:
+    return ReferenceFile(
+        id=file_id, name=blob["name"],
+        versions=[ReferenceFileVersion(**v) for v in blob["versions"]],
+        # .get(..., default) — entries created before path-based sources
+        # existed have none of these keys, and should read as plain
+        # "upload" files, exactly as they behave today.
+        source_mode=blob.get("source_mode", "upload"),
+        source_path=blob.get("source_path"),
+        auto_refresh_minutes=blob.get("auto_refresh_minutes"),
+        last_synced_at=blob.get("last_synced_at"),
+        last_sync_error=blob.get("last_sync_error"),
+    )
+
+
 def list_files() -> List[ReferenceFile]:
     idx = _load_index()
-    out = []
-    for file_id, blob in idx.items():
-        out.append(ReferenceFile(
-            id=file_id, name=blob["name"],
-            versions=[ReferenceFileVersion(**v) for v in blob["versions"]],
-        ))
+    out = [_to_model(file_id, blob) for file_id, blob in idx.items()]
     return sorted(out, key=lambda f: f.name)
 
 
@@ -63,8 +73,7 @@ def get_file(file_id: str) -> Optional[ReferenceFile]:
     blob = idx.get(file_id)
     if not blob:
         return None
-    return ReferenceFile(id=file_id, name=blob["name"],
-                          versions=[ReferenceFileVersion(**v) for v in blob["versions"]])
+    return _to_model(file_id, blob)
 
 
 def find_by_name(name: str) -> Optional[ReferenceFile]:
@@ -97,6 +106,66 @@ def upload_version(name: str, rows: List[dict], uploaded_by: str,
         "file_path": rel_path, "status": "active",
     })
     blob["name"] = name
+    idx[file_id] = blob
+    _save_index(idx)
+    return get_file(file_id)
+
+
+def configure_source(name: str, path: str, auto_refresh_minutes: Optional[int], actor: str,
+                      file_id: Optional[str] = None) -> ReferenceFile:
+    """Registers (or re-registers) a reference file's source as a local/
+    network file this app reads itself, instead of a browser upload — so
+    an end user never has to manually re-export/re-upload it when the
+    underlying data changes (see sync_now(), and
+    reference_sync_scheduler.py for the automatic side of it). Syncs once
+    immediately — configuring a path with nothing pulled yet is useless."""
+    idx = _load_index()
+    if file_id is None:
+        existing = find_by_name(name)
+        file_id = existing.id if existing else f"ref_{uuid.uuid4().hex[:10]}"
+    blob = idx.get(file_id, {"name": name, "versions": []})
+    blob["name"] = name
+    blob["source_mode"] = "path"
+    blob["source_path"] = path
+    blob["auto_refresh_minutes"] = auto_refresh_minutes
+    idx[file_id] = blob
+    _save_index(idx)
+    return sync_now(file_id, actor)
+
+
+def sync_now(file_id: str, actor: str) -> ReferenceFile:
+    """Reads this file's configured source_path and feeds it through the
+    exact same upload_version() pipeline a browser upload uses — the same
+    immutable versioning, the same column inference. Records
+    last_synced_at/last_sync_error on the file itself so the UI (and the
+    scheduler, on an auto-refresh tick) can show/act on sync health
+    without this ever crashing the caller."""
+    idx = _load_index()
+    blob = idx.get(file_id)
+    if blob is None:
+        raise ValueError(f"reference file '{file_id}' not found")
+    path = blob.get("source_path")
+    if not path:
+        raise ValueError(f"reference file '{file_id}' has no source path configured")
+
+    try:
+        with open(path) as fh:
+            text = fh.read()
+        rows = parse_csv_text(text)
+        if not rows:
+            raise ValueError(f"no rows parsed from '{path}'")
+    except Exception as exc:
+        blob["last_sync_error"] = str(exc)
+        idx[file_id] = blob
+        _save_index(idx)
+        raise ValueError(str(exc)) from exc
+
+    upload_version(blob["name"], rows, actor, file_id=file_id)
+
+    idx = _load_index()
+    blob = idx[file_id]
+    blob["last_synced_at"] = time.time()
+    blob["last_sync_error"] = None
     idx[file_id] = blob
     _save_index(idx)
     return get_file(file_id)

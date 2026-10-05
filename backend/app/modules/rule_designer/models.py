@@ -552,6 +552,15 @@ class ReferenceFile(BaseModel):
     id: str
     name: str
     versions: List[ReferenceFileVersion] = Field(default_factory=list)
+    # Where new versions come from — "upload" (a file picked in the
+    # browser) or "path" (a local/network file this app reads itself, so
+    # an end user never has to manually re-export/re-upload when the
+    # underlying reference data changes). See reference_store.sync_now().
+    source_mode: str = "upload"
+    source_path: Optional[str] = None
+    auto_refresh_minutes: Optional[int] = None  # None/0 = no automatic refresh
+    last_synced_at: Optional[float] = None
+    last_sync_error: Optional[str] = None
 
     @property
     def latest(self) -> Optional[ReferenceFileVersion]:

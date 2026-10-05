@@ -33,6 +33,10 @@ export const rd = {
   referenceFile: (id) => get(`/reference-files/${id}`),
   referenceRows: (id, version, limit = 50) => get(`/reference-files/${id}/rows`, { version, limit }),
   uploadReference: (actor, role, name, csv_text) => post("/reference-files/upload", { actor, role, name, csv_text }),
+  configureReferenceSource: (actor, role, name, path, fileId, autoRefreshMinutes) =>
+    post("/reference-files/configure-source",
+      { actor, role, name, path, file_id: fileId, auto_refresh_minutes: autoRefreshMinutes }),
+  syncReference: (id, actor) => post(`/reference-files/${id}/sync`, { actor }),
   deleteReference: (id, actor) => del(`/reference-files/${id}`, { actor }),
 
   rules: (product) => get("/rules", { product }),
