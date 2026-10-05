@@ -72,8 +72,11 @@ def generate_explanation(rule: Rule) -> str:
             added = ", ".join(fm.output_field for fm in node.lookup.fields) or "fields"
             keys = ", ".join(jk.get("source", "") for jk in node.lookup.join_keys) or node.lookup.range_field \
                 or node.lookup.date_field or ""
-            ref = reference_store.get_file(node.lookup.reference_file_id)
-            ref_name = ref.name if ref else node.lookup.reference_file_id
+            if node.lookup.reference_source == "day_partitioned":
+                ref_name = f"day-partitioned file ({node.lookup.day_partition_path_template})"
+            else:
+                ref = reference_store.get_file(node.lookup.reference_file_id)
+                ref_name = ref.name if ref else node.lookup.reference_file_id
             steps.append(
                 f"{step_no}. Look up {keys} in the '{ref_name}' reference data "
                 f"and add {added} to the record "

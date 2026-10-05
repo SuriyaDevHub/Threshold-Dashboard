@@ -18,7 +18,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from app.modules.rule_designer import calc_ops, condition_engine, expr_engine, lookup_engine
+from app.modules.rule_designer import calc_ops, condition_engine, day_partitioned_source, expr_engine, lookup_engine
 from app.modules.rule_designer.transform_ops import apply_transform_op
 from app.modules.rule_designer.models import (
     DryRunSummary, EnrichmentDiagnostic, LookupType, NodeType, RecordResult, RecordTraceStep,
@@ -88,6 +88,14 @@ def node_outputs(node: WorkflowNode) -> List[str]:
 class _NodeIndex:
     lookup_idx: Optional[lookup_engine.LookupIndex] = None
     fallback_idx: Optional[lookup_engine.LookupIndex] = None
+    # day_indexes is set instead of lookup_idx for reference_source=
+    # "day_partitioned" — a separate LookupIndex per distinct COB date
+    # seen in this batch (see _build_indexes()), since each record's
+    # reference_rows come from a different day's file rather than one
+    # shared reference file. day_field names which field on the record
+    # holds that day's value.
+    day_indexes: Optional[Dict[str, lookup_engine.LookupIndex]] = None
+    day_field: Optional[str] = None
 
 
 def _to_num_or_none(v: Any) -> Optional[float]:
@@ -192,8 +200,32 @@ def _build_indexes(workflow: Workflow, rows: List[dict], reference_loader: Refer
             cfg = node.lookup
             if cfg.lookup_type == LookupType.SELF_GROUP:
                 ref_rows, cfg = _self_group_reference_rows(rows, cfg)
-            else:
-                ref_rows = reference_loader(cfg.reference_file_id, cfg.reference_version) or []
+                idx = lookup_engine.build_index(ref_rows, cfg)
+                indexes[node.id] = _NodeIndex(lookup_idx=idx)
+                continue
+
+            if cfg.reference_source == "day_partitioned":
+                # Each record's reference_rows come from a different day's
+                # file (see day_partitioned_source.py) rather than one
+                # shared reference file — prime every distinct day seen in
+                # this batch up front (mirrors the legacy RiverIndex's own
+                # prime_days()), so the per-record loop in run_workflow()
+                # never does a cold file read mid-batch.
+                key_columns = [jk["reference"] for jk in cfg.join_keys]
+                days = {r.get(cfg.day_partition_field) for r in rows if r.get(cfg.day_partition_field)}
+                day_indexes = {
+                    day: lookup_engine.build_index(
+                        day_partitioned_source.load_day_rows(
+                            cfg.day_partition_path_template, day, cfg.day_partition_format, key_columns,
+                        ),
+                        cfg,
+                    )
+                    for day in days
+                }
+                indexes[node.id] = _NodeIndex(day_indexes=day_indexes, day_field=cfg.day_partition_field)
+                continue
+
+            ref_rows = reference_loader(cfg.reference_file_id, cfg.reference_version) or []
             idx = lookup_engine.build_index(ref_rows, cfg)
             fb_idx = None
             if cfg.fallback_reference_file_id:
@@ -299,7 +331,24 @@ def run_workflow(
                 stats = enrich_stats[node.id]
                 stats["input"] += 1
                 nidx = indexes[node.id]
-                outcome = lookup_engine.apply_lookup(wr, nidx.lookup_idx, nidx.fallback_idx)
+                if nidx.day_indexes is not None:
+                    day_value = wr.get(nidx.day_field)
+                    day_idx = nidx.day_indexes.get(day_value)
+                    if day_idx is None:
+                        # A day not seen while priming (e.g. a blank/odd
+                        # value that didn't match the batch's distinct-day
+                        # set) — build it fresh rather than treat it as an
+                        # unconditional miss.
+                        cfg = node.lookup
+                        key_columns = [jk["reference"] for jk in cfg.join_keys]
+                        day_rows = day_partitioned_source.load_day_rows(
+                            cfg.day_partition_path_template, day_value, cfg.day_partition_format, key_columns,
+                        )
+                        day_idx = lookup_engine.build_index(day_rows, cfg)
+                        nidx.day_indexes[day_value] = day_idx
+                    outcome = lookup_engine.apply_lookup(wr, day_idx, None)
+                else:
+                    outcome = lookup_engine.apply_lookup(wr, nidx.lookup_idx, nidx.fallback_idx)
                 wr.update(outcome.fields_added)
                 if outcome.status == "matched":
                     stats["success"] += 1

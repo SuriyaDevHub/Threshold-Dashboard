@@ -15,17 +15,26 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
   const [refFiles, setRefFiles] = useState([]);
   const [refDetail, setRefDetail] = useState(null);
   const isSelfGroup = lookup.lookup_type === "self_group";
+  // Day-partitioned: the reference rows come from a file resolved per
+  // record from its own COB date (e.g. the legacy GfxValidator's
+  // RiverIndex — one "All trades.csv" per day), not an admin-uploaded/
+  // path-configured reference file — see day_partitioned_source.py.
+  const canBeDayPartitioned = lookup.lookup_type === "exact" || lookup.lookup_type === "composite";
+  const isDayPartitioned = canBeDayPartitioned && lookup.reference_source === "day_partitioned";
 
   useEffect(() => { rd.referenceFiles().then((d) => setRefFiles(d.files || [])); }, []);
   useEffect(() => {
-    if (lookup.reference_file_id) {
+    if (lookup.reference_file_id && !isDayPartitioned) {
       rd.referenceFile(lookup.reference_file_id).then(setRefDetail).catch(() => setRefDetail(null));
     } else {
       setRefDetail(null);
     }
-  }, [lookup.reference_file_id]);
+  }, [lookup.reference_file_id, isDayPartitioned]);
 
-  const refColumns = refDetail?.versions?.[refDetail.versions.length - 1]?.columns || [];
+  // Day-partitioned has no admin-known file to introspect — its columns
+  // are only knowable by actually reading the resolved day's file at
+  // runtime, so join-key/enrich-field pickers fall back to free text.
+  const refColumns = isDayPartitioned ? [] : (refDetail?.versions?.[refDetail.versions.length - 1]?.columns || []);
   // self_group has no reference file — a representative row shares the
   // source dataset's own schema, so "fields to enrich with" and "priority
   // field" pick from sourceFields instead of a reference file's columns.
@@ -65,7 +74,15 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
             <option value="self_group">Self-group (within dataset)</option>
           </select>
         </label>
-        {!isSelfGroup && (
+        {canBeDayPartitioned && (
+          <label className="control"><span>Reference source</span>
+            <select value={lookup.reference_source || "file"} onChange={(e) => set({ reference_source: e.target.value })}>
+              <option value="file">Uploaded/path reference file</option>
+              <option value="day_partitioned">Day-partitioned file (per record's COB date)</option>
+            </select>
+          </label>
+        )}
+        {!isSelfGroup && !isDayPartitioned && (
           <label className="control"><span>Reference file</span>
             <select value={lookup.reference_file_id || ""} onChange={(e) => set({ reference_file_id: e.target.value })}>
               <option value="" disabled>select…</option>
@@ -107,6 +124,35 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
         </div>
       )}
 
+      {isDayPartitioned && (
+        <div className="lk-block">
+          <div className="lk-block-title">Day-partitioned source</div>
+          <div className="lk-row">
+            <label className="control" style={{ minWidth: 280 }}><span>Path template</span>
+              <input value={lookup.day_partition_path_template || ""}
+                     onChange={(e) => set({ day_partition_path_template: e.target.value })}
+                     placeholder="/mnt/river/{day}/All trades.csv" /></label>
+            <label className="control"><span>Day field</span>
+              <select value={lookup.day_partition_field || ""} onChange={(e) => set({ day_partition_field: e.target.value })}>
+                <option value="" disabled>field…</option>
+                {withCurrent(sourceFields, lookup.day_partition_field).map((f) => (
+                  <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
+                ))}
+              </select>
+            </label>
+            <label className="control"><span>Day format</span>
+              <input value={lookup.day_partition_format || "%Y%m%d"}
+                     onChange={(e) => set({ day_partition_format: e.target.value })}
+                     placeholder="%Y%m%d" /></label>
+          </div>
+          <p className="empty-hint" style={{ marginTop: 6 }}>
+            For each record, the Day field's value (e.g. OMRCTRADECLOSEOFBUSINESSDATE) is parsed as a date,
+            formatted with Day format, and substituted into the path template's "{"{day}"}" placeholder —
+            so each record is looked up against its own day's file.
+          </p>
+        </div>
+      )}
+
       {(lookup.lookup_type === "exact" || lookup.lookup_type === "composite") && (
         <div className="lk-block">
           <div className="lk-block-title">Join keys</div>
@@ -120,9 +166,14 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
                   ))}
                 </select>
                 <span className="mono">=</span>
-                <select value={jk.reference} onChange={(e) => updateJoinKey(i, { reference: e.target.value })}>
-                  {refColumns.map((c) => <option key={c} value={c}>{c}</option>)}
-                </select>
+                {isDayPartitioned ? (
+                  <input value={jk.reference || ""} placeholder="e.g. UTI"
+                         onChange={(e) => updateJoinKey(i, { reference: e.target.value })} />
+                ) : (
+                  <select value={jk.reference} onChange={(e) => updateJoinKey(i, { reference: e.target.value })}>
+                    {refColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                )}
                 <button className="icon-btn" onClick={() => removeJoinKey(i)}><Trash2 size={13} /></button>
               </div>
               <div className="lk-row" style={{ marginTop: 6, marginBottom: 0 }}>
@@ -197,9 +248,14 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
         {(lookup.fields || []).map((fm, i) => (
           <div key={i} style={{ border: "1px solid var(--line)", borderRadius: 7, padding: 8, marginBottom: 8 }}>
             <div className="lk-row" style={{ marginBottom: 0 }}>
-              <select value={fm.source_column} onChange={(e) => updateFieldMap(i, { source_column: e.target.value })}>
-                {enrichColumns.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
+              {isDayPartitioned ? (
+                <input value={fm.source_column || ""} placeholder="e.g. Notional"
+                       onChange={(e) => updateFieldMap(i, { source_column: e.target.value })} />
+              ) : (
+                <select value={fm.source_column} onChange={(e) => updateFieldMap(i, { source_column: e.target.value })}>
+                  {enrichColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              )}
               <span className="mono">→</span>
               <input placeholder="output field name" value={fm.output_field}
                      onChange={(e) => updateFieldMap(i, { output_field: e.target.value })} />
@@ -279,10 +335,15 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
             <option value="highest_threshold">Highest threshold</option>
           </select>
           {lookup.priority_strategy !== "first_match" && (
-            <select value={lookup.priority_field || ""} onChange={(e) => set({ priority_field: e.target.value })}>
-              <option value="">priority field…</option>
-              {enrichColumns.map((c) => <option key={c} value={c}>{c}</option>)}
-            </select>
+            isDayPartitioned ? (
+              <input value={lookup.priority_field || ""} placeholder="priority field…"
+                     onChange={(e) => set({ priority_field: e.target.value })} />
+            ) : (
+              <select value={lookup.priority_field || ""} onChange={(e) => set({ priority_field: e.target.value })}>
+                <option value="">priority field…</option>
+                {enrichColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+              </select>
+            )
           )}
         </div>
       </div>

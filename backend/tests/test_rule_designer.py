@@ -15,9 +15,10 @@ from moto import mock_aws
 from app.core import store as dataset_store
 from app.core.config import get_settings
 from app.modules.rule_designer import (
-    calc_ops, condition_engine, draft_store, dry_run_service, explain_service, lookup_engine,
-    product_engine, product_registry, reference_store, reference_sync_scheduler, rule_store,
-    rule_usage_service, s3_store, validation_service, version_service, workflow_engine, yaml_service,
+    calc_ops, condition_engine, day_partitioned_source, draft_store, dry_run_service, explain_service,
+    lookup_engine, product_engine, product_registry, reference_store, reference_sync_scheduler,
+    rule_store, rule_usage_service, s3_store, validation_service, version_service, workflow_engine,
+    yaml_service,
 )
 from app.modules.rule_designer.models import (
     Condition, ConditionGroup, ConflictHandling, DeriveSpec, LookupConfig, LookupFieldMap, LookupType,
@@ -523,6 +524,120 @@ def test_workflow_engine_end_to_end(tmp_path):
     assert matched_ids == {1, 3}
     assert diagnostics[0].successful_lookups == 2
     assert diagnostics[0].lookup_failures == 1
+
+
+# --------------------------------------------------------------------------
+# day_partitioned_source — generalized RiverIndex (LookupConfig.
+# reference_source="day_partitioned"): a reference file resolved per
+# record from its own COB date, rather than one static reference file
+# --------------------------------------------------------------------------
+
+def test_resolve_path_substitutes_strftime_formatted_day(tmp_path):
+    template = str(tmp_path / "{day}" / "All trades.csv")
+    path = day_partitioned_source.resolve_path(template, "2026-09-24", "%Y%m%d")
+    assert path == str(tmp_path / "20260924" / "All trades.csv")
+
+
+def test_resolve_path_returns_none_for_unparseable_day():
+    assert day_partitioned_source.resolve_path("/x/{day}/f.csv", "not-a-date", "%Y%m%d") is None
+
+
+def test_load_day_rows_scans_past_preamble_to_find_header(tmp_path):
+    day_dir = tmp_path / "20260924"
+    day_dir.mkdir()
+    (day_dir / "All trades.csv").write_text(
+        "River extract — generated 2026-09-24\n"
+        "UTI,Notional\n"
+        "ABC,1000000\n"
+        "XYZ,2000000\n"
+    )
+    template = str(tmp_path / "{day}" / "All trades.csv")
+    rows = day_partitioned_source.load_day_rows(template, "2026-09-24", "%Y%m%d", ["UTI"])
+    assert rows == [{"UTI": "ABC", "Notional": "1000000"}, {"UTI": "XYZ", "Notional": "2000000"}]
+
+
+def test_load_day_rows_returns_empty_for_missing_file(tmp_path):
+    template = str(tmp_path / "{day}" / "All trades.csv")
+    assert day_partitioned_source.load_day_rows(template, "2026-09-24", "%Y%m%d", ["UTI"]) == []
+
+
+def test_load_day_rows_returns_empty_for_unparseable_day(tmp_path):
+    template = str(tmp_path / "{day}" / "All trades.csv")
+    assert day_partitioned_source.load_day_rows(template, "not-a-date", "%Y%m%d", ["UTI"]) == []
+
+
+def test_load_day_rows_caches_by_mtime_not_re_reading_unless_changed(tmp_path):
+    day_dir = tmp_path / "20260924"
+    day_dir.mkdir()
+    csv_path = day_dir / "All trades.csv"
+    csv_path.write_text("UTI,Notional\nABC,1000000\n")
+    template = str(tmp_path / "{day}" / "All trades.csv")
+
+    real_load = day_partitioned_source._load_csv  # noqa: SLF001
+    calls = {"n": 0}
+
+    def counting_load(path, key_columns):
+        calls["n"] += 1
+        return real_load(path, key_columns)
+
+    day_partitioned_source._load_csv = counting_load  # noqa: SLF001
+    try:
+        for _ in range(5):
+            day_partitioned_source.load_day_rows(template, "2026-09-24", "%Y%m%d", ["UTI"])
+        assert calls["n"] == 1  # unchanged file -> one real read, rest served from cache
+
+        csv_path.write_text("UTI,Notional\nABC,1000000\nXYZ,2000000\n")
+        rows = day_partitioned_source.load_day_rows(template, "2026-09-24", "%Y%m%d", ["UTI"])
+        assert calls["n"] == 2  # mtime changed -> re-read
+        assert len(rows) == 2
+    finally:
+        day_partitioned_source._load_csv = real_load  # noqa: SLF001
+
+
+def test_workflow_lookup_day_partitioned_resolves_each_record_against_its_own_day(tmp_path):
+    for day_folder, uti, notional in [("20260924", "ABC", "1000000"), ("20260925", "XYZ", "2000000")]:
+        d = tmp_path / day_folder
+        d.mkdir()
+        (d / "All trades.csv").write_text(f"UTI,Notional\n{uti},{notional}\n")
+
+    lookup = LookupConfig(
+        lookup_type=LookupType.EXACT, reference_source="day_partitioned",
+        day_partition_path_template=str(tmp_path / "{day}" / "All trades.csv"),
+        day_partition_field="OMRCTRADECLOSEOFBUSINESSDATE", day_partition_format="%Y%m%d",
+        join_keys=[{"source": "UTI", "reference": "UTI"}],
+        fields=[LookupFieldMap(source_column="Notional", output_field="RiverNotional")],
+    )
+    wf = Workflow(
+        nodes=[WorkflowNode(id="in", type=NodeType.INPUT), WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup)],
+        edges=[WorkflowEdge(source="in", target="lk")],
+    )
+    rows = [
+        {"trade_id": 1, "UTI": "ABC", "OMRCTRADECLOSEOFBUSINESSDATE": "2026-09-24"},
+        {"trade_id": 2, "UTI": "XYZ", "OMRCTRADECLOSEOFBUSINESSDATE": "2026-09-25"},
+        {"trade_id": 3, "UTI": "ABC", "OMRCTRADECLOSEOFBUSINESSDATE": "2026-09-25"},  # right UTI, wrong day -> miss
+    ]
+
+    real_load = day_partitioned_source.load_day_rows
+    calls = {"n": 0}
+
+    def counting_load(*a, **kw):
+        calls["n"] += 1
+        return real_load(*a, **kw)
+
+    day_partitioned_source.load_day_rows = counting_load
+    try:
+        results, _, summary = workflow_engine.run_workflow(wf, rows, reference_store.reference_loader,
+                                                             record_id_field="trade_id")
+    finally:
+        day_partitioned_source.load_day_rows = real_load
+
+    by_id = {r.record_id: r for r in results}
+    assert by_id[1].final_record["RiverNotional"] == "1000000"
+    assert by_id[2].final_record["RiverNotional"] == "2000000"
+    assert by_id[3].final_record.get("RiverNotional") is None  # ABC isn't in the 09-25 file
+    assert summary.lookup_failures == 1  # only record 3's lookup actually missed
+    # exactly one load per distinct day during priming (2 days in this batch)
+    assert calls["n"] == 2
 
 
 def test_dry_run_explainability_keeps_matches_past_the_sample_cap():

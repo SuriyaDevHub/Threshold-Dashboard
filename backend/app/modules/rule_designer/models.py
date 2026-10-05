@@ -347,6 +347,18 @@ class LookupConfig(BaseModel):
     reference_file_id: Optional[str] = None
     reference_version: Optional[int] = None  # pinned version; None = latest at publish time
 
+    # Orthogonal to lookup_type: WHERE exact/composite's reference_rows come
+    # from. "file" (default) = reference_file_id above, same as today.
+    # "day_partitioned" = a file whose path depends on each record's own
+    # COB date (e.g. the legacy GfxValidator's RiverIndex: one "All
+    # trades.csv" per day, keyed by UTI) — see day_partitioned_source.py.
+    # reference_file_id is unused when this is "day_partitioned", same as
+    # it's unused for self_group.
+    reference_source: str = "file"  # "file" | "day_partitioned"
+    day_partition_path_template: Optional[str] = None  # e.g. "/mnt/river/{day}/All trades.csv"
+    day_partition_field: Optional[str] = None  # record field holding the COB date to resolve {day} from
+    day_partition_format: str = "%Y%m%d"  # strftime pattern the parsed day is rendered with
+
     # self_group only: which field groups input rows together (e.g. a deal
     # reference or exception id), and which row within each group is the
     # representative one to enrich every group member from (e.g. "the row

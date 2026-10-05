@@ -114,6 +114,29 @@ def validate_lookup_config(node_label: str, lookup_cfg, result: ValidationResult
             result.errors.append(f"{node_label}: missing_strategy=fallback requires fallback_reference_file_id")
         return
 
+    if lookup_cfg.reference_source == "day_partitioned":
+        # No admin-known reference file to introspect here — the day's
+        # file is only readable at runtime (see day_partitioned_source.py),
+        # so column-existence/duplicate-key checks below don't apply; just
+        # confirm the day-partitioning itself is configured.
+        if not lookup_cfg.day_partition_path_template:
+            result.errors.append(f"{node_label}: day-partitioned lookup has no path template configured")
+        if not lookup_cfg.day_partition_field:
+            result.errors.append(f"{node_label}: day-partitioned lookup has no day field configured")
+        if lookup_cfg.lookup_type.value in ("exact", "composite") and not lookup_cfg.join_keys:
+            result.errors.append(f"{node_label}: no join keys defined")
+        if not lookup_cfg.fields:
+            result.warnings.append(f"{node_label}: no fields configured to enrich with")
+        if lookup_cfg.missing_strategy.value == "default":
+            missing = [fm.output_field for fm in lookup_cfg.fields if fm.output_field not in lookup_cfg.default_values]
+            if missing:
+                result.warnings.append(f"{node_label}: no default value configured for {missing}")
+        if lookup_cfg.missing_strategy.value == "flag" and not lookup_cfg.flag_field:
+            result.errors.append(f"{node_label}: missing_strategy=flag requires flag_field")
+        if lookup_cfg.missing_strategy.value == "fallback" and not lookup_cfg.fallback_reference_file_id:
+            result.errors.append(f"{node_label}: missing_strategy=fallback requires fallback_reference_file_id")
+        return
+
     ref = reference_store.get_file(lookup_cfg.reference_file_id)
     if ref is None or not ref.versions:
         result.errors.append(f"{node_label}: reference file '{lookup_cfg.reference_file_id}' does not exist")

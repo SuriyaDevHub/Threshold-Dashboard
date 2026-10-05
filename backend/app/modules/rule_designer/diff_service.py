@@ -38,12 +38,22 @@ def _node_signatures(rule: Optional[Rule], node_type: NodeType) -> List[str]:
     return out
 
 
+def _lookup_source_label(lookup) -> str:
+    """A reference-file-id for "file"-sourced lookups, or a stand-in label
+    for day-partitioned ones (which have no reference_file_id at all) —
+    never None, so these sets are always sortable even when a workflow
+    mixes both kinds of LOOKUP node."""
+    if lookup.reference_source == "day_partitioned":
+        return f"day-partitioned:{lookup.day_partition_path_template}"
+    return lookup.reference_file_id or ""
+
+
 def enrichment_diff(before: Optional[Rule], after: Optional[Rule]) -> dict:
     before_nodes = {n.id: n for n in before.workflow.nodes} if before else {}
     after_nodes = {n.id: n for n in after.workflow.nodes} if after else {}
-    before_lookups = {n.lookup.reference_file_id for n in before_nodes.values()
+    before_lookups = {_lookup_source_label(n.lookup) for n in before_nodes.values()
                        if n.type in (NodeType.LOOKUP, NodeType.ENRICHMENT) and n.lookup} if before else set()
-    after_lookups = {n.lookup.reference_file_id for n in after_nodes.values()
+    after_lookups = {_lookup_source_label(n.lookup) for n in after_nodes.values()
                       if n.type in (NodeType.LOOKUP, NodeType.ENRICHMENT) and n.lookup} if after else set()
     return {
         "added": sorted(after_lookups - before_lookups),
