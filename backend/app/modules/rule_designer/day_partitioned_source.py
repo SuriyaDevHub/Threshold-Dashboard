@@ -24,11 +24,25 @@ from datetime import datetime
 from itertools import chain
 from typing import Dict, List, Optional, Tuple
 
+from app.modules.rule_designer import lookup_engine
+from app.modules.rule_designer.models import LookupConfig
+
 _ENCODINGS_TO_TRY = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
 _MAX_HEADER_SCAN_LINES = 2000
 
 _cache_lock = threading.Lock()
 _cache: Dict[str, Tuple[float, List[dict]]] = {}  # resolved path -> (mtime, rows)
+
+# Built LookupIndex cache — the actual fix for the per-trade slowdown vs.
+# the legacy RiverIndex: that class builds its by_uti dict once per day
+# and reuses it for every subsequent trade (O(1) per lookup); without
+# this, _build_indexes() would call lookup_engine.build_index() fresh on
+# every single evaluate_record() call even though load_day_rows() above
+# already has the raw rows cached. Keyed by (resolved path,
+# lookup_engine.cache_signature(config)) so two LOOKUP nodes sharing a
+# day's file with different join keys never collide.
+_index_cache_lock = threading.Lock()
+_index_cache: Dict[Tuple[str, tuple], Tuple[float, "lookup_engine.LookupIndex"]] = {}
 
 
 def parse_day(value: Optional[str]) -> Optional[datetime]:
@@ -112,3 +126,29 @@ def load_day_rows(template: str, day_value: Optional[str], key_columns: List[str
     with _cache_lock:
         _cache[path] = (mtime, rows)
     return rows
+
+
+def get_day_index(template: str, day_value: Optional[str], config: LookupConfig) -> "lookup_engine.LookupIndex":
+    """The built LookupIndex for the file `day_value` resolves to, cached
+    per (resolved path, mtime, join signature) — so repeated
+    run_workflow() calls for the same day (e.g. every trade in
+    evaluate_record()'s per-trade loop) reuse the same index object
+    instead of rebuilding it from scratch each time, the same O(1)-after-
+    first-build shape RiverIndex already has. Never raises — a day that
+    doesn't parse or has no file yields an index built from []."""
+    path = resolve_path(template, day_value)
+    key_columns = [jk["reference"] for jk in config.join_keys]
+    if path is None or not os.path.exists(path):
+        return lookup_engine.build_index([], config)
+    mtime = os.path.getmtime(path)
+    sig = lookup_engine.cache_signature(config)
+    cache_key = (path, sig)
+    with _index_cache_lock:
+        cached = _index_cache.get(cache_key)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+    rows = load_day_rows(template, day_value, key_columns)
+    index = lookup_engine.build_index(rows, config)
+    with _index_cache_lock:
+        _index_cache[cache_key] = (mtime, index)
+    return index

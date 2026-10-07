@@ -18,7 +18,9 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from app.modules.rule_designer import calc_ops, condition_engine, day_partitioned_source, expr_engine, lookup_engine
+from app.modules.rule_designer import (
+    calc_ops, condition_engine, day_partitioned_source, expr_engine, lookup_engine, reference_store,
+)
 from app.modules.rule_designer.transform_ops import apply_transform_op
 from app.modules.rule_designer.models import (
     DryRunSummary, EnrichmentDiagnostic, LookupType, NodeType, RecordResult, RecordTraceStep,
@@ -210,25 +212,35 @@ def _build_indexes(workflow: Workflow, rows: List[dict], reference_loader: Refer
                 # shared reference file — prime every distinct day seen in
                 # this batch up front (mirrors the legacy RiverIndex's own
                 # prime_days()), so the per-record loop in run_workflow()
-                # never does a cold file read mid-batch.
-                key_columns = [jk["reference"] for jk in cfg.join_keys]
+                # never does a cold file read mid-batch. get_day_index()
+                # caches the BUILT index per (path, mtime), not just the
+                # raw rows — see its own docstring for why that matters:
+                # run_workflow() runs fresh on every single
+                # product_engine.evaluate_record() call (once per trade in
+                # live validation), so without this the index would be
+                # rebuilt from scratch on every trade regardless.
                 days = {r.get(cfg.day_partition_field) for r in rows if r.get(cfg.day_partition_field)}
                 day_indexes = {
-                    day: lookup_engine.build_index(
-                        day_partitioned_source.load_day_rows(cfg.day_partition_path_template, day, key_columns),
-                        cfg,
-                    )
+                    day: day_partitioned_source.get_day_index(cfg.day_partition_path_template, day, cfg)
                     for day in days
                 }
                 indexes[node.id] = _NodeIndex(day_indexes=day_indexes, day_field=cfg.day_partition_field)
                 continue
 
-            ref_rows = reference_loader(cfg.reference_file_id, cfg.reference_version) or []
-            idx = lookup_engine.build_index(ref_rows, cfg)
+            # reference_store.get_lookup_index() caches the BUILT index
+            # (not just rows) per (file_id, version, join signature) —
+            # same reasoning as the day-partitioned branch above. This
+            # bypasses the injected `reference_loader` for this branch;
+            # every real caller already passes reference_store.reference_loader
+            # (confirmed — nothing else implements it), so this is the
+            # same data, just through the cached path instead of an
+            # uncached S3 round trip on every single call.
+            idx = reference_store.get_lookup_index(cfg.reference_file_id, cfg.reference_version, cfg) \
+                or lookup_engine.build_index([], cfg)
             fb_idx = None
             if cfg.fallback_reference_file_id:
-                fb_rows = reference_loader(cfg.fallback_reference_file_id, None) or []
-                fb_idx = lookup_engine.build_index(fb_rows, cfg)
+                fb_idx = reference_store.get_lookup_index(cfg.fallback_reference_file_id, None, cfg) \
+                    or lookup_engine.build_index([], cfg)
             indexes[node.id] = _NodeIndex(lookup_idx=idx, fallback_idx=fb_idx)
     return indexes
 
@@ -336,13 +348,13 @@ def run_workflow(
                         # A day not seen while priming (e.g. a blank/odd
                         # value that didn't match the batch's distinct-day
                         # set) — build it fresh rather than treat it as an
-                        # unconditional miss.
-                        cfg = node.lookup
-                        key_columns = [jk["reference"] for jk in cfg.join_keys]
-                        day_rows = day_partitioned_source.load_day_rows(
-                            cfg.day_partition_path_template, day_value, key_columns,
+                        # unconditional miss. get_day_index() still goes
+                        # through its own (path, mtime)-keyed cache, so a
+                        # second record with this same day_value doesn't
+                        # pay this cost again either.
+                        day_idx = day_partitioned_source.get_day_index(
+                            node.lookup.day_partition_path_template, day_value, node.lookup,
                         )
-                        day_idx = lookup_engine.build_index(day_rows, cfg)
                         nidx.day_indexes[day_value] = day_idx
                     outcome = lookup_engine.apply_lookup(wr, day_idx, None)
                 else:

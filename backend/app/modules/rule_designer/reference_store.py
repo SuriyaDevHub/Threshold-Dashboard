@@ -12,15 +12,48 @@ from __future__ import annotations
 import csv
 import io
 import json
+import threading
 import time
 import uuid
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
-from app.modules.rule_designer import s3_store
-from app.modules.rule_designer.models import FieldType, ReferenceFile, ReferenceFileVersion
+from app.modules.rule_designer import lookup_engine, s3_store
+from app.modules.rule_designer.models import FieldType, LookupConfig, ReferenceFile, ReferenceFileVersion
 from app.modules.rule_designer.schema import infer_schema
 
 BASE_PREFIX = "reference_data/"
+
+# --------------------------------------------------------------------------
+# Hot-path caches for get_lookup_index() — the fast path
+# workflow_engine._build_indexes() uses instead of reference_loader() +
+# lookup_engine.build_index(), since run_workflow() (and therefore these
+# lookups) runs fresh on every product_engine.evaluate_record() call, i.e.
+# once per trade in live validation. Without this, every trade re-fetches
+# the index AND the actual rows from S3 and rebuilds the lookup dict from
+# scratch — exactly the per-trade cost the legacy RiverIndex-based
+# validators never paid (they cache their built index once per day).
+#
+# Two tiers, because a reference file's VERSION CONTENT is immutable once
+# created — upload_version()/sync_now() always mint a new version number,
+# never overwrite an existing one:
+#   - which version is "latest" -> bounded-staleness TTL+ETag, same shape
+#     as yaml_service._load_plain_rules_cached() (so a newly-uploaded
+#     version is picked up within the TTL window, same as a rule edit).
+#   - rows/built index for one concrete (file_id, version) -> cached
+#     forever once fetched, since that content can never change.
+#
+# Never used by a write path (upload_version()/configure_source()/
+# sync_now()/delete_file() all still call the always-fresh _load_index()
+# directly) — a read-modify-write there must never be based on stale data.
+_INDEX_CACHE_TTL_SECONDS = 30.0
+_index_cache_lock = threading.Lock()
+_index_cache_state: Optional[Tuple[Optional[str], float, Dict[str, dict]]] = None  # (etag, cached_at_monotonic, data)
+
+_rows_cache_lock = threading.Lock()
+_rows_cache: Dict[Tuple[str, int], List[dict]] = {}  # (file_id, version) -> rows
+
+_lookup_index_cache_lock = threading.Lock()
+_lookup_index_cache: Dict[Tuple[str, int, tuple], "lookup_engine.LookupIndex"] = {}  # (file_id, version, join sig) -> index
 
 
 def _index_path() -> str:
@@ -36,6 +69,30 @@ def _load_index() -> Dict[str, dict]:
 
 def _save_index(idx: Dict[str, dict]) -> None:
     s3_store.put_text(_index_path(), json.dumps(idx, indent=2))
+
+
+def _load_index_cached() -> Dict[str, dict]:
+    """Bounded-staleness read of the reference-file index — used only by
+    get_lookup_index()'s "which version is latest" resolution. Mirrors
+    yaml_service._load_plain_rules_cached()'s shape exactly (see this
+    module's cache docstring above for why this is safe: never used by a
+    write path)."""
+    global _index_cache_state
+    now = time.monotonic()
+    with _index_cache_lock:
+        if _index_cache_state is not None and (now - _index_cache_state[1]) < _INDEX_CACHE_TTL_SECONDS:
+            return _index_cache_state[2]
+
+    etag = s3_store.head(_index_path())
+    with _index_cache_lock:
+        if _index_cache_state is not None and _index_cache_state[0] == etag:
+            _index_cache_state = (etag, now, _index_cache_state[2])
+            return _index_cache_state[2]
+
+    data = _load_index()
+    with _index_cache_lock:
+        _index_cache_state = (etag, now, data)
+    return data
 
 
 def parse_csv_text(text: str) -> List[dict]:
@@ -188,6 +245,49 @@ def reference_loader(file_id: str, version: Optional[int] = None) -> Optional[Li
     """`workflow_engine.ReferenceLoader`-shaped accessor, shared by every
     caller that executes a workflow (dry-run, impact analysis, …)."""
     return get_rows(file_id, version)
+
+
+def get_lookup_index(file_id: Optional[str], version: Optional[int],
+                      config: LookupConfig) -> Optional["lookup_engine.LookupIndex"]:
+    """The built LookupIndex for one reference file's (file_id, version) —
+    version=None resolves to "latest" through _load_index_cached(); the
+    concrete version's rows and built index are then cached indefinitely
+    once fetched (see this module's cache docstring above). None if
+    file_id/version doesn't resolve to anything — the internal fast path
+    workflow_engine._build_indexes() uses instead of
+    reference_loader()+lookup_engine.build_index()."""
+    if not file_id:
+        return None
+    idx = _load_index_cached()
+    blob = idx.get(file_id)
+    if not blob or not blob.get("versions"):
+        return None
+    versions = blob["versions"]
+    ver_blob = next((v for v in versions if v["version"] == version), None) if version else versions[-1]
+    if ver_blob is None:
+        return None
+    concrete_version = ver_blob["version"]
+
+    sig = lookup_engine.cache_signature(config)
+    index_cache_key = (file_id, concrete_version, sig)
+    with _lookup_index_cache_lock:
+        cached = _lookup_index_cache.get(index_cache_key)
+        if cached is not None:
+            return cached
+
+    rows_cache_key = (file_id, concrete_version)
+    with _rows_cache_lock:
+        rows = _rows_cache.get(rows_cache_key)
+    if rows is None:
+        text = s3_store.get_text(ver_blob["file_path"])
+        rows = json.loads(text) if text is not None else []
+        with _rows_cache_lock:
+            _rows_cache[rows_cache_key] = rows
+
+    index = lookup_engine.build_index(rows, config)
+    with _lookup_index_cache_lock:
+        _lookup_index_cache[index_cache_key] = index
+    return index
 
 
 def delete_file(file_id: str) -> bool:

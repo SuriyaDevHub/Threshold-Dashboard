@@ -55,12 +55,22 @@ def isolated_storage(tmp_path, monkeypatch):
         dataset_store._MEM.clear()  # noqa: SLF001 — in-memory dataset store is process-global
         dry_run_service._results.clear()  # noqa: SLF001 — in-memory dry-run store is process-global
         yaml_service._rules_cache.clear()  # noqa: SLF001 — bounded-staleness cache is process-global
+        reference_store._index_cache_state = None  # noqa: SLF001 — ditto, reference-file index cache
+        reference_store._rows_cache.clear()  # noqa: SLF001
+        reference_store._lookup_index_cache.clear()  # noqa: SLF001
+        day_partitioned_source._cache.clear()  # noqa: SLF001 — ditto, day-partitioned file/index caches
+        day_partitioned_source._index_cache.clear()  # noqa: SLF001
 
         product_registry.create_product(TEST_PRODUCT, "Test Product", "seeded for tests", "tester")
         yield
         dataset_store._MEM.clear()  # noqa: SLF001
         dry_run_service._results.clear()  # noqa: SLF001
         yaml_service._rules_cache.clear()  # noqa: SLF001
+        reference_store._index_cache_state = None  # noqa: SLF001
+        reference_store._rows_cache.clear()  # noqa: SLF001
+        reference_store._lookup_index_cache.clear()  # noqa: SLF001
+        day_partitioned_source._cache.clear()  # noqa: SLF001
+        day_partitioned_source._index_cache.clear()  # noqa: SLF001
 
 
 def _rule(**kw) -> Rule:
@@ -644,6 +654,118 @@ def test_workflow_lookup_day_partitioned_resolves_each_record_against_its_own_da
     assert summary.lookup_failures == 1  # only record 3's lookup actually missed
     # exactly one load per distinct day during priming (2 days in this batch)
     assert calls["n"] == 2
+
+
+def test_get_day_index_reuses_built_index_until_the_file_changes(tmp_path):
+    day_dir = tmp_path / "20260924"
+    day_dir.mkdir()
+    csv_path = day_dir / "All trades.csv"
+    csv_path.write_text("UTI,Notional\nABC,1000000\n")
+    template = str(tmp_path / "%Y%m%d" / "All trades.csv")
+    cfg = LookupConfig(
+        lookup_type=LookupType.EXACT, reference_source="day_partitioned",
+        day_partition_path_template=template, day_partition_field="d",
+        join_keys=[{"source": "UTI", "reference": "UTI"}],
+        fields=[LookupFieldMap(source_column="Notional", output_field="RiverNotional")],
+    )
+
+    real_build = lookup_engine.build_index
+    calls = {"n": 0}
+
+    def counting_build(rows, config):
+        calls["n"] += 1
+        return real_build(rows, config)
+
+    lookup_engine.build_index = counting_build
+    try:
+        idx1 = day_partitioned_source.get_day_index(template, "2026-09-24", cfg)
+        idx2 = day_partitioned_source.get_day_index(template, "2026-09-24", cfg)
+        assert idx1 is idx2  # same object, not just equal — never rebuilt
+        assert calls["n"] == 1
+
+        csv_path.write_text("UTI,Notional\nABC,1000000\nXYZ,2000000\n")
+        idx3 = day_partitioned_source.get_day_index(template, "2026-09-24", cfg)
+        assert idx3 is not idx1
+        assert calls["n"] == 2
+    finally:
+        lookup_engine.build_index = real_build
+
+
+def test_get_lookup_index_reuses_built_index_within_ttl():
+    ref = reference_store.upload_version("idx_ttl_test", [{"Currency": "USD", "Threshold": 2.0}], "tester")
+    cfg = LookupConfig(
+        lookup_type=LookupType.EXACT,
+        join_keys=[{"source": "currency", "reference": "Currency"}],
+        fields=[LookupFieldMap(source_column="Threshold", output_field="Threshold")],
+    )
+    idx0 = reference_store.get_lookup_index(ref.id, None, cfg)  # warm the cache (real S3 traffic)
+
+    with _S3CallCounter() as counter:
+        idx1 = reference_store.get_lookup_index(ref.id, None, cfg)
+        idx2 = reference_store.get_lookup_index(ref.id, None, cfg)
+    assert idx1 is idx0 is idx2
+    assert counter.n == 0  # fully served from cache, no S3 calls at all
+
+
+def test_get_lookup_index_picks_up_a_new_version_once_stale(monkeypatch):
+    ref = reference_store.upload_version("idx_ttl_test2", [{"Currency": "USD", "Threshold": 2.0}], "tester")
+    cfg = LookupConfig(
+        lookup_type=LookupType.EXACT,
+        join_keys=[{"source": "currency", "reference": "Currency"}],
+        fields=[LookupFieldMap(source_column="Threshold", output_field="Threshold")],
+    )
+    idx1 = reference_store.get_lookup_index(ref.id, None, cfg)
+    assert idx1.reference_rows[0]["Threshold"] == 2.0
+
+    reference_store.upload_version("idx_ttl_test2", [{"Currency": "USD", "Threshold": 9.0}], "tester", file_id=ref.id)
+    monkeypatch.setattr(reference_store, "_INDEX_CACHE_TTL_SECONDS", 0.0)
+    idx2 = reference_store.get_lookup_index(ref.id, None, cfg)
+    assert idx2 is not idx1
+    assert idx2.reference_rows[0]["Threshold"] == 9.0
+
+
+def test_evaluate_record_reuses_day_partitioned_index_across_many_calls(tmp_path):
+    # The actual regression this change fixes: evaluate_record() (the live
+    # per-trade entry point) used to rebuild the whole LookupIndex on every
+    # single call — this asserts it's built once and reused, the same
+    # shape the legacy RiverIndex-based validators already had.
+    day_dir = tmp_path / "20260924"
+    day_dir.mkdir()
+    (day_dir / "All trades.csv").write_text("UTI,Notional\nABC,1000000\n")
+    template = str(tmp_path / "%Y%m%d" / "All trades.csv")
+
+    lookup = LookupConfig(
+        lookup_type=LookupType.EXACT, reference_source="day_partitioned",
+        day_partition_path_template=template, day_partition_field="OMRCTRADECLOSEOFBUSINESSDATE",
+        join_keys=[{"source": "UTI", "reference": "UTI"}],
+        fields=[LookupFieldMap(source_column="Notional", output_field="RiverNotional")],
+    )
+    rule = _rule(rule_id="PERFCHECK1", name="PERFCHECK1", workflow=Workflow(
+        nodes=[WorkflowNode(id="in", type=NodeType.INPUT), WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup)],
+        edges=[WorkflowEdge(source="in", target="lk")],
+    ))
+    rule_store.upsert_rule(rule, "tester")
+    rule.status = RuleStatus.PUBLISHED
+    rule_store.upsert_rule(rule, "tester")
+
+    real_build = lookup_engine.build_index
+    calls = {"n": 0}
+
+    def counting_build(rows, config):
+        calls["n"] += 1
+        return real_build(rows, config)
+
+    lookup_engine.build_index = counting_build
+    try:
+        for i in range(20):
+            result = product_engine.evaluate_record(
+                TEST_PRODUCT, {"trade_id": i, "UTI": "ABC", "OMRCTRADECLOSEOFBUSINESSDATE": "2026-09-24"}, "tester",
+            )
+            assert result.matched is True
+    finally:
+        lookup_engine.build_index = real_build
+
+    assert calls["n"] == 1  # built once (first trade), reused for every subsequent trade
 
 
 def test_dry_run_explainability_keeps_matches_past_the_sample_cap():

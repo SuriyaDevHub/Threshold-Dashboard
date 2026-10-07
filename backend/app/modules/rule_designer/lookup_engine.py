@@ -10,6 +10,7 @@ list-of-dict rows, consistent with the rest of this codebase (no pandas).
 from __future__ import annotations
 
 import datetime as _dt
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -26,6 +27,21 @@ from app.modules.rule_designer.transform_ops import apply_transform_op
 # would let the second silently clobber the first.
 def self_group_agg_key(output_field: str) -> str:
     return f"__self_group_agg::{output_field}"
+
+
+def cache_signature(config: LookupConfig) -> tuple:
+    """A hashable key for "which exact-match shape is this LookupIndex
+    built for" — lookup_type + join_keys (source/reference/transform) —
+    so a cache shared across LOOKUP nodes (day_partitioned_source.py,
+    reference_store.py) never returns one node's index to another node
+    pointing at the same file/day but with different join keys."""
+    return (
+        config.lookup_type.value,
+        tuple(
+            (jk.get("source"), jk.get("reference"), json.dumps(jk.get("transform"), sort_keys=True))
+            for jk in config.join_keys
+        ),
+    )
 
 
 def _key_tuple(row: dict, join_keys: List[Dict[str, Any]], side: str) -> Tuple[Any, ...]:
