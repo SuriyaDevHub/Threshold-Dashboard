@@ -108,18 +108,68 @@ def _save(data: Dict[str, dict]) -> None:
     s3_store.put_text(REGISTRY_KEY, json.dumps(data, indent=2))
 
 
+# Bounded-staleness read cache — product_engine.evaluate_record() (the
+# live per-trade entry point) calls get_product() on every single trade;
+# without this it was the last uncached S3 round trip left in that path
+# after the LOOKUP-index caching fix (yaml_service's rules cache and
+# reference_store's reference-index cache already had this shape — see
+# yaml_service._load_plain_rules_cached() for the pattern this mirrors).
+# Every write path (create_product()/configure_fail_safe()/set_enabled()/
+# set_migration_status()/rename_product()) still calls the always-fresh
+# _load() directly under _write_lock for its own read-modify-write, so
+# that part is never based on stale data — then calls
+# _refresh_load_cache() right after _save() so a read immediately after
+# a write sees it too, instead of up to 30s of stale cached data.
+_LOAD_CACHE_TTL_SECONDS = 30.0
+_load_cache_lock = threading.Lock()
+_load_cache_state: Optional[Tuple[Optional[str], float, Dict[str, dict]]] = None  # (etag, cached_at_monotonic, data)
+
+
+def _load_cached() -> Dict[str, dict]:
+    global _load_cache_state
+    now = time.monotonic()
+    with _load_cache_lock:
+        if _load_cache_state is not None and (now - _load_cache_state[1]) < _LOAD_CACHE_TTL_SECONDS:
+            return _load_cache_state[2]
+
+    etag = s3_store.head(REGISTRY_KEY)
+    with _load_cache_lock:
+        if _load_cache_state is not None and _load_cache_state[0] == etag:
+            _load_cache_state = (etag, now, _load_cache_state[2])
+            return _load_cache_state[2]
+
+    data = _load()  # may itself write once (auto-seeding a newly-added ASSET_CLASSES code)
+    etag = s3_store.head(REGISTRY_KEY)  # re-check: _load() above may have just changed it
+    with _load_cache_lock:
+        _load_cache_state = (etag, now, data)
+    return data
+
+
+def _refresh_load_cache(data: Dict[str, dict]) -> None:
+    """Called by every write function right after its own _save(data) —
+    without this, a write followed immediately by a get_product()/
+    list_products() read could return up-to-30s-stale pre-write data
+    (unlike yaml_service's rules cache, which this mirrors: its
+    _atomic_write() refreshes the cache the same way, right after its own
+    write, using the write's own fresh ETag)."""
+    global _load_cache_state
+    etag = s3_store.head(REGISTRY_KEY)
+    with _load_cache_lock:
+        _load_cache_state = (etag, time.monotonic(), data)
+
+
 def list_products() -> List[Product]:
-    return sorted((Product.model_validate(v) for v in _load().values()), key=lambda p: p.code)
+    return sorted((Product.model_validate(v) for v in _load_cached().values()), key=lambda p: p.code)
 
 
 def get_product(code: str) -> Optional[Product]:
-    data = _load()
+    data = _load_cached()
     blob = data.get(code.upper())
     return Product.model_validate(blob) if blob else None
 
 
 def is_known_product(code: str) -> bool:
-    return code.upper() in _load()
+    return code.upper() in _load_cached()
 
 
 def create_product(code: str, name: str, description: str, actor: str,
@@ -135,6 +185,7 @@ def create_product(code: str, name: str, description: str, actor: str,
                            disabled_reason_code=disabled_reason_code)
         data[code] = product.model_dump(mode="json")
         _save(data)
+        _refresh_load_cache(data)
         # A deliberate (re-)registration of this code overrides any earlier
         # rename that tombstoned it — otherwise it would just get deleted
         # again by the next reconciliation pass.
@@ -159,6 +210,7 @@ def configure_fail_safe(code: str, on_no_match: str, unmatched_reason_code: Opti
         data[code]["updated_by"] = actor
         data[code]["updated_at"] = time.time()
         _save(data)
+        _refresh_load_cache(data)
         return Product.model_validate(data[code])
 
 
@@ -172,6 +224,7 @@ def set_enabled(code: str, enabled: bool, actor: str) -> Product:
         data[code]["updated_by"] = actor
         data[code]["updated_at"] = time.time()
         _save(data)
+        _refresh_load_cache(data)
         return Product.model_validate(data[code])
 
 
@@ -185,6 +238,7 @@ def set_migration_status(code: str, status: MigrationStatus, actor: str) -> Prod
         data[code]["updated_by"] = actor
         data[code]["updated_at"] = time.time()
         _save(data)
+        _refresh_load_cache(data)
         return Product.model_validate(data[code])
 
 
@@ -242,6 +296,7 @@ def rename_product(old_code: str, new_code: str, actor: str) -> Tuple[Product, b
             del data[old_code]
             _mark_removed(old_code)
         _save(data)
+        _refresh_load_cache(data)
         return Product.model_validate(data[new_code]), merged
 
 

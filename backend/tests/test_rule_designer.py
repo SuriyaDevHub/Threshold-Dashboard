@@ -60,6 +60,7 @@ def isolated_storage(tmp_path, monkeypatch):
         reference_store._lookup_index_cache.clear()  # noqa: SLF001
         day_partitioned_source._cache.clear()  # noqa: SLF001 — ditto, day-partitioned file/index caches
         day_partitioned_source._index_cache.clear()  # noqa: SLF001
+        product_registry._load_cache_state = None  # noqa: SLF001 — ditto, product registry cache
 
         product_registry.create_product(TEST_PRODUCT, "Test Product", "seeded for tests", "tester")
         yield
@@ -71,6 +72,7 @@ def isolated_storage(tmp_path, monkeypatch):
         reference_store._lookup_index_cache.clear()  # noqa: SLF001
         day_partitioned_source._cache.clear()  # noqa: SLF001
         day_partitioned_source._index_cache.clear()  # noqa: SLF001
+        product_registry._load_cache_state = None  # noqa: SLF001
 
 
 def _rule(**kw) -> Rule:
@@ -1528,6 +1530,20 @@ def test_product_enable_disable():
     assert product_registry.get_product(TEST_PRODUCT).enabled is False
     product_registry.set_enabled(TEST_PRODUCT, True, "admin")
     assert product_registry.get_product(TEST_PRODUCT).enabled is True
+
+
+def test_set_enabled_refreshes_cache_so_read_after_write_is_never_stale():
+    # Regression for the bounded-staleness read cache added to speed up
+    # evaluate_record()'s per-trade get_product() call: within the TTL
+    # window, get_product()/list_products()/is_known_product() must still
+    # see a write that just happened, not up to 30s-old cached data.
+    product_registry.get_product(TEST_PRODUCT)  # warm the cache
+    product_registry.set_enabled(TEST_PRODUCT, False, "admin")
+    with _S3CallCounter() as counter:
+        assert product_registry.get_product(TEST_PRODUCT).enabled is False
+        assert product_registry.is_known_product(TEST_PRODUCT) is True
+        assert any(p.code == TEST_PRODUCT and p.enabled is False for p in product_registry.list_products())
+    assert counter.n == 0  # served from the refreshed cache, no extra S3 calls
 
 
 def test_product_create_duplicate_rejected():
