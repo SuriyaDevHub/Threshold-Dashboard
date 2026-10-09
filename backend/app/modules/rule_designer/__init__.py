@@ -24,7 +24,7 @@ from pydantic import BaseModel
 
 from app.core import store as dataset_store
 from app.modules.rule_designer import (
-    audit_service, diff_service, dry_run_service, explain_service,
+    audit_service, day_partitioned_source, diff_service, dry_run_service, explain_service,
     nlp_parser, product_engine, product_registry, reference_store, rule_store, rule_usage_service,
     validation_service, version_service, yaml_service,
 )
@@ -512,6 +512,19 @@ async def delete_reference_file(file_id: str, actor: str = "unknown"):
         raise HTTPException(404, "not found")
     audit_service.log(actor, "DELETE", detail=f"deleted reference file '{file_id}'", lookup_files=[file_id])
     return {"deleted": True}
+
+
+@router.get("/lookup/day-partitioned/columns")
+async def day_partitioned_columns(path_template: str, day_value: str):
+    """Lets LookupConfigForm.jsx populate a day-partitioned LOOKUP node's
+    join-key/enrich-field pickers from the real column names in the
+    resolved day's file, instead of the admin hand-typing a column name
+    blind — see day_partitioned_source.peek_columns(). Read-only, no
+    _require() gate (matches every other read-only GET in this module,
+    e.g. /datasets/{id}/schema) — never raises, errors come back as a
+    field in the body so the UI can fall back to free text."""
+    columns, error = day_partitioned_source.peek_columns(path_template, day_value)
+    return {"columns": columns, "error": error}
 
 
 # --------------------------------------------------------------------------

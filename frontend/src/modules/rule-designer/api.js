@@ -38,6 +38,8 @@ export const rd = {
       { actor, role, name, path, file_id: fileId, auto_refresh_minutes: autoRefreshMinutes }),
   syncReference: (id, actor) => post(`/reference-files/${id}/sync`, { actor }),
   deleteReference: (id, actor) => del(`/reference-files/${id}`, { actor }),
+  dayPartitionedColumns: (pathTemplate, dayValue) =>
+    get("/lookup/day-partitioned/columns", { path_template: pathTemplate, day_value: dayValue }),
 
   rules: (product) => get("/rules", { product }),
   rule: (id) => get(`/rules/${id}`),

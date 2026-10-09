@@ -574,6 +574,74 @@ def test_load_day_rows_scans_past_preamble_to_find_header(tmp_path):
     assert rows == [{"UTI": "ABC", "Notional": "1000000"}, {"UTI": "XYZ", "Notional": "2000000"}]
 
 
+def test_load_day_rows_strips_whitespace_from_header_names(tmp_path):
+    # Regression for the actual reported bug: a space after the comma in
+    # the header ("UTI, Notional") is a completely ordinary export shape,
+    # but used to produce a row keyed ' Notional' (leading space) that
+    # silently never matched a hand-configured source_column of
+    # "Notional" — the join matched fine, but that one enrichment field
+    # always came back blank even though the column had real data.
+    day_dir = tmp_path / "20260924"
+    day_dir.mkdir()
+    (day_dir / "All trades.csv").write_text("UTI, Notional\nABC,1000000\n")
+    template = str(tmp_path / "%Y%m%d" / "All trades.csv")
+    rows = day_partitioned_source.load_day_rows(template, "2026-09-24", ["UTI"])
+    assert rows == [{"UTI": "ABC", "Notional": "1000000"}]
+
+
+def test_whitespace_dirty_header_enriches_correctly_end_to_end(tmp_path):
+    day_dir = tmp_path / "20260924"
+    day_dir.mkdir()
+    (day_dir / "All trades.csv").write_text("UTI, Notional\nABC,1000000\n")
+    template = str(tmp_path / "%Y%m%d" / "All trades.csv")
+    cfg = LookupConfig(
+        lookup_type=LookupType.EXACT, reference_source="day_partitioned",
+        day_partition_path_template=template, day_partition_field="d",
+        join_keys=[{"source": "UTI", "reference": "UTI"}],
+        fields=[LookupFieldMap(source_column="Notional", output_field="RiverNotional")],
+    )
+    idx = day_partitioned_source.get_day_index(template, "2026-09-24", cfg)
+    outcome = lookup_engine.apply_lookup({"UTI": "ABC"}, idx)
+    assert outcome.status == "matched"
+    assert outcome.fields_added == {"RiverNotional": "1000000"}  # not None
+
+
+def test_peek_columns_returns_the_real_header(tmp_path):
+    day_dir = tmp_path / "20260924"
+    day_dir.mkdir()
+    (day_dir / "All trades.csv").write_text(
+        "River extract — generated 2026-09-24\nUTI,Notional\nABC,1000000\n"
+    )
+    template = str(tmp_path / "%Y%m%d" / "All trades.csv")
+    columns, error = day_partitioned_source.peek_columns(template, "2026-09-24")
+    assert columns == ["UTI", "Notional"]
+    assert error is None
+
+
+def test_peek_columns_strips_whitespace_too(tmp_path):
+    day_dir = tmp_path / "20260924"
+    day_dir.mkdir()
+    (day_dir / "All trades.csv").write_text("UTI, Notional\nABC,1000000\n")
+    template = str(tmp_path / "%Y%m%d" / "All trades.csv")
+    columns, error = day_partitioned_source.peek_columns(template, "2026-09-24")
+    assert columns == ["UTI", "Notional"]
+    assert error is None
+
+
+def test_peek_columns_reports_missing_file(tmp_path):
+    template = str(tmp_path / "%Y%m%d" / "All trades.csv")
+    columns, error = day_partitioned_source.peek_columns(template, "2026-09-24")
+    assert columns == []
+    assert error is not None
+
+
+def test_peek_columns_reports_unparseable_day(tmp_path):
+    template = str(tmp_path / "%Y%m%d" / "All trades.csv")
+    columns, error = day_partitioned_source.peek_columns(template, "not-a-date")
+    assert columns == []
+    assert error is not None
+
+
 def test_load_day_rows_returns_empty_for_missing_file(tmp_path):
     template = str(tmp_path / "%Y%m%d" / "All trades.csv")
     assert day_partitioned_source.load_day_rows(template, "2026-09-24", ["UTI"]) == []

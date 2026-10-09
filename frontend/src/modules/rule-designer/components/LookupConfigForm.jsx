@@ -22,6 +22,18 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
   const canBeDayPartitioned = lookup.lookup_type === "exact" || lookup.lookup_type === "composite";
   const isDayPartitioned = canBeDayPartitioned && lookup.reference_source === "day_partitioned";
 
+  // Day-partitioned has no admin-known file to introspect ahead of time —
+  // its columns are only knowable by actually reading some day's resolved
+  // file, which is what "Load columns" below does on demand (never
+  // automatically: the path template alone doesn't resolve to a file
+  // without a sample day, and we don't want to hit the filesystem on
+  // every keystroke). Until loaded (or if it fails — e.g. no file for
+  // that sample day yet), the pickers fall back to free text.
+  const [daySampleDate, setDaySampleDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [dayColumns, setDayColumns] = useState([]);
+  const [dayColumnsError, setDayColumnsError] = useState(null);
+  const [loadingDayColumns, setLoadingDayColumns] = useState(false);
+
   useEffect(() => { rd.referenceFiles().then((d) => setRefFiles(d.files || [])); }, []);
   useEffect(() => {
     if (lookup.reference_file_id && !isDayPartitioned) {
@@ -30,20 +42,41 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
       setRefDetail(null);
     }
   }, [lookup.reference_file_id, isDayPartitioned]);
+  // A changed path template invalidates whatever columns were loaded for
+  // the previous one — stale column names would otherwise silently keep
+  // populating the pickers for a file that's no longer what's configured.
+  useEffect(() => { setDayColumns([]); setDayColumnsError(null); }, [lookup.day_partition_path_template]);
 
-  // Day-partitioned has no admin-known file to introspect — its columns
-  // are only knowable by actually reading the resolved day's file at
-  // runtime, so join-key/enrich-field pickers fall back to free text.
+  async function loadDayColumns() {
+    if (!lookup.day_partition_path_template) return;
+    setLoadingDayColumns(true);
+    try {
+      const d = await rd.dayPartitionedColumns(lookup.day_partition_path_template, daySampleDate);
+      setDayColumns(d.columns || []);
+      setDayColumnsError(d.error || null);
+    } catch (e) {
+      setDayColumns([]);
+      setDayColumnsError(e?.message || String(e));
+    } finally {
+      setLoadingDayColumns(false);
+    }
+  }
+
   const refColumns = isDayPartitioned ? [] : (refDetail?.versions?.[refDetail.versions.length - 1]?.columns || []);
+  // Day-partitioned's "reference columns" come from the on-demand Load
+  // columns preview instead of an admin-known file — empty until loaded
+  // (or if the preview failed), in which case every picker below falls
+  // back to free text exactly as before.
+  const dayOrRefColumns = isDayPartitioned ? dayColumns : refColumns;
   // self_group has no reference file — a representative row shares the
   // source dataset's own schema, so "fields to enrich with" and "priority
   // field" pick from sourceFields instead of a reference file's columns.
-  const enrichColumns = isSelfGroup ? sourceFields.map((f) => f.field) : refColumns;
+  const enrichColumns = isSelfGroup ? sourceFields.map((f) => f.field) : dayOrRefColumns;
 
   function set(patch) { onChange({ ...lookup, ...patch }); }
 
   function addJoinKey() {
-    set({ join_keys: [...(lookup.join_keys || []), { source: sourceFields[0]?.field || "", reference: refColumns[0] || "" }] });
+    set({ join_keys: [...(lookup.join_keys || []), { source: sourceFields[0]?.field || "", reference: dayOrRefColumns[0] || "" }] });
   }
   function updateJoinKey(i, patch) {
     const jk = [...(lookup.join_keys || [])]; jk[i] = { ...jk[i], ...patch }; set({ join_keys: jk });
@@ -148,6 +181,22 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
             %d (01-31). E.g. "/mnt/river/%Y/%B/trades_%Y%m%d.csv" → "/mnt/river/2026/September/trades_20260924.csv".
             So each record is looked up against its own day's file, however that file's path is actually laid out.
           </p>
+          <div className="lk-row" style={{ marginTop: 10 }}>
+            <label className="control"><span>Sample day (to read column names from)</span>
+              <input type="date" value={daySampleDate} onChange={(e) => setDaySampleDate(e.target.value)} />
+            </label>
+            <button className="btn btn--ghost btn--xs" disabled={!lookup.day_partition_path_template || loadingDayColumns}
+                    onClick={loadDayColumns}>
+              {loadingDayColumns ? "Loading…" : "Load columns"}
+            </button>
+            {dayColumns.length > 0 && <span className="empty-hint">{dayColumns.length} column(s) loaded</span>}
+          </div>
+          {dayColumnsError && (
+            <p className="empty-hint" style={{ color: "var(--breach, #c0392b)" }}>
+              Couldn't read columns for that sample day: {dayColumnsError}. You can still type the column name
+              directly below — it just won't be checked against the real file until this resolves.
+            </p>
+          )}
         </div>
       )}
 
@@ -164,12 +213,12 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
                   ))}
                 </select>
                 <span className="mono">=</span>
-                {isDayPartitioned ? (
+                {isDayPartitioned && dayColumns.length === 0 ? (
                   <input value={jk.reference || ""} placeholder="e.g. UTI"
                          onChange={(e) => updateJoinKey(i, { reference: e.target.value })} />
                 ) : (
                   <select value={jk.reference} onChange={(e) => updateJoinKey(i, { reference: e.target.value })}>
-                    {refColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+                    {dayOrRefColumns.map((c) => <option key={c} value={c}>{c}</option>)}
                   </select>
                 )}
                 <button className="icon-btn" onClick={() => removeJoinKey(i)}><Trash2 size={13} /></button>
@@ -246,7 +295,7 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
         {(lookup.fields || []).map((fm, i) => (
           <div key={i} style={{ border: "1px solid var(--line)", borderRadius: 7, padding: 8, marginBottom: 8 }}>
             <div className="lk-row" style={{ marginBottom: 0 }}>
-              {isDayPartitioned ? (
+              {isDayPartitioned && dayColumns.length === 0 ? (
                 <input value={fm.source_column || ""} placeholder="e.g. Notional"
                        onChange={(e) => updateFieldMap(i, { source_column: e.target.value })} />
               ) : (
@@ -333,7 +382,7 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
             <option value="highest_threshold">Highest threshold</option>
           </select>
           {lookup.priority_strategy !== "first_match" && (
-            isDayPartitioned ? (
+            isDayPartitioned && dayColumns.length === 0 ? (
               <input value={lookup.priority_field || ""} placeholder="priority field…"
                      onChange={(e) => set({ priority_field: e.target.value })} />
             ) : (

@@ -79,28 +79,47 @@ def resolve_path(template: str, day_value: Optional[str]) -> Optional[str]:
     return parsed.strftime(template)
 
 
-def _load_csv(path: str, key_columns: List[str]) -> List[dict]:
-    """Scans for the header row containing any of `key_columns`
-    (generalizes RiverIndex._load_csv's "find the row containing UTI" —
-    real extracts carry a few preamble lines before the real header),
-    then DictReader's the rest. Tries each encoding in turn, exactly like
-    RiverIndex._load_csv."""
+def _find_header_line(fh, key_columns: List[str]) -> Optional[str]:
+    """Scans up to `_MAX_HEADER_SCAN_LINES` lines for the header row,
+    skipping any preamble garbage lines real extracts are known to carry
+    (generalizes RiverIndex._load_csv's "find the row containing UTI").
+    With `key_columns` given, the header row is the first line containing
+    any of them (case-insensitive). With none given (peek_columns() has
+    no join keys configured yet), falls back to "the first line that
+    splits into more than one non-empty field" — good enough to find a
+    real header past a one-column preamble message."""
     wanted = {c.upper() for c in key_columns}
+    for i, line in enumerate(fh):
+        if i >= _MAX_HEADER_SCAN_LINES:
+            break
+        cols = [c.strip().strip('"') for c in line.split(",")]
+        if wanted:
+            if any(c.upper() in wanted for c in cols):
+                return line
+        elif len([c for c in cols if c]) > 1:
+            return line
+    return None
+
+
+def _load_csv(path: str, key_columns: List[str]) -> List[dict]:
+    """Finds the header row (see `_find_header_line`), then DictReader's
+    the rest. Tries each encoding in turn, exactly like RiverIndex.
+    Row keys are whitespace-stripped — an ordinary export shape like a
+    space after the comma in the header ("UTI, Notional") would otherwise
+    produce a row keyed ' Notional', silently never matching a
+    hand-configured source_column of "Notional" (the actual reported
+    bug: lookup matches, but one enrichment field comes back blank even
+    though the column has real data)."""
     last_err: Optional[Exception] = None
     for enc in _ENCODINGS_TO_TRY:
         try:
             with open(path, encoding=enc, newline="") as fh:
-                header_line = None
-                for i, line in enumerate(fh):
-                    if i >= _MAX_HEADER_SCAN_LINES:
-                        break
-                    cols = [c.strip().strip('"') for c in line.split(",")]
-                    if any(c.strip().upper() in wanted for c in cols):
-                        header_line = line
-                        break
+                header_line = _find_header_line(fh, key_columns)
                 if header_line is None:
+                    wanted = {c.upper() for c in key_columns}
                     raise ValueError(f"no header row found containing any of {sorted(wanted)}")
-                return list(csv.DictReader(chain([header_line], fh)))
+                rows = list(csv.DictReader(chain([header_line], fh)))
+                return [{(k.strip() if isinstance(k, str) else k): v for k, v in row.items()} for row in rows]
         except UnicodeDecodeError as exc:
             last_err = exc
             continue
@@ -126,6 +145,35 @@ def load_day_rows(template: str, day_value: Optional[str], key_columns: List[str
     with _cache_lock:
         _cache[path] = (mtime, rows)
     return rows
+
+
+def peek_columns(template: str, day_value: Optional[str]) -> Tuple[List[str], Optional[str]]:
+    """(columns, error) for the file `day_value` resolves to — reads just
+    enough to find the header row and return its (whitespace-stripped)
+    column names, so LookupConfigForm.jsx can populate join-key/enrich-
+    field pickers instead of making the admin hand-type a column name
+    blind (the free-text entry that caused the mismatched-header bug
+    `_load_csv` now guards against). Never raises — a bad path/day/file
+    is reported back as an error string, not an exception, since this is
+    a best-effort UX helper and the UI keeps its free-text fallback."""
+    path = resolve_path(template, day_value)
+    if path is None:
+        return [], f"'{day_value}' is not a recognizable date"
+    if not os.path.exists(path):
+        return [], f"no file at '{path}'"
+    last_err: Optional[Exception] = None
+    for enc in _ENCODINGS_TO_TRY:
+        try:
+            with open(path, encoding=enc, newline="") as fh:
+                header_line = _find_header_line(fh, [])
+                if header_line is None:
+                    return [], f"no header row found in '{path}'"
+                reader = csv.reader([header_line])
+                return [c.strip() for c in next(reader)], None
+        except UnicodeDecodeError as exc:
+            last_err = exc
+            continue
+    return [], str(last_err) if last_err else f"could not read '{path}'"
 
 
 def get_day_index(template: str, day_value: Optional[str], config: LookupConfig) -> "lookup_engine.LookupIndex":
