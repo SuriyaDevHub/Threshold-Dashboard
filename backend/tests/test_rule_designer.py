@@ -519,6 +519,38 @@ def test_self_group_lookup_two_aggregates_on_same_source_column_dont_clobber():
     assert fr["deal_count"] == 3.0
 
 
+def test_parse_csv_text_strips_whitespace_from_header_names():
+    # Regression: a space after the comma in the header ("Currency,
+    # Threshold") is a completely ordinary export shape, but used to
+    # produce a row keyed ' Threshold' (leading space) that silently
+    # never matched a LOOKUP field mapping's source_column of
+    # "Threshold" — picked from the UI's own column dropdown, which is
+    # itself built from these same (dirty) keys, so it matched AT
+    # CONFIG TIME but silently broke the moment the file was next
+    # uploaded/synced with even slightly different header whitespace.
+    rows = reference_store.parse_csv_text("Currency, Threshold\nUSD,5\n")
+    assert rows == [{"Currency": "USD", "Threshold": "5"}]
+
+
+def test_dirty_header_reference_file_enriches_correctly_into_condition_node():
+    # The actual reported regression, reproduced end-to-end exactly as a
+    # real rule hits it: LOOKUP -> CALCULATE -> CONDITION, with the
+    # reference file's own header carrying ordinary incidental whitespace
+    # (as parse_csv_text() would actually hand upload_version() — not
+    # hand-built clean dicts). Before the fix, Threshold enriched to None
+    # even though the join matched, so Deviation > Threshold always
+    # evaluated false and the rule never matched.
+    rows = reference_store.parse_csv_text("Currency, Threshold\nUSD,2.0\nEUR,3.0\n")
+    ref = reference_store.upload_version("ccy_ref_dirty", rows, "tester")
+    wf = _demo_workflow(ref.id)
+    records = [{"trade_id": 1, "currency": "USD", "Deviation": 6.0}]
+    results, _, summary = workflow_engine.run_workflow(wf, records, reference_store.reference_loader,
+                                                         record_id_field="trade_id")
+    assert summary.matched == 1
+    assert results[0].final_record["Threshold"] == "2.0"
+    assert results[0].outcome.get("Alert") is True
+
+
 def test_workflow_engine_end_to_end(tmp_path):
     ref = reference_store.upload_version(
         "ccy_ref", [{"Currency": "USD", "Threshold": 2.0}, {"Currency": "EUR", "Threshold": 3.0}], "tester")

@@ -96,8 +96,19 @@ def _load_index_cached() -> Dict[str, dict]:
 
 
 def parse_csv_text(text: str) -> List[dict]:
+    """Row keys are whitespace-stripped — an ordinary export shape like a
+    space after the comma in the header ("Currency, Threshold") would
+    otherwise produce a row keyed ' Threshold', which a LOOKUP node's
+    source_column (picked from the UI's column dropdown, itself built
+    from these same keys via infer_schema()) would still match AT THE
+    TIME it's configured, but silently stop matching the moment this file
+    is next uploaded/synced with even slightly different incidental
+    whitespace in its header — a real risk for a path-sourced file
+    production re-exports on its own schedule (see configure_source()/
+    sync_now()). Same fix, same rationale, as
+    day_partitioned_source._load_csv()."""
     reader = csv.DictReader(io.StringIO(text))
-    return [dict(row) for row in reader]
+    return [{(k.strip() if isinstance(k, str) else k): v for k, v in row.items()} for row in reader]
 
 
 def _rows_path(file_id: str, version: int) -> str:
