@@ -43,7 +43,32 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
     setLoading(true);
     try {
       const [r, ds, m] = await Promise.all([rd.rule(ruleId), rd.datasets(), rd.meta()]);
-      setRule(r); setDatasets(ds.datasets || []); setDatasetId(r.dataset_id || ds.datasets?.[0]?.id || "");
+      setRule(r); setDatasets(ds.datasets || []);
+      // dataset_id is pure dev/test convenience (never read by
+      // evaluate_record()/evaluate_product() — see rule_store.py), and
+      // Data Fetch's dataset cache can be emptied by a backend restart.
+      // A bound id that's no longer in the current dataset list is dead
+      // weight: fall back to the most recently pulled dataset (datasets
+      // come back sorted newest-first) rather than leaving the view
+      // stuck pointing at something that will 404 on every schema/dry-run
+      // call, and say so — this never touches the rule itself unless an
+      // admin explicitly clicks Save afterward.
+      const bound = r.dataset_id;
+      const boundStillAvailable = !!bound && (ds.datasets || []).some((d) => d.id === bound);
+      const fallbackId = ds.datasets?.[0]?.id || "";
+      setDatasetId(boundStillAvailable ? bound : fallbackId);
+      if (bound && !boundStillAvailable) {
+        setNotice({
+          kind: "breach",
+          text: fallbackId
+            ? `This rule's bound dataset ('${bound}') is no longer available — switched to the most `
+              + "recently pulled Data Fetch dataset for dry-run and field lookups. The rule's own logic "
+              + "is unaffected; pick a different dataset above if you'd rather, or Save (admin) to make "
+              + "the switch stick."
+            : `This rule's bound dataset ('${bound}') is no longer available, and there are no datasets `
+              + "currently in Data Fetch to fall back to — pull one in Data Fetch first.",
+        });
+      }
       setMeta(m);
       setDirty(false);
     } catch (e) { setError(e); } finally { setLoading(false); }
@@ -203,8 +228,16 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
         <div className="controls controls--row">
           <DatasetSelector label="Bound dataset" datasets={datasets} value={datasetId}
                             onChange={(v) => {
-                              if (!isAdmin) return;
-                              setDatasetId(v); setDirty(true);
+                              // Picking a dataset here only changes local view state
+                              // (schema for field pickers, and which dataset Dry Run
+                              // uses) — it's never sent to the server unless Save is
+                              // clicked, which stays admin-only below. A User viewing
+                              // a published rule needs this to dry-run it at all once
+                              // the originally-bound dataset has expired, so only
+                              // marking the rule itself dirty (and showing Save) is
+                              // gated to admins, not the selection itself.
+                              setDatasetId(v);
+                              if (isAdmin) setDirty(true);
                               // A validation error naming the OLD dataset_id (e.g.
                               // "dataset 'ds_...' not found") stays on screen otherwise —
                               // it was true of the binding that's now being replaced, not

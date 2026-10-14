@@ -674,7 +674,22 @@ async def validate_rule_endpoint(rule_id: str, actor: str = "unknown", role: Rol
             ds_result = validation_service.validate_dataset(rows, rule.required_columns)
         else:
             ds_result = validation_service.ValidationResult()
-            ds_result.errors.append(f"dataset '{rule.dataset_id}' not found")
+            # dataset_id is pure dev/test convenience — rule_store.py's own
+            # _IGNORED_FOR_STRUCTURAL_DIFF comment spells it out: it's
+            # never read by evaluate_record()/evaluate_product(), which
+            # both take a dataset_id as an explicit call argument
+            # independent of this stored value. A stale pointer into the
+            # server-side dataset cache (expired, or the backend restarted
+            # with an empty cache — see app/core/store.py) says nothing
+            # about whether the rule's own workflow logic is correct, so
+            # it's a warning here, not a blocker that keeps a rule stuck
+            # at DRAFT. The workspace UI already lets any role swap in a
+            # currently-available Data Fetch dataset for dry-run/field
+            # lookups regardless of this.
+            ds_result.warnings.append(
+                f"bound dataset '{rule.dataset_id}' is no longer available — pick a current "
+                "Data Fetch dataset in the workspace to dry-run or check field availability; "
+                "this does not affect the rule's own logic")
     else:
         ds_result = validation_service.ValidationResult()
         ds_result.warnings.append("no dataset bound to this rule yet")
