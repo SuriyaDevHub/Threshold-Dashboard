@@ -10,7 +10,6 @@ list-of-dict rows, consistent with the rest of this codebase (no pandas).
 from __future__ import annotations
 
 import datetime as _dt
-import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -29,19 +28,33 @@ def self_group_agg_key(output_field: str) -> str:
     return f"__self_group_agg::{output_field}"
 
 
-def cache_signature(config: LookupConfig) -> tuple:
-    """A hashable key for "which exact-match shape is this LookupIndex
-    built for" — lookup_type + join_keys (source/reference/transform) —
-    so a cache shared across LOOKUP nodes (day_partitioned_source.py,
-    reference_store.py) never returns one node's index to another node
-    pointing at the same file/day but with different join keys."""
-    return (
-        config.lookup_type.value,
-        tuple(
-            (jk.get("source"), jk.get("reference"), json.dumps(jk.get("transform"), sort_keys=True))
-            for jk in config.join_keys
-        ),
-    )
+def cache_signature(config: LookupConfig) -> str:
+    """A hashable key for "is this LookupIndex, AS CACHED, safe to hand to
+    a different LOOKUP node pointing at the same file/day" — used by the
+    index caches in day_partitioned_source.py and reference_store.py.
+
+    MUST cover the config's full content, not just join_keys: a cached
+    LookupIndex stores its own built-against `config`
+    (`LookupIndex.config`), and `apply_lookup()`/`lookup_one()` read
+    `idx.config.fields`/`.missing_strategy`/`.priority_strategy`/
+    `.default_values`/`.flag_field`/`.range_*`/`.date_*` straight off
+    THAT stored config, not off whatever config the current caller
+    passed in. An earlier version of this function only hashed
+    lookup_type + join_keys — the exact-match SHAPE — reasoning that was
+    enough to keep the *index build* correct. It missed that the cached
+    config is reused wholesale for enrichment too: two LOOKUP nodes
+    sharing a reference file/day and join keys but configured with
+    different field mappings (or missing-match/priority handling)
+    collided on the same cache key, and whichever one built the entry
+    first silently had its field mappings served to every other node
+    sharing that key — reproduced live: rule B's lookup returned rule A's
+    enriched field name/value, never its own, even though rule B's own
+    data was genuinely present in the file. Hashing the model's own full
+    serialized content (rather than a hand-picked field list, which is
+    exactly what went stale last time) means a future LookupConfig field
+    is covered automatically without this function needing to be
+    remembered and updated in lockstep."""
+    return config.model_dump_json()
 
 
 def _key_tuple(row: dict, join_keys: List[Dict[str, Any]], side: str) -> Tuple[Any, ...]:

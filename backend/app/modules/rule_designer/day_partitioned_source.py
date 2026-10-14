@@ -40,9 +40,12 @@ _cache: Dict[str, Tuple[float, List[dict]]] = {}  # resolved path -> (mtime, row
 # every single evaluate_record() call even though load_day_rows() above
 # already has the raw rows cached. Keyed by (resolved path,
 # lookup_engine.cache_signature(config)) so two LOOKUP nodes sharing a
-# day's file with different join keys never collide.
+# day's file with ANY config difference (join keys, field mappings,
+# missing-match handling, ...) never collide — see cache_signature()'s
+# own docstring for why this has to be the FULL config, not just the
+# join-key shape.
 _index_cache_lock = threading.Lock()
-_index_cache: Dict[Tuple[str, tuple], Tuple[float, "lookup_engine.LookupIndex"]] = {}
+_index_cache: Dict[Tuple[str, str], Tuple[float, "lookup_engine.LookupIndex"]] = {}
 
 
 def parse_day(value: Optional[str]) -> Optional[datetime]:
@@ -178,7 +181,7 @@ def peek_columns(template: str, day_value: Optional[str]) -> Tuple[List[str], Op
 
 def get_day_index(template: str, day_value: Optional[str], config: LookupConfig) -> "lookup_engine.LookupIndex":
     """The built LookupIndex for the file `day_value` resolves to, cached
-    per (resolved path, mtime, join signature) — so repeated
+    per (resolved path, mtime, config signature) — so repeated
     run_workflow() calls for the same day (e.g. every trade in
     evaluate_record()'s per-trade loop) reuse the same index object
     instead of rebuilding it from scratch each time, the same O(1)-after-

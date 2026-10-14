@@ -793,6 +793,38 @@ def test_get_day_index_reuses_built_index_until_the_file_changes(tmp_path):
         lookup_engine.build_index = real_build
 
 
+def test_get_day_index_never_shares_cache_across_different_field_mappings(tmp_path):
+    # Day-partitioned equivalent of the reference_store collision
+    # regression below — get_day_index() is keyed by the same
+    # lookup_engine.cache_signature(), so two LOOKUP nodes resolving to
+    # the same day's file with the same join key but different field
+    # mappings had the exact same bug.
+    day_dir = tmp_path / "20260924"
+    day_dir.mkdir()
+    (day_dir / "All trades.csv").write_text("UTI,Notional,Limit\nABC,1000000,50\n")
+    template = str(tmp_path / "%Y%m%d" / "All trades.csv")
+    cfg_a = LookupConfig(
+        lookup_type=LookupType.EXACT, reference_source="day_partitioned",
+        day_partition_path_template=template, day_partition_field="d",
+        join_keys=[{"source": "UTI", "reference": "UTI"}],
+        fields=[LookupFieldMap(source_column="Notional", output_field="RuleA_Notional")],
+    )
+    cfg_b = LookupConfig(
+        lookup_type=LookupType.EXACT, reference_source="day_partitioned",
+        day_partition_path_template=template, day_partition_field="d",
+        join_keys=[{"source": "UTI", "reference": "UTI"}],
+        fields=[LookupFieldMap(source_column="Limit", output_field="RuleB_Limit")],
+    )
+    idx_a = day_partitioned_source.get_day_index(template, "2026-09-24", cfg_a)
+    idx_b = day_partitioned_source.get_day_index(template, "2026-09-24", cfg_b)
+    assert idx_a is not idx_b
+
+    outcome_a = lookup_engine.apply_lookup({"UTI": "ABC"}, idx_a)
+    outcome_b = lookup_engine.apply_lookup({"UTI": "ABC"}, idx_b)
+    assert outcome_a.fields_added == {"RuleA_Notional": "1000000"}
+    assert outcome_b.fields_added == {"RuleB_Limit": "50"}
+
+
 def test_get_lookup_index_reuses_built_index_within_ttl():
     ref = reference_store.upload_version("idx_ttl_test", [{"Currency": "USD", "Threshold": 2.0}], "tester")
     cfg = LookupConfig(
@@ -824,6 +856,47 @@ def test_get_lookup_index_picks_up_a_new_version_once_stale(monkeypatch):
     idx2 = reference_store.get_lookup_index(ref.id, None, cfg)
     assert idx2 is not idx1
     assert idx2.reference_rows[0]["Threshold"] == 9.0
+
+
+def test_get_lookup_index_never_shares_cache_across_different_field_mappings():
+    # Regression for a real production incident: two LOOKUP nodes (e.g.
+    # two different rules) pointing at the same reference file/version
+    # with the same join key but DIFFERENT field mappings used to collide
+    # on the same cache entry — lookup_engine.cache_signature() only
+    # hashed lookup_type + join_keys, not the rest of the config, so
+    # whichever node built the cached LookupIndex first had its `fields`
+    # (and missing_strategy/priority_strategy/etc., all read straight off
+    # the CACHED LookupIndex.config by apply_lookup()) silently served to
+    # every other node sharing that key. Symptom matched exactly what was
+    # reported: the lookup "matched", the reference data was genuinely
+    # present, but the enriched field a downstream CONDITION node read
+    # was missing/wrong for some rules and not others, depending on cache
+    # warm-up order.
+    ref = reference_store.upload_version(
+        "shared_ref_diff_fields", [{"Currency": "USD", "Threshold": 2.0, "Limit": 99.0}], "tester")
+    cfg_a = LookupConfig(
+        lookup_type=LookupType.EXACT,
+        join_keys=[{"source": "currency", "reference": "Currency"}],
+        fields=[LookupFieldMap(source_column="Threshold", output_field="RuleA_Threshold")],
+    )
+    cfg_b = LookupConfig(
+        lookup_type=LookupType.EXACT,
+        join_keys=[{"source": "currency", "reference": "Currency"}],
+        fields=[LookupFieldMap(source_column="Limit", output_field="RuleB_Limit")],
+    )
+    idx_a = reference_store.get_lookup_index(ref.id, None, cfg_a)
+    idx_b = reference_store.get_lookup_index(ref.id, None, cfg_b)
+    assert idx_a is not idx_b
+
+    outcome_a = lookup_engine.apply_lookup({"currency": "USD"}, idx_a)
+    outcome_b = lookup_engine.apply_lookup({"currency": "USD"}, idx_b)
+    assert outcome_a.fields_added == {"RuleA_Threshold": 2.0}
+    assert outcome_b.fields_added == {"RuleB_Limit": 99.0}
+
+    # Identical configs still share one cached object — the fix must not
+    # cost the whole point of this cache (avoiding a rebuild per call).
+    idx_a_again = reference_store.get_lookup_index(ref.id, None, cfg_a)
+    assert idx_a_again is idx_a
 
 
 def test_evaluate_record_reuses_day_partitioned_index_across_many_calls(tmp_path):

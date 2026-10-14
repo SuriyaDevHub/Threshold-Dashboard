@@ -53,7 +53,7 @@ _rows_cache_lock = threading.Lock()
 _rows_cache: Dict[Tuple[str, int], List[dict]] = {}  # (file_id, version) -> rows
 
 _lookup_index_cache_lock = threading.Lock()
-_lookup_index_cache: Dict[Tuple[str, int, tuple], "lookup_engine.LookupIndex"] = {}  # (file_id, version, join sig) -> index
+_lookup_index_cache: Dict[Tuple[str, int, str], "lookup_engine.LookupIndex"] = {}  # (file_id, version, config sig) -> index
 
 
 def _index_path() -> str:

@@ -228,7 +228,7 @@ def _build_indexes(workflow: Workflow, rows: List[dict], reference_loader: Refer
                 continue
 
             # reference_store.get_lookup_index() caches the BUILT index
-            # (not just rows) per (file_id, version, join signature) —
+            # (not just rows) per (file_id, version, config signature) —
             # same reasoning as the day-partitioned branch above. This
             # bypasses the injected `reference_loader` for this branch;
             # every real caller already passes reference_store.reference_loader
