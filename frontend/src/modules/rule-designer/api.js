@@ -14,13 +14,10 @@ export const rd = {
 
   products: () => get("/products"),
   product: (code) => get(`/products/${code}`),
-  createProduct: (actor, role, code, name, description, metric) =>
-    post("/products", { actor, role, code, name, description, metric: metric || null }),
+  createProduct: (actor, role, code, name, description) => post("/products", { actor, role, code, name, description }),
   setProductEnabled: (actor, role, code, enabled) => post(`/products/${code}/enabled`, { actor, role, enabled }),
   setProductMigrationStatus: (actor, role, code, migration_status) =>
     post(`/products/${code}/migration-status`, { actor, role, migration_status }),
-  setProductMetric: (actor, role, code, metric) =>
-    post(`/products/${code}/metric`, { actor, role, metric: metric || null }),
   renameProduct: (actor, role, code, newCode) =>
     post(`/products/${code}/rename`, { actor, role, new_code: newCode }),
   productsConsistencyCheck: () => get("/products/consistency-check"),

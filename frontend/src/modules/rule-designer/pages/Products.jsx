@@ -7,10 +7,6 @@ import { useActor } from "../RoleContext.jsx";
 
 const MIGRATION_LABEL = { not_migrated: "Not migrated", in_progress: "In progress", migrated: "Migrated" };
 const MIGRATION_CLASS = { not_migrated: "", in_progress: "watch", migrated: "pass" };
-// Threshold Analysis's deviation metric (app/core/metrics.py's UNIT keys)
-// — unset means "fall back to the legacy PRODUCT_METRIC dict there, then
-// pct", same as before this field existed.
-const METRIC_LABEL = { pct: "% (percent)", bps: "bps", pips: "pips" };
 
 export default function Products() {
   const { actor, role, isAdmin } = useActor();
@@ -20,7 +16,6 @@ export default function Products() {
   const [code, setCode] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [metric, setMetric] = useState("");
   const [notice, setNotice] = useState(null);
   const [renamingCode, setRenamingCode] = useState(null);
   const [renameValue, setRenameValue] = useState("");
@@ -48,16 +43,8 @@ export default function Products() {
 
   async function createProduct() {
     try {
-      await rd.createProduct(actor, role, code.trim().toUpperCase(), name.trim(), description.trim(), metric);
-      setCreating(false); setCode(""); setName(""); setDescription(""); setMetric("");
-      reload();
-    } catch (e) { setNotice({ kind: "breach", text: String(e.message || e) }); }
-  }
-
-  async function changeMetric(p, newMetric) {
-    if (!isAdmin) return;
-    try {
-      await rd.setProductMetric(actor, role, p.code, newMetric);
+      await rd.createProduct(actor, role, code.trim().toUpperCase(), name.trim(), description.trim());
+      setCreating(false); setCode(""); setName(""); setDescription("");
       reload();
     } catch (e) { setNotice({ kind: "breach", text: String(e.message || e) }); }
   }
@@ -121,20 +108,8 @@ export default function Products() {
               <input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Repo" /></label>
             <label className="control" style={{ minWidth: 260 }}><span>Description</span>
               <input value={description} onChange={(e) => setDescription(e.target.value)} /></label>
-            <label className="control"><span>Metric (Threshold Analysis)</span>
-              <select value={metric} onChange={(e) => setMetric(e.target.value)}>
-                <option value="">unset — use default</option>
-                <option value="pct">% (percent)</option>
-                <option value="bps">bps</option>
-                <option value="pips">pips</option>
-              </select>
-            </label>
             <button className="btn" disabled={!code.trim() || !name.trim()} onClick={createProduct}>Create</button>
           </div>
-          <p className="empty-hint" style={{ marginTop: 6, marginBottom: 0 }}>
-            Optional — Threshold Analysis needs to know this product's deviation unit (%, bps or pips) to show
-            correct numbers. Leave unset to decide later from the product list below.
-          </p>
         </Card>
       )}
 
@@ -234,17 +209,6 @@ export default function Products() {
                     <option value="in_progress">In progress</option>
                     <option value="migrated">Migrated</option>
                   </select>
-                )}
-                {isAdmin ? (
-                  <select value={p.metric || ""} title="Threshold Analysis deviation metric"
-                          onChange={(e) => changeMetric(p, e.target.value)}>
-                    <option value="">metric: unset (default)</option>
-                    <option value="pct">% (percent)</option>
-                    <option value="bps">bps</option>
-                    <option value="pips">pips</option>
-                  </select>
-                ) : (
-                  p.metric && <span className="badge">{METRIC_LABEL[p.metric]}</span>
                 )}
                 <label className="control" style={{ flexDirection: "row", alignItems: "center", gap: 6, minWidth: 0 }}>
                   <input type="checkbox" checked={p.enabled} disabled={!isAdmin} onChange={() => toggle(p)} />

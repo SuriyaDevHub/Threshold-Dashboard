@@ -14,7 +14,6 @@ from moto import mock_aws
 
 from app.core import store as dataset_store
 from app.core.config import get_settings
-from app.core.metrics import metric_for
 from app.modules.rule_designer import (
     calc_ops, condition_engine, day_partitioned_source, draft_store, dry_run_service, explain_service,
     lookup_engine, product_engine, product_registry, reference_store, reference_sync_scheduler,
@@ -23,10 +22,9 @@ from app.modules.rule_designer import (
 )
 from app.modules.rule_designer.models import (
     Condition, ConditionGroup, ConflictHandling, DeriveSpec, LookupConfig, LookupFieldMap, LookupType,
-    MissingLookupStrategy, NodeType, Operator, OutcomeAction, PriorityStrategy, Product, Rule, RuleStatus,
+    MissingLookupStrategy, NodeType, Operator, OutcomeAction, PriorityStrategy, Rule, RuleStatus,
     Role, ValueRef, Workflow, WorkflowEdge, WorkflowNode,
 )
-from pydantic import ValidationError
 
 TEST_PRODUCT = "TESTPROD"
 TEST_S3_BUCKET = "test-rule-designer-bucket"
@@ -1705,66 +1703,6 @@ def test_product_enable_disable():
     assert product_registry.get_product(TEST_PRODUCT).enabled is False
     product_registry.set_enabled(TEST_PRODUCT, True, "admin")
     assert product_registry.get_product(TEST_PRODUCT).enabled is True
-
-
-def test_create_product_with_metric_round_trips():
-    p = product_registry.create_product("METRICTEST1", "Metric Test 1", "", "admin", metric="pips")
-    assert p.metric == "pips"
-    assert product_registry.get_product("METRICTEST1").metric == "pips"
-
-
-def test_create_product_without_metric_defaults_to_none():
-    p = product_registry.create_product("METRICTEST2", "Metric Test 2", "", "admin")
-    assert p.metric is None
-
-
-def test_set_metric_updates_and_refreshes_cache():
-    product_registry.create_product("METRICTEST3", "Metric Test 3", "", "admin")
-    product_registry.get_product("METRICTEST3")  # warm the cache
-    product_registry.set_metric("METRICTEST3", "bps", "admin")
-    with _S3CallCounter() as counter:
-        assert product_registry.get_product("METRICTEST3").metric == "bps"
-    assert counter.n == 0  # served from the refreshed cache, same pattern as set_enabled's own test
-
-    # Clearing it back to None (unset) also round-trips correctly.
-    product_registry.set_metric("METRICTEST3", None, "admin")
-    assert product_registry.get_product("METRICTEST3").metric is None
-
-
-def test_invalid_metric_rejected():
-    with pytest.raises(ValidationError):
-        Product(code="X", name="X", metric="furlongs")
-
-    product_registry.create_product("METRICTEST4", "Metric Test 4", "", "admin")
-    with pytest.raises(ValueError):
-        product_registry.set_metric("METRICTEST4", "furlongs", "admin")
-
-
-def test_metric_for_prefers_registry_metric_over_legacy_dict():
-    # A product with an explicit registry metric wins, even over an entry
-    # that would otherwise exist in the legacy PRODUCT_METRIC dict (which
-    # maps this exact code, "CASHBONDS", to "pct").
-    product_registry.create_product("CASHBONDS", "Cash Bonds Shadow", "", "admin", metric="bps")
-    assert metric_for("CASHBONDS") == "bps"
-    product_registry.set_metric("CASHBONDS", None, "admin")
-    assert metric_for("CASHBONDS") == "pct"  # falls back to the legacy dict once unset
-
-
-def test_metric_for_legacy_codes_unchanged_when_no_registry_metric_set():
-    # Every ASSET_CLASSES-seeded code keeps its exact pre-existing
-    # metric_for() behavior when no explicit Product.metric is set.
-    # CASH_BONDS/GFX_CASH (underscored ASSET_CLASSES spelling) aren't in
-    # the legacy PRODUCT_METRIC dict at all (it uses the migration-era
-    # codes CASHBONDS/GFXCASH instead) and fall back to "pct"; IRD/MM
-    # happen to share their exact spelling with PRODUCT_METRIC entries
-    # and pick up "bps" from there, same as always.
-    for code, expected in [("CASH_BONDS", "pct"), ("GFX_CASH", "pct"), ("IRD", "bps"), ("MM", "bps")]:
-        assert product_registry.get_product(code).metric is None
-        assert metric_for(code) == expected
-
-
-def test_metric_for_unknown_product_defaults_to_pct():
-    assert metric_for("TOTALLY_UNKNOWN_PRODUCT_CODE") == "pct"
 
 
 def test_set_enabled_refreshes_cache_so_read_after_write_is_never_stale():

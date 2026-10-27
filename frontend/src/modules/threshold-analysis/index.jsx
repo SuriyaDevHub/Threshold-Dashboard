@@ -104,15 +104,6 @@ export default function ThresholdAnalysis() {
               </div>
             )}
           </div>
-          {selected && (
-            <div className="preview-note" style={{ marginBottom: 14 }}>
-              <strong>{selected.product_type}</strong> — deviation unit <strong>{selected.unit || selected.metric}</strong>
-              {!selected.supported && (
-                <> · no dedicated calibrator registered for this product — using the generic percentile/MAD method
-                below. If the unit above looks wrong, set this product's metric in Rule Designer → Products.</>
-              )}
-            </div>
-          )}
           {selected && <ProductPanel key={selected.id + tab} ds={selected} tab={tab} epeDatasets={eds.data?.datasets || []} />}
         </>
       )}

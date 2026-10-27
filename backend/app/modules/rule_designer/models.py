@@ -476,16 +476,6 @@ class Product(BaseModel):
     on_no_match: str = "clear"
     unmatched_reason_code: Optional[str] = None  # e.g. "PM-UNMATCHED"
     disabled_reason_code: Optional[str] = None    # e.g. "PM-DISABLED"
-    # Deviation metric for Threshold Analysis (app/core/metrics.py's
-    # UNIT/K_DEFAULT/FLOOR_DEFAULT keys): "pct" | "bps" | "pips", or None
-    # for "not explicitly set — metrics.metric_for() falls back to its own
-    # legacy PRODUCT_METRIC dict, then 'pct'". A product dynamically
-    # created here (via create_product()) has no entry in that legacy
-    # dict, which otherwise silently defaults it to "pct" even for, say,
-    # an FX-like product that should read in pips — this lets an admin
-    # set the real metric right where the product itself is managed,
-    # instead of needing a code change to app/core/metrics.py.
-    metric: Optional[str] = None
     created_by: str = "system"
     created_at: float = Field(default_factory=time.time)
     updated_by: str = "system"
@@ -496,13 +486,6 @@ class Product(BaseModel):
     def _check_on_no_match(cls, v):
         if v not in {"clear", "alert"}:
             raise ValueError("on_no_match must be 'clear' or 'alert'")
-        return v
-
-    @field_validator("metric")
-    @classmethod
-    def _check_metric(cls, v):
-        if v is not None and v not in {"pct", "bps", "pips"}:
-            raise ValueError("metric must be 'pct', 'bps', 'pips', or unset")
         return v
 
     @field_validator("code")

@@ -181,14 +181,13 @@ class CreateProductBody(Actor):
     code: str
     name: str
     description: str = ""
-    metric: Optional[str] = None  # "pct" | "bps" | "pips" — see Product.metric's docstring
 
 
 @router.post("/products")
 async def create_product(body: CreateProductBody):
     _require(body, "manage_products")
     try:
-        p = product_registry.create_product(body.code, body.name, body.description, body.actor, metric=body.metric)
+        p = product_registry.create_product(body.code, body.name, body.description, body.actor)
     except ValueError as exc:
         raise HTTPException(409, str(exc))
     audit_service.log(body.actor, "CREATE", role=body.role.value, detail=f"created product '{p.code}'")
@@ -223,22 +222,6 @@ async def set_product_migration_status(code: str, body: ProductMigrationBody):
         p = product_registry.set_migration_status(code, body.migration_status, body.actor)
     except ValueError as exc:
         raise HTTPException(404, str(exc))
-    return p.model_dump(mode="json")
-
-
-class ProductMetricBody(Actor):
-    metric: Optional[str] = None  # "pct" | "bps" | "pips" | None to clear
-
-
-@router.post("/products/{code}/metric")
-async def set_product_metric(code: str, body: ProductMetricBody):
-    _require(body, "manage_products")
-    try:
-        p = product_registry.set_metric(code, body.metric, body.actor)
-    except ValueError as exc:
-        raise HTTPException(404, str(exc))
-    audit_service.log(body.actor, "EDIT", role=body.role.value,
-                       detail=f"set product '{code}' metric to {body.metric or 'unset'}")
     return p.model_dump(mode="json")
 
 
