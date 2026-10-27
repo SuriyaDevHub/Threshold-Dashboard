@@ -526,6 +526,89 @@ def test_self_group_lookup_single_field_unaffected_when_group_by_fields_empty():
     assert by_id[2].final_record["parent_pnl"] == 42.0  # first row of the group, not its own
 
 
+def test_self_group_lookup_sees_an_upstream_transform_nodes_derived_field():
+    # Regression for a real reported bug: a TRANSFORM node deriving a
+    # field (e.g. a value_map flag) earlier in the SAME workflow used to
+    # be invisible to a later self_group LOOKUP's aggregate entirely --
+    # not a wrong type, the field was never computed on the raw rows
+    # self_group groups over (its index is built once, up front, from the
+    # pristine input rows -- see _self_group_reference_rows). The flag was
+    # correctly 1/0 on each record's own final_record, but the self_group
+    # `sum` aggregate over it silently came back None for every row.
+    transform = {"field": "counterparty", "op": "value_map",
+                 "rules": [{"contains": "RTL", "value": "1"}], "default": "0", "output_field": "is_rtl_leg"}
+    lookup = LookupConfig(
+        lookup_type=LookupType.SELF_GROUP, group_by_field="ccy",
+        fields=[LookupFieldMap(source_column="is_rtl_leg", output_field="rtl_leg_count", aggregate="sum")],
+    )
+    wf = Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="tf", type=NodeType.TRANSFORM, transform=transform),
+            WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup),
+        ],
+        edges=[WorkflowEdge(source="in", target="tf"), WorkflowEdge(source="tf", target="lk")],
+    )
+    rows = [
+        {"trade_id": 1, "ccy": "USD", "counterparty": "RTL"},
+        {"trade_id": 2, "ccy": "USD", "counterparty": "MIDLLOH"},
+    ]
+    results, _, _ = workflow_engine.run_workflow(wf, rows, reference_store.reference_loader, record_id_field="trade_id")
+    by_id = {r.record_id: r for r in results}
+    assert by_id[1].final_record["is_rtl_leg"] == "1"  # the transform itself always worked on the record's own fields
+    assert by_id[1].final_record["rtl_leg_count"] == 1.0  # the self_group aggregate now sees it too
+    assert by_id[2].final_record["rtl_leg_count"] == 1.0  # broadcast across the group
+
+
+def test_self_group_lookup_sees_an_upstream_calculate_nodes_derived_field():
+    calc = DeriveSpec(output_field="notional_usd", formula=_op("multiply", [_field("notional"), _field("fx_rate")]))
+    lookup = LookupConfig(
+        lookup_type=LookupType.SELF_GROUP, group_by_field="ccy",
+        fields=[LookupFieldMap(source_column="notional_usd", output_field="total_notional_usd", aggregate="sum")],
+    )
+    wf = Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="calc", type=NodeType.CALCULATE, calculate=calc),
+            WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup),
+        ],
+        edges=[WorkflowEdge(source="in", target="calc"), WorkflowEdge(source="calc", target="lk")],
+    )
+    rows = [
+        {"trade_id": 1, "ccy": "EUR", "notional": 100.0, "fx_rate": 1.1},
+        {"trade_id": 2, "ccy": "EUR", "notional": 50.0, "fx_rate": 1.1},
+    ]
+    results, _, _ = workflow_engine.run_workflow(wf, rows, reference_store.reference_loader, record_id_field="trade_id")
+    by_id = {r.record_id: r for r in results}
+    assert by_id[1].final_record["total_notional_usd"] == pytest.approx(165.0)  # (100+50)*1.1
+    assert by_id[2].final_record["total_notional_usd"] == pytest.approx(165.0)
+
+
+def test_self_group_lookup_downstream_transform_still_not_visible_to_grouping():
+    # A TRANSFORM node AFTER the self_group LOOKUP in the canvas must NOT
+    # be replayed into its grouping -- only genuinely upstream nodes
+    # should be, otherwise this fix would be reading the pipeline's
+    # future state rather than its past.
+    transform_after = {"field": "ccy", "op": "lower", "output_field": "ccy_lower"}
+    lookup = LookupConfig(
+        lookup_type=LookupType.SELF_GROUP, group_by_field="ccy",
+        fields=[LookupFieldMap(source_column="trade_id", output_field="leg_count", aggregate="count")],
+    )
+    wf = Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup),
+            WorkflowNode(id="tf", type=NodeType.TRANSFORM, transform=transform_after),
+        ],
+        edges=[WorkflowEdge(source="in", target="lk"), WorkflowEdge(source="lk", target="tf")],
+    )
+    rows = [{"trade_id": 1, "ccy": "USD"}, {"trade_id": 2, "ccy": "USD"}]
+    results, _, _ = workflow_engine.run_workflow(wf, rows, reference_store.reference_loader, record_id_field="trade_id")
+    by_id = {r.record_id: r for r in results}
+    assert by_id[1].final_record["leg_count"] == 2.0  # grouping itself still works
+    assert by_id[1].final_record["ccy_lower"] == "usd"  # the downstream transform still runs normally afterward
+
+
 def test_self_group_lookup_first_aggregate_skips_blank_representative_row():
     # OAR-FXO-004's threshold: the group's first row happens to have a
     # blank threshold, but a later row in the same structure has one —

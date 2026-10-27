@@ -201,13 +201,55 @@ def _self_group_reference_rows(input_rows: List[dict], cfg) -> Tuple[List[dict],
     return representatives, effective_cfg
 
 
+def _apply_upstream_derivations(workflow: Workflow, target_node_id: str, rows: List[dict]) -> List[dict]:
+    """A self_group LOOKUP's index is built once, up front, from the RAW
+    input rows (see _self_group_reference_rows's own docstring) — by
+    design, so it stays O(1) per lookup rather than re-grouping on every
+    record. Taken literally, that also makes it blind to any TRANSFORM/
+    CALCULATE node earlier in the SAME workflow: a field a TRANSFORM
+    derives (e.g. a value_map flag, a cast_numeric'd amount) simply isn't
+    present on the raw rows self_group groups/aggregates over, so a field
+    mapping or aggregate reading it silently gets nothing — not a wrong
+    type, the field was never computed on those rows at all. Reproduced
+    live: a TRANSFORM deriving `is_rtl_leg` left a self_group `sum`
+    aggregate over it at None for every row, even though `is_rtl_leg`
+    itself was correctly 1/0 on each record's own final_record.
+
+    Fixes this by replaying every TRANSFORM/CALCULATE node topologically
+    before `target_node_id` against all `rows` once, batch-style (the
+    same per-row operations the main per-record loop already applies),
+    so self_group's grouping/aggregation sees exactly what the pipeline
+    would have computed by the time execution reaches it. FILTER/
+    CONDITION nodes upstream are deliberately NOT replayed here — which
+    rows even exist to group is a separate, already-documented self_group
+    characteristic (it groups over the dataset's raw rows regardless of
+    an upstream filter), not something this fix changes."""
+    order = topo_order(workflow)
+    enriched = [dict(r) for r in rows]
+    for node in order:
+        if node.id == target_node_id:
+            break
+        if node.type == NodeType.CALCULATE and node.calculate:
+            for wr in enriched:
+                try:
+                    wr[node.calculate.output_field] = calc_ops.evaluate_formula(node.calculate.formula, wr)
+                except calc_ops.CalcError:
+                    pass  # leave unset, matching the main loop's own error handling (no crash)
+        elif node.type == NodeType.TRANSFORM and node.transform:
+            for wr in enriched:
+                _, fields = _apply_transform(node, wr)
+                wr.update(fields)
+    return enriched
+
+
 def _build_indexes(workflow: Workflow, rows: List[dict], reference_loader: ReferenceLoader) -> Dict[str, _NodeIndex]:
     indexes: Dict[str, _NodeIndex] = {}
     for node in workflow.nodes:
         if node.type in (NodeType.LOOKUP, NodeType.ENRICHMENT) and node.lookup:
             cfg = node.lookup
             if cfg.lookup_type == LookupType.SELF_GROUP:
-                ref_rows, cfg = _self_group_reference_rows(rows, cfg)
+                pre_rows = _apply_upstream_derivations(workflow, node.id, rows)
+                ref_rows, cfg = _self_group_reference_rows(pre_rows, cfg)
                 idx = lookup_engine.build_index(ref_rows, cfg)
                 indexes[node.id] = _NodeIndex(lookup_idx=idx)
                 continue
