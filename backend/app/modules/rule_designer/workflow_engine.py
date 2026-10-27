@@ -303,8 +303,7 @@ def _resolve_value(value: Optional[ValueRef], record: dict) -> Any:
     return record.get(value.name)
 
 
-def _apply_transform(node: WorkflowNode, record: dict) -> Tuple[str, Dict[str, Any]]:
-    cfg = node.transform or {}
+def _apply_single_transform(cfg: Dict[str, Any], record: dict) -> Tuple[str, Dict[str, Any]]:
     op = cfg.get("op")
 
     if op == "coalesce":
@@ -326,6 +325,32 @@ def _apply_transform(node: WorkflowNode, record: dict) -> Tuple[str, Dict[str, A
         return "ok", {out: val}
     except (TypeError, ValueError, IndexError):
         return "error", {}
+
+
+def _apply_transform(node: WorkflowNode, record: dict) -> Tuple[str, Dict[str, Any]]:
+    """A TRANSFORM node's config is normally one {field, op, output_field,
+    ...} entry — still fully supported, unchanged, for every rule
+    authored before this existed. It may instead carry a `transforms`
+    list of several such entries, so one node can clean up multiple
+    columns (e.g. cast three amount fields to numbers) instead of one
+    node per column. Entries apply in order against a record that
+    accumulates each one's own output, so a later entry in the same list
+    can read a field an earlier one just derived — the same visibility
+    chained standalone TRANSFORM nodes already have. Each entry's own
+    failure (caught inside _apply_single_transform, never raised) only
+    omits that one field from the result; it doesn't stop the rest of
+    the list."""
+    cfg = node.transform or {}
+    entries = cfg.get("transforms")
+    if isinstance(entries, list) and entries:
+        working = dict(record)
+        fields: Dict[str, Any] = {}
+        for entry in entries:
+            _, entry_fields = _apply_single_transform(entry, working)
+            working.update(entry_fields)
+            fields.update(entry_fields)
+        return "ok", fields
+    return _apply_single_transform(cfg, record)
 
 
 def run_workflow(

@@ -2146,6 +2146,68 @@ def test_value_map_transform_without_default_returns_original_value():
 
 
 # --------------------------------------------------------------------------
+# workflow_engine — multi-column TRANSFORM ({"transforms": [...]})
+# --------------------------------------------------------------------------
+
+def test_multi_transform_applies_every_entry():
+    node = _transform_node(transforms=[
+        {"op": "cast_numeric", "field": "notional_raw", "output_field": "notional_numeric"},
+        {"op": "cast_numeric", "field": "count_raw", "output_field": "count_numeric"},
+    ])
+    status, fields = workflow_engine._apply_transform(node, {"notional_raw": "1,000", "count_raw": "3"})
+    assert status == "ok"
+    assert fields == {"notional_numeric": 1000.0, "count_numeric": 3.0}
+
+
+def test_multi_transform_later_entry_sees_earlier_entrys_output():
+    node = _transform_node(transforms=[
+        {"op": "trim", "field": "book", "output_field": "book_trimmed"},
+        {"op": "substring", "field": "book_trimmed", "output_field": "book_prefix", "start": 0, "end": 3},
+    ])
+    status, fields = workflow_engine._apply_transform(node, {"book": "  HKFXO_052  "})
+    assert status == "ok"
+    assert fields == {"book_trimmed": "HKFXO_052", "book_prefix": "HKF"}
+
+
+def test_multi_transform_one_entrys_failure_does_not_block_the_rest():
+    node = _transform_node(transforms=[
+        {"op": "cast_numeric", "field": "junk", "output_field": "a"},
+        {"op": "trim", "field": "book", "output_field": "b"},
+    ])
+    status, fields = workflow_engine._apply_transform(node, {"junk": "not-a-number", "book": "  HKFXO_052  "})
+    assert status == "ok"
+    assert fields == {"b": "HKFXO_052"}
+    assert "a" not in fields
+
+
+def test_multi_transform_empty_list_falls_back_to_legacy_single_entry_shape():
+    node = _transform_node(transforms=[], op="trim", field="book", output_field="book")
+    status, fields = workflow_engine._apply_transform(node, {"book": "  HKFXO_052  "})
+    assert status == "ok" and fields == {"book": "HKFXO_052"}
+
+
+def test_multi_transform_visible_to_upstream_derivation_replay_for_self_group():
+    workflow = Workflow(nodes=[
+        WorkflowNode(id="t", type=NodeType.TRANSFORM, transform={"transforms": [
+            {"op": "cast_numeric", "field": "notional_raw", "output_field": "notional_numeric"},
+            {"op": "trim", "field": "ccy", "output_field": "ccy"},
+        ]}),
+        WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=LookupConfig(
+            lookup_type=LookupType.SELF_GROUP, group_by_field="ccy",
+            fields=[LookupFieldMap(source_column="notional_numeric", output_field="group_notional",
+                                    aggregate="sum")],
+        )),
+    ])
+    rows = [
+        {"ccy": " USD ", "notional_raw": "1,000"},
+        {"ccy": "USD", "notional_raw": "2,000"},
+    ]
+    pre_rows = workflow_engine._apply_upstream_derivations(workflow, "lk", rows)
+    assert all(r.get("notional_numeric") == float(r["notional_raw"].replace(",", "")) for r in pre_rows)
+    assert all(r.get("ccy") == "USD" for r in pre_rows)
+
+
+# --------------------------------------------------------------------------
 # ValueRef.type=="template" — outcome commentary rendering
 # --------------------------------------------------------------------------
 
@@ -2188,6 +2250,25 @@ def test_explanation_renders_template_outcome_values_not_none():
     assert "Reason = OAR-TEST-001" in text
     assert "Commentary = Region {region} breached." in text
     assert "None" not in text
+
+
+def test_explanation_lists_every_column_of_a_multi_transform_node():
+    rule = _rule(
+        rule_id="EXPLAIN2", name="Explain multi transform",
+        workflow=Workflow(
+            nodes=[
+                WorkflowNode(id="in", type=NodeType.INPUT),
+                WorkflowNode(id="t", type=NodeType.TRANSFORM, transform={"transforms": [
+                    {"field": "notional_raw", "op": "cast_numeric", "output_field": "notional_numeric"},
+                    {"field": "count_raw", "op": "cast_numeric", "output_field": "count_numeric"},
+                ]}),
+            ],
+            edges=[WorkflowEdge(source="in", target="t")],
+        ),
+    )
+    text = explain_service.generate_explanation(rule)
+    assert "notional_raw (cast_numeric)" in text
+    assert "count_raw (cast_numeric)" in text
 
 
 # --------------------------------------------------------------------------

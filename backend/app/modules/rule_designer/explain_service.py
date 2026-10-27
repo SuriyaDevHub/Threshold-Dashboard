@@ -94,7 +94,9 @@ def generate_explanation(rule: Rule) -> str:
             steps.append(f"{step_no}. Identify records where {_condition_text(node.condition)}.")
             step_no += 1
         elif node.type == NodeType.TRANSFORM and node.transform:
-            steps.append(f"{step_no}. Transform {node.transform.get('field')} ({node.transform.get('op')}).")
+            entries = node.transform.get("transforms") or [node.transform]
+            cols = "; ".join(f"{e.get('field')} ({e.get('op')})" for e in entries if e.get("field") or e.get("op"))
+            steps.append(f"{step_no}. Transform {cols or 'fields'}.")
             step_no += 1
         elif node.type == NodeType.OUTCOME and node.outcomes:
             actions = "; ".join(f"{a.field} = {_value_text(a.value)}" for a in node.outcomes)

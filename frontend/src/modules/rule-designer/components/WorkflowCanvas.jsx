@@ -79,21 +79,33 @@ function newNode(type, index) {
   return base;
 }
 
+// Aggregates whose result is always a number regardless of the source
+// column's own (unknowable, client-side) type — "first"/"last" just pass
+// a raw cell through, so those stay "string" (best-effort/unknown).
+const NUMERIC_AGGREGATES = new Set(["sum", "count", "min", "max"]);
+// TRANSFORM ops whose output is always numeric.
+const NUMERIC_TRANSFORM_OPS = new Set(["cast_numeric", "round"]);
+
 export function nodeOutputs(node) {
   // Each entry is {field, type} — type is best-effort ("string" when the
   // real type can't be known client-side, e.g. an enriched column).
   if ((node.type === "lookup" || node.type === "enrichment") && node.lookup) {
     const out = (node.lookup.fields || [])
       .filter((f) => f.output_field)
-      .map((f) => ({ field: f.output_field, type: "string" }));
+      .map((f) => ({ field: f.output_field, type: NUMERIC_AGGREGATES.has(f.aggregate) ? "numeric" : "string" }));
     if (node.lookup.flag_field) out.push({ field: node.lookup.flag_field, type: "boolean" });
     return out;
   }
   if (node.type === "calculate" && node.calculate?.output_field) {
     return [{ field: node.calculate.output_field, type: node.calculate.output_type || "numeric" }];
   }
-  if (node.type === "transform" && node.transform?.output_field) {
-    return [{ field: node.transform.output_field, type: "string" }];
+  if (node.type === "transform" && node.transform) {
+    const entries = Array.isArray(node.transform.transforms) && node.transform.transforms.length
+      ? node.transform.transforms
+      : node.transform.output_field ? [node.transform] : [];
+    return entries
+      .filter((t) => t.output_field)
+      .map((t) => ({ field: t.output_field, type: NUMERIC_TRANSFORM_OPS.has(t.op) ? "numeric" : "string" }));
   }
   return [];
 }

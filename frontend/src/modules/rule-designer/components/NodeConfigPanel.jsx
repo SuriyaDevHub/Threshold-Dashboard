@@ -104,6 +104,58 @@ function OutcomeEditor({ outcomes, onChange, fields }) {
   );
 }
 
+// A TRANSFORM node's config is usually one {field, op, output_field, ...}
+// entry — still fully supported by workflow_engine._apply_transform as
+// the legacy shape. This editor always normalizes to the newer
+// `{transforms: [...]}` list shape on any edit, so one node can clean up
+// several columns (e.g. cast three amount fields to numbers) instead of
+// needing one TRANSFORM node per column; a rule saved before this existed
+// keeps working untouched until its node is next edited here.
+function transformEntries(transform) {
+  if (Array.isArray(transform?.transforms) && transform.transforms.length) return transform.transforms;
+  return [transform && (transform.field || transform.op) ? transform : {}];
+}
+
+function TransformEditor({ transform, onChange, fields }) {
+  const entries = transformEntries(transform);
+
+  function update(i, patch) {
+    onChange({ transforms: entries.map((e, idx) => (idx === i ? { ...e, ...patch } : e)) });
+  }
+  function add() { onChange({ transforms: [...entries, {}] }); }
+  function remove(i) {
+    const next = entries.filter((_, idx) => idx !== i);
+    onChange({ transforms: next.length ? next : [{}] });
+  }
+
+  return (
+    <div className="lk-block">
+      {entries.map((entry, i) => (
+        <div key={i}>
+          <div className="lk-row">
+            <select value={entry.field || ""} onChange={(e) => update(i, { field: e.target.value })}>
+              <option value="" disabled>field…</option>
+              {withCurrent(fields, entry.field).map((f) => (
+                <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
+              ))}
+            </select>
+            <TransformOpFields transform={entry} onChange={(t) => update(i, t)} />
+            <input placeholder="output field (optional)" value={entry.output_field || ""}
+                   onChange={(e) => update(i, { output_field: e.target.value })} />
+            {entries.length > 1 && (
+              <button className="icon-btn" title="Remove this column" onClick={() => remove(i)}>
+                <Trash2 size={13} />
+              </button>
+            )}
+          </div>
+          {transformHint(entry.op) && <p className="empty-hint">{transformHint(entry.op)}</p>}
+        </div>
+      ))}
+      <button className="btn btn--ghost btn--xs" onClick={add}><Plus size={13} /> Add another column</button>
+    </div>
+  );
+}
+
 export default function NodeConfigPanel({ node, fields, meta, onChange, onClose, onDelete }) {
   useEffect(() => {
     function onKey(e) { if (e.key === "Escape") onClose(); }
@@ -169,20 +221,7 @@ export default function NodeConfigPanel({ node, fields, meta, onChange, onClose,
         )}
 
         {node.type === "transform" && (
-          <div className="lk-block">
-            <div className="lk-row">
-              <select value={node.transform?.field || ""} onChange={(e) => set({ transform: { ...node.transform, field: e.target.value } })}>
-                <option value="" disabled>field…</option>
-                {withCurrent(fields, node.transform?.field).map((f) => (
-                  <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
-                ))}
-              </select>
-              <TransformOpFields transform={node.transform} onChange={(t) => set({ transform: t })} />
-              <input placeholder="output field (optional)" value={node.transform?.output_field || ""}
-                     onChange={(e) => set({ transform: { ...node.transform, output_field: e.target.value } })} />
-            </div>
-            {transformHint(node.transform?.op) && <p className="empty-hint">{transformHint(node.transform?.op)}</p>}
-          </div>
+          <TransformEditor transform={node.transform} onChange={(t) => set({ transform: t })} fields={fields} />
         )}
 
         {node.type === "validation" && (
