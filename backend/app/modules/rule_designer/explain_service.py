@@ -143,7 +143,7 @@ def generate_summary(rule: Rule) -> str:
     for node in rule.workflow.nodes:
         if node.type in (NodeType.LOOKUP, NodeType.ENRICHMENT) and node.lookup \
                 and node.lookup.lookup_type == LookupType.SELF_GROUP and group_by is None:
-            group_by = node.lookup.group_by_field
+            group_by = ", ".join(f for f in [node.lookup.group_by_field, *node.lookup.group_by_fields] if f) or None
         elif node.type in (NodeType.FILTER, NodeType.GROUP, NodeType.CONDITION) \
                 and (node.filter or node.condition):
             cond_texts.append(_condition_text(node.filter or node.condition))

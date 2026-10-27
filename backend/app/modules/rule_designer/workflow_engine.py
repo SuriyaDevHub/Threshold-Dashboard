@@ -138,31 +138,37 @@ def _aggregate_value(op: str, rows: List[dict], field: str) -> Optional[float]:
 
 def _self_group_reference_rows(input_rows: List[dict], cfg) -> Tuple[List[dict], Any]:
     """Build a self_group LOOKUP's "reference rows" by grouping the input
-    dataset itself by `cfg.group_by_field` and picking one representative
-    row per group via `cfg.selector` (the first row satisfying it; the
-    group's first row if no selector is set or nothing satisfies it). Any
-    field mapping with `aggregate` set (sum/count/min/max) has its value
-    on the representative row overwritten with that aggregate computed
-    across every row in the group — e.g. a structure's total PnL summed
-    over all its deals, not just the representative deal's own PnL.
+    dataset itself by `cfg.group_by_field` (+ any `cfg.group_by_fields` for
+    a composite key — e.g. CCY *and* Tenor together, not just CCY, so two
+    trades that merely share a currency don't land in the same group) and
+    picking one representative row per group via `cfg.selector` (the first
+    row satisfying it; the group's first row if no selector is set or
+    nothing satisfies it). Any field mapping with `aggregate` set (sum/
+    count/min/max) has its value on the representative row overwritten
+    with that aggregate computed across every row in the group — e.g. a
+    structure's total PnL summed over all its deals, not just the
+    representative deal's own PnL.
     Grouping always happens over the raw input rows the dry-run/dataset
     started with, not any upstream CALCULATE/TRANSFORM output within this
     same run — matching how a reference-file lookup's index is also built
     once, up front, independent of per-record pipeline state.
 
     Returns (representative_rows, effective_config) — effective_config is
-    `cfg` with `join_keys` auto-derived from `group_by_field` (self_group
-    has no user-configured join_keys; the group key doubles as the join
-    key on both sides, since a representative row and the rows it enriches
-    share the exact same schema)."""
+    `cfg` with `join_keys` auto-derived from `group_by_field`/
+    `group_by_fields` (self_group has no user-configured join_keys; the
+    group key doubles as the join key on both sides, since a
+    representative row and the rows it enriches share the exact same
+    schema)."""
     groups: Dict[Any, List[dict]] = {}
     field_name = cfg.group_by_field
+    key_fields = [field_name, *cfg.group_by_fields] if field_name else []
     for row in input_rows:
-        if not field_name:
+        if not key_fields:
             continue
-        key = row.get(field_name)
-        if key is None or key == "":
+        values = [row.get(f) for f in key_fields]
+        if any(v is None or v == "" for v in values):
             continue
+        key = tuple(values)
         groups.setdefault(key, []).append(row)
 
     agg_fields = [fm for fm in cfg.fields if fm.aggregate]
@@ -190,7 +196,7 @@ def _self_group_reference_rows(input_rows: List[dict], cfg) -> Tuple[List[dict],
         representatives.append(rep)
 
     effective_cfg = cfg.model_copy(update={
-        "join_keys": [{"source": field_name, "reference": field_name}] if field_name else [],
+        "join_keys": [{"source": f, "reference": f} for f in key_fields],
     })
     return representatives, effective_cfg
 

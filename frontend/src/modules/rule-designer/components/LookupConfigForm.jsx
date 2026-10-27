@@ -15,6 +15,7 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
   const [refFiles, setRefFiles] = useState([]);
   const [refDetail, setRefDetail] = useState(null);
   const isSelfGroup = lookup.lookup_type === "self_group";
+  const groupByLabel = [lookup.group_by_field, ...(lookup.group_by_fields || [])].filter(Boolean).join(" + ") || "group";
   // Day-partitioned: the reference rows come from a file resolved per
   // record from its own COB date (e.g. the legacy GfxValidator's
   // RiverIndex — one "All trades.csv" per day), not an admin-uploaded/
@@ -146,12 +147,37 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
             </select>
             <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>is the same</span>
           </div>
+          {(lookup.group_by_fields || []).map((f, i) => (
+            <div className="lk-row" key={i} style={{ marginTop: 4 }}>
+              <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>and</span>
+              <select value={f} onChange={(e) => {
+                const next = [...(lookup.group_by_fields || [])]; next[i] = e.target.value; set({ group_by_fields: next });
+              }}>
+                <option value="" disabled>field…</option>
+                {withCurrent(sourceFields, f).map((sf) => (
+                  <option key={sf.field} value={sf.field}>{sf.field}{sf.unavailable ? " (unavailable)" : ""}</option>
+                ))}
+              </select>
+              <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>is also the same</span>
+              <button className="icon-btn" onClick={() => {
+                set({ group_by_fields: (lookup.group_by_fields || []).filter((_, idx) => idx !== i) });
+              }}><Trash2 size={13} /></button>
+            </div>
+          ))}
+          <button className="btn btn--ghost btn--xs" style={{ marginTop: 6 }}
+                  onClick={() => set({ group_by_fields: [...(lookup.group_by_fields || []), sourceFields[0]?.field || ""] })}>
+            <Plus size={13} /> Add another group-by field
+          </button>
+          <p className="empty-hint" style={{ marginTop: 4 }}>
+            Rows only land in the same group when every field above matches — e.g. CCY *and* Tenor together, so two
+            trades that merely share a currency but have different tenors are never treated as a pair.
+          </p>
           <div className="lk-block-title" style={{ marginTop: 10 }}>Representative row (optional)</div>
           <ConditionBuilder group={lookup.selector || newGroup()} onChange={(g) => set({ selector: g })}
                             fields={sourceFields} meta={meta} />
           <p className="empty-hint" style={{ marginTop: 6 }}>
             Within each group, the first row matching this condition is the one whose fields get broadcast to every
-            row sharing the same {lookup.group_by_field || "group"} value — e.g. the row flagged as the parent leg.
+            row sharing the same {groupByLabel} value — e.g. the row flagged as the parent leg.
             Leave empty to just use each group's first row.
           </p>
         </div>
@@ -328,7 +354,7 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
             {transformHint(fm.transform?.op) && <p className="empty-hint" style={{ marginTop: 4 }}>{transformHint(fm.transform?.op)}</p>}
             {isSelfGroup && fm.aggregate && (
               <p className="empty-hint" style={{ marginTop: 4 }}>
-                Every row sharing the same {lookup.group_by_field || "group"} value gets the {fm.aggregate} of{" "}
+                Every row sharing the same {groupByLabel} value gets the {fm.aggregate} of{" "}
                 {fm.source_column || "this field"} across the whole group, not just the representative row's own value.
               </p>
             )}

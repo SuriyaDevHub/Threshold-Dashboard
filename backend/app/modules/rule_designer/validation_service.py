@@ -235,6 +235,10 @@ def validate_workflow(rule: Rule, dataset_schema: Optional[Dict[str, FieldType]]
                 result.errors.append(f"{label}: source field '{node.lookup.date_field}' not available at this stage")
             if node.lookup.group_by_field and base_fields and node.lookup.group_by_field not in available:
                 result.errors.append(f"{label}: group-by field '{node.lookup.group_by_field}' not available at this stage")
+            if base_fields:
+                for f in node.lookup.group_by_fields:
+                    if f not in available:
+                        result.errors.append(f"{label}: group-by field '{f}' not available at this stage")
             if node.lookup.selector and base_fields:
                 _validate_condition_tree(node.lookup.selector, available, f"{label} selector", result)
             validate_lookup_config(label, node.lookup, result, available=available)

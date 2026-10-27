@@ -42,9 +42,9 @@ def group_key_fields_for_product(product: str) -> List[str]:
     for rule in active_rules_for_product(product):
         for node in rule.workflow.nodes:
             if node.type == NodeType.LOOKUP and node.lookup and node.lookup.lookup_type == LookupType.SELF_GROUP:
-                field = node.lookup.group_by_field
-                if field and field not in fields:
-                    fields.append(field)
+                for field in [node.lookup.group_by_field, *node.lookup.group_by_fields]:
+                    if field and field not in fields:
+                        fields.append(field)
     return fields
 
 

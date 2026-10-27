@@ -367,6 +367,13 @@ class LookupConfig(BaseModel):
     # representative one to enrich every group member from (e.g. "the row
     # flagged as parent"). None/empty selector = the group's first row.
     group_by_field: Optional[str] = None
+    # Additional fields for a COMPOSITE group-by (e.g. group by CCY *and*
+    # Tenor together, not just CCY) — group_by_field stays the required
+    # primary field for backward compatibility with every rule authored
+    # before this existed (an empty list here is exactly today's
+    # single-field behavior); any fields listed here are ANDed onto it, so
+    # only rows matching on every one of them land in the same group.
+    group_by_fields: List[str] = Field(default_factory=list)
     selector: Optional[ConditionGroup] = None
 
     # exact / composite: list of (source_field, reference_field) join pairs.

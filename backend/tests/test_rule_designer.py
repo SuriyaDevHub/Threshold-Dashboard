@@ -474,6 +474,58 @@ def test_self_group_lookup_sum_aggregate_across_group():
     assert by_id[4].final_record["total_pnl"] is None  # sum of zero numeric values -> no data, not 0.0
 
 
+def test_self_group_lookup_composite_group_by_only_groups_when_every_field_matches():
+    # BTB (back-to-back) trade detection: two legs only count as a pair
+    # when BOTH CCY and Tenor match, not just CCY. group_by_fields is the
+    # composite extension beyond the single required group_by_field.
+    lookup = LookupConfig(
+        lookup_type=LookupType.SELF_GROUP, group_by_field="ccy", group_by_fields=["tenor"],
+        fields=[
+            LookupFieldMap(source_column="is_rtl", output_field="rtl_count", aggregate="sum"),
+            LookupFieldMap(source_column="is_other", output_field="other_count", aggregate="sum"),
+            LookupFieldMap(source_column="trade_id", output_field="leg_count", aggregate="count"),
+            LookupFieldMap(source_column="notional", output_field="notional_min", aggregate="min"),
+            LookupFieldMap(source_column="notional", output_field="notional_max", aggregate="max"),
+        ],
+    )
+    wf = Workflow(nodes=[WorkflowNode(id="in", type=NodeType.INPUT), WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup)],
+                  edges=[WorkflowEdge(source="in", target="lk")])
+    rows = [
+        # Same CCY, same Tenor -> a genuine pair.
+        {"trade_id": 1, "ccy": "USD", "tenor": "5Y", "notional": 100.0, "is_rtl": 1, "is_other": 0},
+        {"trade_id": 2, "ccy": "USD", "tenor": "5Y", "notional": 100.0, "is_rtl": 0, "is_other": 1},
+        # Same CCY but a DIFFERENT tenor -> must stay isolated, not merged
+        # into the USD/5Y group above (the exact bug composite grouping
+        # fixes: CCY alone would have wrongly pulled this in).
+        {"trade_id": 3, "ccy": "USD", "tenor": "10Y", "notional": 50.0, "is_rtl": 1, "is_other": 0},
+    ]
+    results, _, _ = workflow_engine.run_workflow(wf, rows, reference_store.reference_loader, record_id_field="trade_id")
+    by_id = {r.record_id: r for r in results}
+    assert by_id[1].final_record["leg_count"] == 2.0
+    assert by_id[2].final_record["leg_count"] == 2.0
+    assert by_id[1].final_record["rtl_count"] == 1.0
+    assert by_id[1].final_record["other_count"] == 1.0
+    assert by_id[1].final_record["notional_min"] == by_id[1].final_record["notional_max"] == 100.0
+    # Trade 3 never grouped with 1/2 despite sharing CCY — its own group
+    # (USD/10Y) has only itself in it.
+    assert by_id[3].final_record["leg_count"] == 1.0
+    assert by_id[3].final_record["other_count"] == 0.0
+
+
+def test_self_group_lookup_single_field_unaffected_when_group_by_fields_empty():
+    # Backward compatibility: every rule authored before composite
+    # grouping existed has group_by_fields == [] (the default) and must
+    # behave exactly as before -- single-field grouping, no behavior change.
+    wf = _self_group_workflow("dealref", selector=None)
+    rows = [
+        {"trade_id": 1, "dealref": "D1", "pnl": 42.0, "threshold": 7.0},
+        {"trade_id": 2, "dealref": "D1", "pnl": 99.0, "threshold": 8.0},
+    ]
+    results, _, _ = workflow_engine.run_workflow(wf, rows, reference_store.reference_loader, record_id_field="trade_id")
+    by_id = {r.record_id: r for r in results}
+    assert by_id[2].final_record["parent_pnl"] == 42.0  # first row of the group, not its own
+
+
 def test_self_group_lookup_first_aggregate_skips_blank_representative_row():
     # OAR-FXO-004's threshold: the group's first row happens to have a
     # blank threshold, but a later row in the same structure has one —
@@ -2326,6 +2378,24 @@ def test_group_key_fields_for_product_empty_when_no_self_group_rules():
     # group_rows for every record.
     _pub_rule("PR1", threshold=5.0)
     assert product_engine.group_key_fields_for_product(TEST_PRODUCT) == []
+
+
+def test_group_key_fields_for_product_includes_composite_group_by_fields():
+    # A self-group LOOKUP using composite grouping (group_by_field +
+    # group_by_fields) needs the wrapper to pre-group on EVERY one of
+    # those fields, not just the primary one.
+    lookup = LookupConfig(
+        lookup_type=LookupType.SELF_GROUP, group_by_field="ccy", group_by_fields=["tenor"],
+        fields=[LookupFieldMap(source_column="notional", output_field="peer_notional", aggregate="sum")],
+    )
+    rule = _rule(rule_id="SGCOMPOSITE", name="SGCOMPOSITE", priority=100, workflow=Workflow(
+        nodes=[WorkflowNode(id="in", type=NodeType.INPUT), WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup)],
+        edges=[WorkflowEdge(source="in", target="lk")],
+    ))
+    rule_store.upsert_rule(rule, "tester")
+    rule.status = RuleStatus.PUBLISHED
+    rule_store.upsert_rule(rule, "tester")
+    assert product_engine.group_key_fields_for_product(TEST_PRODUCT) == ["ccy", "tenor"]
 
 
 # --------------------------------------------------------------------------
