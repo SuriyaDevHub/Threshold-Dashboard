@@ -22,6 +22,19 @@ FLOOR_DEFAULT = {"pct": 0.10, "bps": 0.5, "pips": 1.0}
 
 
 def metric_for(product_type: str) -> str:
+    # Lazy import: app/core sits below app/modules architecturally, so this
+    # stays function-local to avoid a module-load-time coupling — same
+    # pattern already established by data_filters.live_product_types().
+    # A product created dynamically via Rule Designer has no entry in the
+    # static PRODUCT_METRIC dict below (which predates product_registry),
+    # and would otherwise silently default to "pct" even if it's really an
+    # FX-like product that should read in pips. An explicit metric set on
+    # the product (Product.metric) wins; everything else keeps today's
+    # exact behavior.
+    from app.modules.rule_designer import product_registry
+    p = product_registry.get_product(product_type)
+    if p is not None and p.metric:
+        return p.metric
     return PRODUCT_METRIC.get(product_type, "pct")
 
 

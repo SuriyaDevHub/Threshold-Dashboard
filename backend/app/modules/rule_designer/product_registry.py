@@ -174,7 +174,7 @@ def is_known_product(code: str) -> bool:
 
 def create_product(code: str, name: str, description: str, actor: str,
                     on_no_match: str = "clear", unmatched_reason_code: Optional[str] = None,
-                    disabled_reason_code: Optional[str] = None) -> Product:
+                    disabled_reason_code: Optional[str] = None, metric: Optional[str] = None) -> Product:
     with _write_lock:
         data = _load()
         code = code.upper()
@@ -182,7 +182,7 @@ def create_product(code: str, name: str, description: str, actor: str,
             raise ValueError(f"product '{code}' already exists")
         product = Product(code=code, name=name, description=description, created_by=actor, updated_by=actor,
                            on_no_match=on_no_match, unmatched_reason_code=unmatched_reason_code,
-                           disabled_reason_code=disabled_reason_code)
+                           disabled_reason_code=disabled_reason_code, metric=metric)
         data[code] = product.model_dump(mode="json")
         _save(data)
         _refresh_load_cache(data)
@@ -235,6 +235,27 @@ def set_migration_status(code: str, status: MigrationStatus, actor: str) -> Prod
         if code not in data:
             raise ValueError(f"product '{code}' not found")
         data[code]["migration_status"] = status.value
+        data[code]["updated_by"] = actor
+        data[code]["updated_at"] = time.time()
+        _save(data)
+        _refresh_load_cache(data)
+        return Product.model_validate(data[code])
+
+
+def set_metric(code: str, metric: Optional[str], actor: str) -> Product:
+    """Sets (or clears, if metric=None) a product's Threshold Analysis
+    deviation metric — see Product.metric's own docstring for why this
+    exists: a dynamically-created product has no entry in
+    app/core/metrics.py's legacy PRODUCT_METRIC dict, which otherwise
+    silently defaults it to "pct"."""
+    with _write_lock:
+        data = _load()
+        code = code.upper()
+        if code not in data:
+            raise ValueError(f"product '{code}' not found")
+        if metric is not None and metric not in {"pct", "bps", "pips"}:
+            raise ValueError("metric must be 'pct', 'bps', 'pips', or unset")
+        data[code]["metric"] = metric
         data[code]["updated_by"] = actor
         data[code]["updated_at"] = time.time()
         _save(data)
