@@ -108,6 +108,7 @@ OPERATORS_BY_TYPE: Dict[FieldType, List[Operator]] = {
                       Operator.NOT_BETWEEN, Operator.IS_NULL, Operator.IS_NOT_NULL],
     FieldType.BOOLEAN: [Operator.EQ, Operator.NE, Operator.IS_NULL, Operator.IS_NOT_NULL],
     FieldType.IDENTIFIER: [Operator.EQ, Operator.NE, Operator.IN, Operator.NOT_IN,
+                            Operator.STARTS_WITH, Operator.ENDS_WITH,
                             Operator.MATCHES_PATTERN, Operator.IS_NULL, Operator.IS_NOT_NULL],
 }
 

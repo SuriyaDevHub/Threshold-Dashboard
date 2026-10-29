@@ -21,8 +21,8 @@ from app.modules.rule_designer import (
     yaml_service,
 )
 from app.modules.rule_designer.models import (
-    Condition, ConditionGroup, ConflictHandling, DeriveSpec, LookupConfig, LookupFieldMap, LookupType,
-    MissingLookupStrategy, NodeType, Operator, OutcomeAction, PriorityStrategy, Rule, RuleStatus,
+    Condition, ConditionGroup, ConflictHandling, DeriveSpec, FieldType, LookupConfig, LookupFieldMap, LookupType,
+    MissingLookupStrategy, NodeType, Operator, OPERATORS_BY_TYPE, OutcomeAction, PriorityStrategy, Rule, RuleStatus,
     Role, ValueRef, Workflow, WorkflowEdge, WorkflowNode,
 )
 
@@ -2146,6 +2146,33 @@ def test_value_map_transform_without_default_returns_original_value():
 
 
 # --------------------------------------------------------------------------
+# models — IDENTIFIER field type gets starts_with/ends_with (e.g. a trade
+# ID or book code prefix/suffix check), not just exact/IN matching
+# --------------------------------------------------------------------------
+
+def test_identifier_field_type_offers_starts_with_and_ends_with():
+    ops = OPERATORS_BY_TYPE[FieldType.IDENTIFIER]
+    assert Operator.STARTS_WITH in ops
+    assert Operator.ENDS_WITH in ops
+
+
+def test_starts_with_and_ends_with_evaluate_correctly_on_an_identifier_field():
+    record = {"book": "HKFXO_052"}
+
+    starts = Condition(field="book", operator=Operator.STARTS_WITH,
+                        value=ValueRef(type="static", value="HKFXO"))
+    assert condition_engine.eval_condition(starts, record).result is True
+
+    ends = Condition(field="book", operator=Operator.ENDS_WITH,
+                      value=ValueRef(type="static", value="_052"))
+    assert condition_engine.eval_condition(ends, record).result is True
+
+    no_match = Condition(field="book", operator=Operator.STARTS_WITH,
+                          value=ValueRef(type="static", value="LDNIR"))
+    assert condition_engine.eval_condition(no_match, record).result is False
+
+
+# --------------------------------------------------------------------------
 # workflow_engine — parse_date transform (normalizes to canonical YYYY-MM-DD
 # so a derived/cleaned-up date field becomes comparable via BEFORE/AFTER/ON)
 # --------------------------------------------------------------------------
@@ -2246,6 +2273,85 @@ def test_date_field_vs_field_comparison_already_works_on_raw_untouched_columns()
     on = Condition(field="trade_date", operator=Operator.ON,
                     value=ValueRef(type="column", name="trade_date"))
     assert condition_engine.eval_condition(on, record).result is True
+
+
+def test_parse_date_transform_tolerates_trailing_time_component():
+    """A "date" column that's really a midnight timestamp in the source
+    system (e.g. "15-01-2026 00:00:00" against a date-only DD-MM-YYYY
+    pattern, or an ISO "...T00:00:00Z" suffix) still parses — stripping
+    a trailing time-of-day doesn't change the date's meaning, unlike
+    guessing between two date orderings, so this is safe to do without a
+    format option for it."""
+    node = _transform_node(op="parse_date", field="trade_date", output_field="trade_date_iso",
+                            input_format="dmy_dash")
+    status, fields = workflow_engine._apply_transform(node, {"trade_date": "15-01-2026 00:00:00"})
+    assert status == "ok" and fields == {"trade_date_iso": "2026-01-15"}
+
+    node2 = _transform_node(op="parse_date", field="trade_date", output_field="trade_date_iso",
+                             input_format="dmy_dash")
+    status2, fields2 = workflow_engine._apply_transform(node2, {"trade_date": "15-01-2026T00:00:00Z"})
+    assert status2 == "ok" and fields2 == {"trade_date_iso": "2026-01-15"}
+
+
+def test_parse_date_transform_still_errors_when_the_date_itself_is_wrong_shape():
+    # No trailing time component to strip — a genuine format mismatch must
+    # still fail loudly, not be silently masked by the new leniency.
+    node = _transform_node(op="parse_date", field="trade_date", output_field="trade_date_iso",
+                            input_format="dmy_dash")
+    status, fields = workflow_engine._apply_transform(node, {"trade_date": "2026-01-15"})
+    assert status == "error" and fields == {}
+
+
+# --------------------------------------------------------------------------
+# workflow_engine — TRANSFORM failure visibility in the dry-run trail
+# (a parse/cast failure used to leave the trail's `detail` blank, so an
+# admin only ever learned "the field is missing" from a node two steps
+# downstream, with no clue why — _apply_transform_detailed() now reports
+# the actual reason)
+# --------------------------------------------------------------------------
+
+def test_apply_transform_detailed_reports_the_failure_reason():
+    node = _transform_node(op="parse_date", field="trade_date", output_field="trade_date_iso",
+                            input_format="mdy")
+    status, fields, detail = workflow_engine._apply_transform_detailed(
+        node, {"trade_date": "not-a-date"})
+    assert status == "error"
+    assert fields == {}
+    assert "trade_date_iso" in detail and "parse_date" in detail and "trade_date" in detail
+
+
+def test_apply_transform_detailed_reports_each_failed_entry_in_a_multi_transform():
+    node = _transform_node(transforms=[
+        {"op": "cast_numeric", "field": "junk", "output_field": "a"},
+        {"op": "trim", "field": "book", "output_field": "b"},
+    ])
+    status, fields, detail = workflow_engine._apply_transform_detailed(
+        node, {"junk": "not-a-number", "book": "  HKFXO_052  "})
+    assert status == "ok"  # one bad entry still doesn't block the rest
+    assert fields == {"b": "HKFXO_052"}
+    assert "a" in detail and "cast_numeric" in detail
+
+
+def test_apply_transform_detailed_is_quiet_on_success():
+    node = _transform_node(op="trim", field="book", output_field="book")
+    status, fields, detail = workflow_engine._apply_transform_detailed(node, {"book": "  HKFXO_052  "})
+    assert status == "ok" and fields == {"book": "HKFXO_052"} and detail == ""
+
+
+def test_run_workflow_trail_surfaces_the_parse_date_failure_reason():
+    """End-to-end: a dry run through run_workflow() puts the real failure
+    reason in the TRANSFORM trail step's detail, not a blank string."""
+    workflow = Workflow(nodes=[
+        WorkflowNode(id="t", type=NodeType.TRANSFORM, transform={
+            "field": "trade_date", "op": "parse_date", "output_field": "trade_date_iso",
+            "input_format": "mdy"}),
+    ])
+    results, _, _ = workflow_engine.run_workflow(workflow, [{"trade_date": "not-a-date"}],
+                                                  reference_store.reference_loader)
+    trail = results[0].trail
+    transform_step = next(s for s in trail if s.node_type == NodeType.TRANSFORM)
+    assert transform_step.status == "error"
+    assert "trade_date" in transform_step.detail and "parse_date" in transform_step.detail
 
 
 # --------------------------------------------------------------------------

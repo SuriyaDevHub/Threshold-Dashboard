@@ -46,7 +46,21 @@ def _parse_date(val: Any, cfg: Dict[str, Any]) -> str:
     pattern = cfg.get("custom_pattern") if fmt == "custom" else DATE_INPUT_FORMATS.get(fmt)
     if not pattern:
         raise ValueError(f"unknown date input_format: {fmt!r}")
-    return _dt.datetime.strptime(str(val).strip(), pattern).date().isoformat()
+    s = str(val).strip()
+    try:
+        return _dt.datetime.strptime(s, pattern).date().isoformat()
+    except ValueError:
+        # A date-only pattern rejects a value carrying a trailing
+        # time-of-day component (e.g. "15-01-2026 00:00:00", or an ISO
+        # "...T00:00:00Z" suffix) — common when a "date" column is really
+        # a midnight timestamp in the source system. Stripping that
+        # suffix doesn't change the date's meaning (unlike guessing
+        # between two date orderings), so retry once against just the
+        # date portion before giving up for good.
+        head = s.split("T", 1)[0].split(" ", 1)[0]
+        if head == s:
+            raise
+        return _dt.datetime.strptime(head, pattern).date().isoformat()
 
 
 def apply_transform_op(op: Optional[str], val: Any, cfg: Dict[str, Any]) -> Any:

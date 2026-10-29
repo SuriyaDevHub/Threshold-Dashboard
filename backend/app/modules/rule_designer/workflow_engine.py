@@ -303,7 +303,7 @@ def _resolve_value(value: Optional[ValueRef], record: dict) -> Any:
     return record.get(value.name)
 
 
-def _apply_single_transform(cfg: Dict[str, Any], record: dict) -> Tuple[str, Dict[str, Any]]:
+def _apply_single_transform(cfg: Dict[str, Any], record: dict) -> Tuple[str, Dict[str, Any], str]:
     op = cfg.get("op")
 
     if op == "coalesce":
@@ -314,20 +314,24 @@ def _apply_single_transform(cfg: Dict[str, Any], record: dict) -> Tuple[str, Dic
         for candidate in cfg.get("fields", []):
             v = record.get(candidate)
             if v is not None and v != "":
-                return "ok", {out: v}
-        return "ok", {out: None}
+                return "ok", {out: v}, ""
+        return "ok", {out: None}, ""
 
     src = cfg.get("field")
     out = cfg.get("output_field", src)
     val = record.get(src)
     try:
         val = apply_transform_op(op, val, cfg)
-        return "ok", {out: val}
-    except (TypeError, ValueError, IndexError):
-        return "error", {}
+        return "ok", {out: val}, ""
+    except (TypeError, ValueError, IndexError) as exc:
+        # The underlying exception message (e.g. "time data '...' does not
+        # match format '...'" from a parse_date mismatch) is the one clue
+        # an admin has for WHY a field silently never showed up a few
+        # nodes later — surface it instead of a blank/missing detail.
+        return "error", {}, f"{out}: could not apply {op} to {src}={val!r} ({exc})"
 
 
-def _apply_transform(node: WorkflowNode, record: dict) -> Tuple[str, Dict[str, Any]]:
+def _apply_transform_detailed(node: WorkflowNode, record: dict) -> Tuple[str, Dict[str, Any], str]:
     """A TRANSFORM node's config is normally one {field, op, output_field,
     ...} entry — still fully supported, unchanged, for every rule
     authored before this existed. It may instead carry a `transforms`
@@ -339,18 +343,33 @@ def _apply_transform(node: WorkflowNode, record: dict) -> Tuple[str, Dict[str, A
     chained standalone TRANSFORM nodes already have. Each entry's own
     failure (caught inside _apply_single_transform, never raised) only
     omits that one field from the result; it doesn't stop the rest of
-    the list."""
+    the list — but every failure's reason is collected into `detail` so
+    the dry-run trail can explain exactly why a field is missing instead
+    of a downstream node just reporting "field is missing" with no cause."""
     cfg = node.transform or {}
     entries = cfg.get("transforms")
     if isinstance(entries, list) and entries:
         working = dict(record)
         fields: Dict[str, Any] = {}
+        problems: List[str] = []
         for entry in entries:
-            _, entry_fields = _apply_single_transform(entry, working)
+            _, entry_fields, entry_detail = _apply_single_transform(entry, working)
             working.update(entry_fields)
             fields.update(entry_fields)
-        return "ok", fields
+            if entry_detail:
+                problems.append(entry_detail)
+        return "ok", fields, "; ".join(problems)
     return _apply_single_transform(cfg, record)
+
+
+def _apply_transform(node: WorkflowNode, record: dict) -> Tuple[str, Dict[str, Any]]:
+    """Thin (status, fields) wrapper over _apply_transform_detailed() for
+    every caller that doesn't need the failure-reason `detail` string —
+    kept as its own function so those call sites (and the tests built
+    against them) don't have to unpack a 3-tuple just to ignore the
+    third element."""
+    status, fields, _detail = _apply_transform_detailed(node, record)
+    return status, fields
 
 
 def run_workflow(
@@ -483,11 +502,11 @@ def run_workflow(
                 continue
 
             if node.type == NodeType.TRANSFORM and node.transform:
-                status, fields = _apply_transform(node, wr)
+                status, fields, detail = _apply_transform_detailed(node, wr)
                 wr.update(fields)
                 trail.append(RecordTraceStep(node_id=node.id, node_type=node.type,
                                               label=node.label or "Transform", status=status,
-                                              fields_added=fields))
+                                              detail=detail, fields_added=fields))
                 continue
 
             if node.type == NodeType.VALIDATION and node.validation:
