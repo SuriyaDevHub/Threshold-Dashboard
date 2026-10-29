@@ -14,7 +14,8 @@ import { Plus, Trash2 } from "lucide-react";
 // only reachable with `allowNone`) — never a partial patch — so the
 // caller can set it directly without re-merging.
 
-const OP_PARAM_KEYS = ["precision", "start", "end", "delimiter", "index", "find", "replace_with", "rules", "default"];
+const OP_PARAM_KEYS = ["precision", "start", "end", "delimiter", "index", "find", "replace_with", "rules", "default",
+                       "input_format", "custom_pattern"];
 
 const TRANSFORM_OPS = [
   { value: "round", label: "round" },
@@ -27,6 +28,20 @@ const TRANSFORM_OPS = [
   { value: "cast_numeric", label: "cast to number" },
   { value: "cast_string", label: "cast to text" },
   { value: "value_map", label: "map text to a value" },
+  { value: "parse_date", label: "parse date" },
+];
+
+// Must match transform_ops.py's DATE_INPUT_FORMATS keys exactly, plus the
+// two epoch literals and "custom" that _parse_date() also recognizes.
+const DATE_INPUT_FORMATS = [
+  { value: "mdy", label: "MM/DD/YYYY" },
+  { value: "dmy", label: "DD/MM/YYYY" },
+  { value: "dmy_dash", label: "DD-MM-YYYY" },
+  { value: "d_mon_y", label: "DD-Mon-YYYY (15-Jan-2026)" },
+  { value: "ymd_slash", label: "YYYY/MM/DD" },
+  { value: "epoch_seconds", label: "Epoch seconds" },
+  { value: "epoch_millis", label: "Epoch milliseconds" },
+  { value: "custom", label: "Custom pattern…" },
 ];
 
 export default function TransformOpFields({ transform, onChange, allowNone }) {
@@ -98,6 +113,23 @@ export default function TransformOpFields({ transform, onChange, allowNone }) {
       {op === "value_map" && (
         <ValueMapFields transform={transform} onChange={set} />
       )}
+
+      {op === "parse_date" && (
+        <>
+          <label className="control"><span>Input format</span>
+            <select value={transform?.input_format || ""} onChange={(e) => set({ input_format: e.target.value })}>
+              <option value="" disabled>format…</option>
+              {DATE_INPUT_FORMATS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
+            </select>
+          </label>
+          {transform?.input_format === "custom" && (
+            <label className="control"><span>strptime pattern</span>
+              <input placeholder="e.g. %d.%m.%Y" value={transform?.custom_pattern ?? ""}
+                     onChange={(e) => set({ custom_pattern: e.target.value })} />
+            </label>
+          )}
+        </>
+      )}
     </>
   );
 }
@@ -139,5 +171,6 @@ export function transformHint(op) {
   if (op === "substring") return 'e.g. start 0, end 3 keeps the first 3 characters. Leave end blank to go to the end of the text.';
   if (op === "split") return 'e.g. splitting "HKFXO_052" on "_" at index 1 gives "052".';
   if (op === "value_map") return 'Checked top to bottom — the first rule whose text is found (case-insensitive) anywhere in the value wins, e.g. "London (LN) Branch" containing "LONDON" maps to "LN".';
+  if (op === "parse_date") return "Output is always stored as YYYY-MM-DD, so it can be compared with before/after/on against any other date field — including one that never needed a transform.";
   return null;
 }

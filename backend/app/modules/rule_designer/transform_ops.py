@@ -1,5 +1,5 @@
 """Shared value-transform vocabulary — round/upper/lower/trim/substring/
-split/replace/cast_numeric/cast_string/value_map.
+split/replace/cast_numeric/cast_string/value_map/parse_date.
 
 Factored out of workflow_engine.py so it has exactly one implementation,
 used by both:
@@ -15,7 +15,38 @@ already imports lookup_engine.
 """
 from __future__ import annotations
 
+import datetime as _dt
 from typing import Any, Dict, Optional
+
+# Preset strptime patterns a `parse_date` TRANSFORM can select by name —
+# kept here (not just typed free-hand in the UI) so a wrong/typo'd pattern
+# can't silently reach strptime from client input; "custom" is the escape
+# hatch for anything not in this list via cfg["custom_pattern"].
+DATE_INPUT_FORMATS: Dict[str, str] = {
+    "mdy": "%m/%d/%Y",
+    "dmy": "%d/%m/%Y",
+    "dmy_dash": "%d-%m-%Y",
+    "d_mon_y": "%d-%b-%Y",
+    "ymd_slash": "%Y/%m/%d",
+}
+
+
+def _parse_date(val: Any, cfg: Dict[str, Any]) -> str:
+    """Normalize `val` to a canonical ISO `YYYY-MM-DD` string, matching
+    schema.py's _DATE_RE and condition_engine.py's _to_date() exactly, so
+    the result is immediately comparable via BEFORE/AFTER/ON. Raises
+    ValueError on anything unparseable — never silently guesses a format,
+    since e.g. "01/02/2026" is genuinely ambiguous (Jan 2 vs Feb 1) and a
+    wrong guess would silently misdate a real trade."""
+    fmt = cfg.get("input_format")
+    if fmt == "epoch_seconds":
+        return _dt.datetime.fromtimestamp(float(val), tz=_dt.timezone.utc).date().isoformat()
+    if fmt == "epoch_millis":
+        return _dt.datetime.fromtimestamp(float(val) / 1000, tz=_dt.timezone.utc).date().isoformat()
+    pattern = cfg.get("custom_pattern") if fmt == "custom" else DATE_INPUT_FORMATS.get(fmt)
+    if not pattern:
+        raise ValueError(f"unknown date input_format: {fmt!r}")
+    return _dt.datetime.strptime(str(val).strip(), pattern).date().isoformat()
 
 
 def apply_transform_op(op: Optional[str], val: Any, cfg: Dict[str, Any]) -> Any:
@@ -53,6 +84,8 @@ def apply_transform_op(op: Optional[str], val: Any, cfg: Dict[str, Any]) -> Any:
         return float(str(val).replace(",", ""))
     if op == "cast_string":
         return str(val)
+    if op == "parse_date":
+        return _parse_date(val, cfg)
     if op == "value_map":
         # Free-text -> code normalization: "LONDON (LN)" -> "LN". First
         # matching rule wins (checked in configured order), falling back to

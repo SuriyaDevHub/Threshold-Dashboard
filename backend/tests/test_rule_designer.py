@@ -2146,6 +2146,109 @@ def test_value_map_transform_without_default_returns_original_value():
 
 
 # --------------------------------------------------------------------------
+# workflow_engine — parse_date transform (normalizes to canonical YYYY-MM-DD
+# so a derived/cleaned-up date field becomes comparable via BEFORE/AFTER/ON)
+# --------------------------------------------------------------------------
+
+def test_parse_date_transform_explicit_mdy_format():
+    node = _transform_node(op="parse_date", field="trade_date_us", output_field="trade_date",
+                            input_format="mdy")
+    status, fields = workflow_engine._apply_transform(node, {"trade_date_us": "01/15/2026"})
+    assert status == "ok" and fields == {"trade_date": "2026-01-15"}
+
+
+def test_parse_date_transform_dmy_dash_format():
+    node = _transform_node(op="parse_date", field="trade_date_eu", output_field="trade_date",
+                            input_format="dmy_dash")
+    status, fields = workflow_engine._apply_transform(node, {"trade_date_eu": "15-01-2026"})
+    assert status == "ok" and fields == {"trade_date": "2026-01-15"}
+
+
+def test_parse_date_transform_day_month_name_year_format():
+    node = _transform_node(op="parse_date", field="trade_date", output_field="trade_date_iso",
+                            input_format="d_mon_y")
+    status, fields = workflow_engine._apply_transform(node, {"trade_date": "15-Jan-2026"})
+    assert status == "ok" and fields == {"trade_date_iso": "2026-01-15"}
+
+
+def test_parse_date_transform_epoch_seconds():
+    node = _transform_node(op="parse_date", field="ts", output_field="trade_date",
+                            input_format="epoch_seconds")
+    status, fields = workflow_engine._apply_transform(node, {"ts": 1768435200})  # 2026-01-15T00:00:00Z
+    assert status == "ok" and fields == {"trade_date": "2026-01-15"}
+
+
+def test_parse_date_transform_epoch_millis():
+    node = _transform_node(op="parse_date", field="ts", output_field="trade_date",
+                            input_format="epoch_millis")
+    status, fields = workflow_engine._apply_transform(node, {"ts": 1768435200000})
+    assert status == "ok" and fields == {"trade_date": "2026-01-15"}
+
+
+def test_parse_date_transform_custom_pattern():
+    node = _transform_node(op="parse_date", field="trade_date", output_field="trade_date_iso",
+                            input_format="custom", custom_pattern="%d.%m.%Y")
+    status, fields = workflow_engine._apply_transform(node, {"trade_date": "15.01.2026"})
+    assert status == "ok" and fields == {"trade_date_iso": "2026-01-15"}
+
+
+def test_parse_date_transform_unparseable_value_yields_error_status():
+    node = _transform_node(op="parse_date", field="trade_date_us", output_field="trade_date",
+                            input_format="mdy")
+    status, fields = workflow_engine._apply_transform(node, {"trade_date_us": "not-a-date"})
+    assert status == "error" and fields == {}
+
+
+def test_parse_date_transform_wrong_format_selected_yields_error_status():
+    # "15/01/2026" doesn't fit %m/%d/%Y (no month 15) — must fail loudly,
+    # never silently guess a different format.
+    node = _transform_node(op="parse_date", field="trade_date", output_field="trade_date_iso",
+                            input_format="mdy")
+    status, fields = workflow_engine._apply_transform(node, {"trade_date": "15/01/2026"})
+    assert status == "error" and fields == {}
+
+
+def test_parse_date_transform_feeds_before_after_comparison_end_to_end():
+    """A date normalized by parse_date is immediately usable by
+    condition_engine's BEFORE/AFTER/ON — the concrete end-to-end proof
+    that comparing two (now-normalized) date fields works."""
+    node_a = _transform_node(op="parse_date", field="date_a_us", output_field="date_a", input_format="mdy")
+    node_b = _transform_node(op="parse_date", field="date_b_us", output_field="date_b", input_format="mdy")
+    record = {"date_a_us": "01/15/2026", "date_b_us": "02/20/2026"}
+    _, fields_a = workflow_engine._apply_transform(node_a, record)
+    _, fields_b = workflow_engine._apply_transform(node_b, record)
+    record.update(fields_a)
+    record.update(fields_b)
+
+    cond = Condition(field="date_a", operator=Operator.BEFORE,
+                      value=ValueRef(type="column", name="date_b"))
+    assert condition_engine.eval_condition(cond, record).result is True
+
+    cond_after = Condition(field="date_b", operator=Operator.AFTER,
+                            value=ValueRef(type="column", name="date_a"))
+    assert condition_engine.eval_condition(cond_after, record).result is True
+
+
+def test_date_field_vs_field_comparison_already_works_on_raw_untouched_columns():
+    """Locks in today's already-working behavior: two raw ISO date columns
+    (no TRANSFORM needed) compare correctly via BEFORE/AFTER/ON with the
+    other side as a column ValueRef, not just a static literal."""
+    record = {"settle_date": "2026-01-10", "trade_date": "2026-01-05"}
+
+    before = Condition(field="trade_date", operator=Operator.BEFORE,
+                        value=ValueRef(type="column", name="settle_date"))
+    assert condition_engine.eval_condition(before, record).result is True
+
+    after = Condition(field="settle_date", operator=Operator.AFTER,
+                       value=ValueRef(type="column", name="trade_date"))
+    assert condition_engine.eval_condition(after, record).result is True
+
+    on = Condition(field="trade_date", operator=Operator.ON,
+                    value=ValueRef(type="column", name="trade_date"))
+    assert condition_engine.eval_condition(on, record).result is True
+
+
+# --------------------------------------------------------------------------
 # workflow_engine — multi-column TRANSFORM ({"transforms": [...]})
 # --------------------------------------------------------------------------
 

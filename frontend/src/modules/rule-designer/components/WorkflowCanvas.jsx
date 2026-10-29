@@ -85,6 +85,14 @@ function newNode(type, index) {
 const NUMERIC_AGGREGATES = new Set(["sum", "count", "min", "max"]);
 // TRANSFORM ops whose output is always numeric.
 const NUMERIC_TRANSFORM_OPS = new Set(["cast_numeric", "round"]);
+// TRANSFORM ops whose output is always a canonical YYYY-MM-DD date string.
+const DATE_TRANSFORM_OPS = new Set(["parse_date"]);
+
+function transformOutputType(op) {
+  if (NUMERIC_TRANSFORM_OPS.has(op)) return "numeric";
+  if (DATE_TRANSFORM_OPS.has(op)) return "date";
+  return "string";
+}
 
 export function nodeOutputs(node) {
   // Each entry is {field, type} — type is best-effort ("string" when the
@@ -105,7 +113,7 @@ export function nodeOutputs(node) {
       : node.transform.output_field ? [node.transform] : [];
     return entries
       .filter((t) => t.output_field)
-      .map((t) => ({ field: t.output_field, type: NUMERIC_TRANSFORM_OPS.has(t.op) ? "numeric" : "string" }));
+      .map((t) => ({ field: t.output_field, type: transformOutputType(t.op) }));
   }
   return [];
 }
