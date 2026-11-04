@@ -2288,6 +2288,82 @@ def test_date_field_vs_field_comparison_already_works_on_raw_untouched_columns()
     assert condition_engine.eval_condition(on, record).result is True
 
 
+# --------------------------------------------------------------------------
+# workflow_engine — date_shift transform (calendar-month/day/week/year
+# arithmetic on a date field), composed with before/after to implement
+# threshold rules like "more than one month before COB date"
+# --------------------------------------------------------------------------
+
+def test_date_shift_transform_months_uses_calendar_months_not_a_fixed_day_count():
+    node = _transform_node(op="date_shift", field="cob_date", output_field="shifted", unit="months", amount=-1)
+    status, fields = workflow_engine._apply_transform(node, {"cob_date": "2026-03-15"})
+    assert status == "ok" and fields == {"shifted": "2026-02-15"}
+
+
+def test_date_shift_transform_months_clamps_at_a_shorter_target_month():
+    node = _transform_node(op="date_shift", field="cob_date", output_field="shifted", unit="months", amount=-1)
+    status, fields = workflow_engine._apply_transform(node, {"cob_date": "2026-03-31"})
+    assert status == "ok" and fields == {"shifted": "2026-02-28"}
+
+
+def test_date_shift_transform_years_clamps_feb_29_in_a_non_leap_target_year():
+    node = _transform_node(op="date_shift", field="d", output_field="shifted", unit="years", amount=1)
+    status, fields = workflow_engine._apply_transform(node, {"d": "2024-02-29"})
+    assert status == "ok" and fields == {"shifted": "2025-02-28"}
+
+
+def test_date_shift_transform_days_and_weeks():
+    node_days = _transform_node(op="date_shift", field="d", output_field="shifted", unit="days", amount=-30)
+    _, fields_days = workflow_engine._apply_transform(node_days, {"d": "2026-03-15"})
+    assert fields_days == {"shifted": "2026-02-13"}
+
+    node_weeks = _transform_node(op="date_shift", field="d", output_field="shifted", unit="weeks", amount=2)
+    _, fields_weeks = workflow_engine._apply_transform(node_weeks, {"d": "2026-03-15"})
+    assert fields_weeks == {"shifted": "2026-03-29"}
+
+
+def test_date_shift_transform_rejects_an_unparseable_input_date():
+    node = _transform_node(op="date_shift", field="d", output_field="shifted", unit="months", amount=-1)
+    status, fields = workflow_engine._apply_transform(node, {"d": "not-a-date"})
+    assert status == "error" and fields == {}
+
+
+def test_long_backdated_deal_rule_end_to_end_shift_then_before():
+    """The reported real-world rule: 'if trade date is more than one
+    month before COB date, classify as Long Backdated Deal.' Built as
+    TRANSFORM(date_shift COB -1 month) -> CONDITION(trade_date before
+    shifted) -> OUTCOME, run through the full engine."""
+    workflow = Workflow(nodes=[
+        WorkflowNode(id="t", type=NodeType.TRANSFORM, transform={
+            "field": "cob_date", "op": "date_shift", "output_field": "cob_minus_1mo",
+            "unit": "months", "amount": -1}),
+        WorkflowNode(id="c", type=NodeType.CONDITION, condition=ConditionGroup(operator="AND", children=[
+            Condition(field="trade_date", operator=Operator.BEFORE,
+                      value=ValueRef(type="column", name="cob_minus_1mo"))])),
+        WorkflowNode(id="out", type=NodeType.OUTCOME, outcomes=[
+            OutcomeAction(field="Reason", value=ValueRef(type="static", value="Long Backdated Deal"))]),
+    ], edges=[WorkflowEdge(source="t", target="c"), WorkflowEdge(source="c", target="out")])
+
+    rows = [
+        {"id": "well_over", "trade_date": "2026-01-10", "cob_date": "2026-03-15"},   # > 1mo before -> flagged
+        {"id": "within_1mo", "trade_date": "2026-02-20", "cob_date": "2026-03-15"},  # < 1mo before -> not flagged
+        {"id": "exact_boundary", "trade_date": "2026-02-15", "cob_date": "2026-03-15"},  # == 1mo before -> NOT flagged (strict "more than")
+        {"id": "1_day_over", "trade_date": "2026-02-14", "cob_date": "2026-03-15"},  # 1 day more than 1mo before -> flagged
+    ]
+    results, _, _ = workflow_engine.run_workflow(workflow, rows, reference_store.reference_loader, record_id_field="id")
+    by_id = {r.record_id: r for r in results}
+    assert by_id["well_over"].matched and by_id["well_over"].outcome["Reason"] == "Long Backdated Deal"
+    assert not by_id["within_1mo"].matched
+    assert not by_id["exact_boundary"].matched
+    assert by_id["1_day_over"].matched and by_id["1_day_over"].outcome["Reason"] == "Long Backdated Deal"
+
+
+def test_node_outputs_tags_date_shift_as_part_of_field_availability():
+    node = WorkflowNode(id="t", type=NodeType.TRANSFORM, transform={
+        "field": "cob_date", "op": "date_shift", "output_field": "cob_minus_1mo", "unit": "months", "amount": -1})
+    assert workflow_engine.node_outputs(node) == ["cob_minus_1mo"]
+
+
 def test_parse_date_transform_tolerates_trailing_time_component():
     """A "date" column that's really a midnight timestamp in the source
     system (e.g. "15-01-2026 00:00:00" against a date-only DD-MM-YYYY

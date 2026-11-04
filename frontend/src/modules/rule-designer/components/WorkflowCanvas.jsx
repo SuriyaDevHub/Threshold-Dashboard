@@ -100,7 +100,7 @@ const NUMERIC_AGGREGATES = new Set(["sum", "count", "min", "max"]);
 // TRANSFORM ops whose output is always numeric.
 const NUMERIC_TRANSFORM_OPS = new Set(["cast_numeric", "round"]);
 // TRANSFORM ops whose output is always a canonical YYYY-MM-DD date string.
-const DATE_TRANSFORM_OPS = new Set(["parse_date"]);
+const DATE_TRANSFORM_OPS = new Set(["parse_date", "date_shift"]);
 
 function transformOutputType(op) {
   if (NUMERIC_TRANSFORM_OPS.has(op)) return "numeric";

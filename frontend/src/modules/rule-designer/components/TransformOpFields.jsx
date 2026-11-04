@@ -15,7 +15,7 @@ import { Plus, Trash2 } from "lucide-react";
 // caller can set it directly without re-merging.
 
 const OP_PARAM_KEYS = ["precision", "start", "end", "delimiter", "index", "find", "replace_with", "rules", "default",
-                       "input_format", "custom_pattern"];
+                       "input_format", "custom_pattern", "unit", "amount"];
 
 const TRANSFORM_OPS = [
   { value: "round", label: "round" },
@@ -29,6 +29,15 @@ const TRANSFORM_OPS = [
   { value: "cast_string", label: "cast to text" },
   { value: "value_map", label: "map text to a value" },
   { value: "parse_date", label: "parse date" },
+  { value: "date_shift", label: "shift date" },
+];
+
+// Must match transform_ops.py's _shift_date() units exactly.
+const DATE_SHIFT_UNITS = [
+  { value: "days", label: "days" },
+  { value: "weeks", label: "weeks" },
+  { value: "months", label: "months" },
+  { value: "years", label: "years" },
 ];
 
 // Must match transform_ops.py's DATE_INPUT_FORMATS keys exactly, plus the
@@ -130,6 +139,19 @@ export default function TransformOpFields({ transform, onChange, allowNone }) {
           )}
         </>
       )}
+
+      {op === "date_shift" && (
+        <>
+          <label className="control"><span>Amount</span>
+            <input type="number" placeholder="e.g. -1" value={transform?.amount ?? ""}
+                   onChange={(e) => set({ amount: e.target.value })} />
+          </label>
+          <select value={transform?.unit || ""} onChange={(e) => set({ unit: e.target.value })}>
+            <option value="" disabled>unit…</option>
+            {DATE_SHIFT_UNITS.map((u) => <option key={u.value} value={u.value}>{u.label}</option>)}
+          </select>
+        </>
+      )}
     </>
   );
 }
@@ -172,5 +194,6 @@ export function transformHint(op) {
   if (op === "split") return 'e.g. splitting "HKFXO_052" on "_" at index 1 gives "052".';
   if (op === "value_map") return 'Checked top to bottom — the first rule whose text is found (case-insensitive) anywhere in the value wins, e.g. "London (LN) Branch" containing "LONDON" maps to "LN".';
   if (op === "parse_date") return "Output is always stored as YYYY-MM-DD, so it can be compared with before/after/on against any other date field — including one that never needed a transform.";
+  if (op === "date_shift") return 'Negative amount shifts earlier, positive shifts later (e.g. months, -1 = "one month before"). Months/years shift by calendar month, not a fixed day count (Mar 31 minus 1 month lands on Feb 28). Combine with a "before"/"after" condition against this field to build thresholds like "more than one month before COB date": shift COB date back 1 month, then check trade date is before the result.';
   return null;
 }

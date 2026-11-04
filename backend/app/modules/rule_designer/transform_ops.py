@@ -1,5 +1,5 @@
 """Shared value-transform vocabulary — round/upper/lower/trim/substring/
-split/replace/cast_numeric/cast_string/value_map/parse_date.
+split/replace/cast_numeric/cast_string/value_map/parse_date/date_shift.
 
 Factored out of workflow_engine.py so it has exactly one implementation,
 used by both:
@@ -15,6 +15,7 @@ already imports lookup_engine.
 """
 from __future__ import annotations
 
+import calendar
 import datetime as _dt
 from typing import Any, Dict, Optional
 
@@ -63,6 +64,51 @@ def _parse_date(val: Any, cfg: Dict[str, Any]) -> str:
         return _dt.datetime.strptime(head, pattern).date().isoformat()
 
 
+def _parse_iso_date(val: Any) -> _dt.date:
+    """Parse an already-canonical date value — a raw ISO column, or the
+    output of a preceding parse_date TRANSFORM — the same way
+    condition_engine._to_date() does (truncate to the first 10 chars,
+    strptime as %Y-%m-%d), so date_shift's notion of "a date" matches
+    exactly what BEFORE/AFTER/ON will later compare it against. A value
+    in some OTHER format needs a parse_date step first — this is
+    intentionally not another format-guessing entry point."""
+    return _dt.datetime.strptime(str(val)[:10], "%Y-%m-%d").date()
+
+
+def _shift_months(d: _dt.date, months: int) -> _dt.date:
+    """Calendar-month arithmetic, not a fixed day count — "one month
+    before" a trade/COB date means the same day of the previous calendar
+    month (Mar 15 -> Feb 15), not "30 days earlier", which would silently
+    drift across months of different lengths. Clamps the day when the
+    target month is shorter (Mar 31 - 1 month -> Feb 28/29)."""
+    total = d.month - 1 + months
+    year = d.year + total // 12
+    month = total % 12 + 1
+    day = min(d.day, calendar.monthrange(year, month)[1])
+    return _dt.date(year, month, day)
+
+
+def _shift_date(val: Any, cfg: Dict[str, Any]) -> str:
+    """Shift a date by a signed amount of days/weeks/months/years,
+    returning a canonical ISO string — e.g. "shift COB date back 1
+    month" lets a CONDITION's existing BEFORE operator answer "is the
+    trade date more than one month before the COB date?" by comparing
+    trade_date against this shifted field, without needing a separate
+    date-difference/numeric-threshold mechanism."""
+    d = _parse_iso_date(val)
+    unit = cfg.get("unit")
+    amount = int(cfg.get("amount") or 0)
+    if unit == "days":
+        return (d + _dt.timedelta(days=amount)).isoformat()
+    if unit == "weeks":
+        return (d + _dt.timedelta(weeks=amount)).isoformat()
+    if unit == "months":
+        return _shift_months(d, amount).isoformat()
+    if unit == "years":
+        return _shift_months(d, amount * 12).isoformat()
+    raise ValueError(f"unknown date_shift unit: {unit!r}")
+
+
 def apply_transform_op(op: Optional[str], val: Any, cfg: Dict[str, Any]) -> Any:
     """Pure value transform — never touches a record or field name, just
     the value itself. Returns `val` unchanged for a None value or an
@@ -100,6 +146,8 @@ def apply_transform_op(op: Optional[str], val: Any, cfg: Dict[str, Any]) -> Any:
         return str(val)
     if op == "parse_date":
         return _parse_date(val, cfg)
+    if op == "date_shift":
+        return _shift_date(val, cfg)
     if op == "value_map":
         # Free-text -> code normalization: "LONDON (LN)" -> "LN". First
         # matching rule wins (checked in configured order), falling back to
