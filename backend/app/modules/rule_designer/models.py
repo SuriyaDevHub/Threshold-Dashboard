@@ -438,6 +438,25 @@ class WorkflowEdge(BaseModel):
     id: str = Field(default_factory=lambda: _id("edge"))
     source: str
     target: str
+    # None (every edge in every rule saved before this field existed, and
+    # every edge whose source isn't a gate node) = unconditional — taken
+    # whenever its source node runs, exactly like today. "matched" =
+    # behaviorally identical to None when the source is a gate (FILTER/
+    # GROUP/CONDITION) node, kept distinct only so the UI can draw "the
+    # normal path" separately from "the escape path" out of a branching
+    # condition. "not_matched" = only taken when the source gate's result
+    # was False — lets a failed condition route to a DIFFERENT node
+    # instead of ending the record right there (workflow_engine.py's
+    # per-record liveness walk). Ignored at runtime when the source node
+    # isn't a gate type.
+    branch: Optional[str] = None
+
+    @field_validator("branch")
+    @classmethod
+    def _check_branch(cls, v):
+        if v is not None and v not in {"matched", "not_matched"}:
+            raise ValueError("WorkflowEdge.branch must be 'matched', 'not_matched', or omitted")
+        return v
 
 
 class Workflow(BaseModel):

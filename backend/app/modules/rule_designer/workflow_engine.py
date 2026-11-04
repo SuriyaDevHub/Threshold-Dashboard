@@ -24,19 +24,69 @@ from app.modules.rule_designer import (
 from app.modules.rule_designer.transform_ops import apply_transform_op
 from app.modules.rule_designer.models import (
     DryRunSummary, EnrichmentDiagnostic, LookupType, NodeType, RecordResult, RecordTraceStep,
-    ValueRef, Workflow, WorkflowNode,
+    ValueRef, Workflow, WorkflowEdge, WorkflowNode,
 )
 
 ReferenceLoader = Callable[[str, Optional[int]], Optional[List[dict]]]
 
+# FILTER/GROUP/CONDITION nodes are the only ones with a pass/fail result a
+# WorkflowEdge.branch can route on ("matched"/"not_matched"). Applied
+# uniformly to all three at the engine level even though only CONDITION
+# nodes expose a second connector in the visual builder today — FILTER/
+# GROUP branching is free future-proofing, not something any rule can
+# wire yet, so it adds zero risk.
+GATE_TYPES = {NodeType.FILTER, NodeType.GROUP, NodeType.CONDITION}
 
-def topo_order(workflow: Workflow) -> List[WorkflowNode]:
-    if not workflow.edges:
-        return list(workflow.nodes)
-    nodes_by_id = {n.id: n for n in workflow.nodes}
+
+def _effective_edges(workflow: Workflow) -> List[WorkflowEdge]:
+    """workflow.edges as authored, unless it's empty — then synthesizes an
+    implicit chain over workflow.nodes in declared order (node[i] ->
+    node[i+1], unconditional). This is exactly what topo_order() and every
+    edge-aware function below already need as their "no edges given" case;
+    pulling it into one place means every one of them agrees on what the
+    graph actually is instead of re-deriving the fallback separately."""
+    if workflow.edges:
+        return workflow.edges
+    return [WorkflowEdge(source=a.id, target=b.id) for a, b in zip(workflow.nodes, workflow.nodes[1:])]
+
+
+def _build_adjacency(workflow: Workflow) -> Tuple[Dict[str, List[WorkflowEdge]], Dict[str, List[WorkflowEdge]]]:
+    """(incoming_by_target, outgoing_by_source) over _effective_edges()."""
+    edges = _effective_edges(workflow)
+    incoming: Dict[str, List[WorkflowEdge]] = {n.id: [] for n in workflow.nodes}
+    outgoing: Dict[str, List[WorkflowEdge]] = {n.id: [] for n in workflow.nodes}
+    for e in edges:
+        if e.source in outgoing and e.target in incoming:
+            outgoing[e.source].append(e)
+            incoming[e.target].append(e)
+    return incoming, outgoing
+
+
+def _edge_fires(edge: WorkflowEdge, is_gate: bool, source_ok: bool) -> bool:
+    """Whether `edge` is taken, given its source node's own per-record
+    result this run. A "not_matched" edge only fires off a real gate's
+    False result (routing a failed FILTER/CONDITION somewhere other than
+    a dead stop); every other edge (branch is None/"matched", or the
+    source isn't a gate at all) fires exactly when its source succeeded —
+    identical to today's "every node always continues to whatever's
+    next" for every non-gate type, and to today's "stop everything" for
+    a gate with no escape wired (source_ok=False, no not_matched edge to
+    take instead)."""
+    if edge.branch == "not_matched":
+        return is_gate and not source_ok
+    return source_ok
+
+
+def _kahn_order(workflow: Workflow) -> Tuple[List[str], bool]:
+    """(node ids in topological order, had_cycle). On a cycle the id list
+    is whatever Kahn's algorithm resolved before stalling — shorter than
+    len(workflow.nodes) — callers decide what to do with that: topo_order()
+    (used for execution, which must never silently drop a node) falls back
+    to declared order; has_cycle() (used for validation) only needs the
+    bool."""
     indegree = {n.id: 0 for n in workflow.nodes}
     adj: Dict[str, List[str]] = {n.id: [] for n in workflow.nodes}
-    for e in workflow.edges:
+    for e in _effective_edges(workflow):
         if e.source in adj and e.target in indegree:
             adj[e.source].append(e.target)
             indegree[e.target] += 1
@@ -49,21 +99,69 @@ def topo_order(workflow: Workflow) -> List[WorkflowNode]:
             indegree[nxt] -= 1
             if indegree[nxt] == 0:
                 queue.append(nxt)
-    if len(order) != len(workflow.nodes):
-        # cycle — fall back to declared order rather than silently drop nodes
+    return order, len(order) != len(workflow.nodes)
+
+
+def has_cycle(workflow: Workflow) -> bool:
+    """True if the workflow's edges form a cycle. topo_order()'s own
+    return value can't be used for this (it always returns a full-length
+    list, falling back to declared order on a cycle rather than dropping
+    nodes), so validation needs this instead."""
+    _ids, cyclic = _kahn_order(workflow)
+    return cyclic
+
+
+def topo_order(workflow: Workflow) -> List[WorkflowNode]:
+    nodes_by_id = {n.id: n for n in workflow.nodes}
+    ids, cyclic = _kahn_order(workflow)
+    if cyclic:
+        # fall back to declared order rather than silently drop nodes
         return list(workflow.nodes)
-    return [nodes_by_id[nid] for nid in order]
+    return [nodes_by_id[nid] for nid in ids]
+
+
+def _ancestor_ids(incoming: Dict[str, List[WorkflowEdge]], node_id: str) -> set:
+    """Transitive closure of node_id's true graph predecessors, via ALL
+    incoming edges regardless of `branch` — a not_matched edge's source is
+    still a real ancestor (its outputs could exist on the record by the
+    time node_id runs), only runtime LIVENESS (not static availability)
+    cares about which branch was actually taken."""
+    seen: set = set()
+    stack = [e.source for e in incoming.get(node_id, [])]
+    while stack:
+        nid = stack.pop()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        stack.extend(e.source for e in incoming.get(nid, []))
+    return seen
+
+
+def ancestor_node_ids(workflow: Workflow, node_id: str) -> set:
+    """Public wrapper over _ancestor_ids()/_build_adjacency() for callers
+    outside this module (validation_service.py) that need real graph
+    ancestry — e.g. to check whether a node has a FILTER/CONDITION
+    upstream of it — without duplicating the traversal."""
+    incoming, _outgoing = _build_adjacency(workflow)
+    return _ancestor_ids(incoming, node_id)
 
 
 def fields_before_node(workflow: Workflow, node_id: str, base_fields: List[str]) -> List[str]:
     """Fields available to a node BEFORE it runs — base columns plus every
     upstream LOOKUP/CALCULATE/TRANSFORM output. Used by validation and by
-    the UI to scope field dropdowns per pipeline stage (spec §10/§16)."""
+    the UI to scope field dropdowns per pipeline stage (spec §10/§16).
+
+    Walks real graph ancestry (not "everything earlier in one flat topo
+    order", which is what this used to do) so a field produced only on a
+    sibling branch is never falsely reported as available to a node on a
+    different branch."""
+    incoming, _outgoing = _build_adjacency(workflow)
+    nodes_by_id = {n.id: n for n in workflow.nodes}
     available = list(base_fields)
-    for node in topo_order(workflow):
-        if node.id == node_id:
-            break
-        available.extend(node_outputs(node))
+    for nid in _ancestor_ids(incoming, node_id):
+        node = nodes_by_id.get(nid)
+        if node is not None:
+            available.extend(node_outputs(node))
     return available
 
 
@@ -82,6 +180,17 @@ def node_outputs(node: WorkflowNode) -> List[str]:
     if node.type == NodeType.CALCULATE and node.calculate:
         return [node.calculate.output_field]
     if node.type == NodeType.TRANSFORM and node.transform:
+        # A TRANSFORM node's config is normally one {field, op,
+        # output_field, ...} entry, but may instead carry a `transforms`
+        # list of several (see workflow_engine._apply_transform) — this
+        # used to only ever read the single-entry shape, so a node
+        # authored via the multi-column editor silently reported ZERO
+        # outputs here even though it produces fields at runtime, causing
+        # a downstream CONDITION to be wrongly flagged "field not
+        # available at this stage" during validation.
+        entries = node.transform.get("transforms")
+        if isinstance(entries, list) and entries:
+            return [e.get("output_field") for e in entries if e.get("output_field")]
         return [node.transform.get("output_field")] if node.transform.get("output_field") else []
     return []
 
@@ -224,11 +333,16 @@ def _apply_upstream_derivations(workflow: Workflow, target_node_id: str, rows: L
     rows even exist to group is a separate, already-documented self_group
     characteristic (it groups over the dataset's raw rows regardless of
     an upstream filter), not something this fix changes."""
-    order = topo_order(workflow)
+    incoming, _outgoing = _build_adjacency(workflow)
+    ancestor_ids = _ancestor_ids(incoming, target_node_id)
+    # Topo order, filtered to the ancestor set — preserves correct replay
+    # sequence (a later CALCULATE/TRANSFORM can still see an earlier one's
+    # output) while now being real graph ancestry instead of "everything
+    # earlier in one flat order", the same bug class fixed in
+    # fields_before_node() above.
+    order = [n for n in topo_order(workflow) if n.id in ancestor_ids]
     enriched = [dict(r) for r in rows]
     for node in order:
-        if node.id == target_node_id:
-            break
         if node.type == NodeType.CALCULATE and node.calculate:
             for wr in enriched:
                 try:
@@ -387,6 +501,8 @@ def run_workflow(
     # caller can still pass an explicit cap for an unusually large pull.
     cap = explain_sample_cap if explain_sample_cap is not None else len(rows)
     order = topo_order(workflow)
+    nodes_by_id = {n.id: n for n in workflow.nodes}
+    incoming, outgoing = _build_adjacency(workflow)
     indexes = _build_indexes(workflow, rows, reference_loader)
     has_outcome_node = any(n.type == NodeType.OUTCOME for n in workflow.nodes)
 
@@ -408,8 +524,31 @@ def run_workflow(
         matched = True
         error: Optional[str] = None
         had_lookup_failure = False
+        # Per-record liveness: whether a node actually runs for THIS
+        # record, and (for a gate/LOOKUP) whether its own result was a
+        # "pass" — together these let a failed CONDITION route to a
+        # different node via a not_matched edge instead of always
+        # aborting the whole record, while every node that's never on
+        # the receiving end of such an edge keeps running unconditionally
+        # exactly like before (see _edge_fires()). Topo order guarantees
+        # every predecessor of `node` already ran this pass, so one
+        # forward scan is enough — no fixpoint needed.
+        live: Dict[str, bool] = {}
+        node_ok: Dict[str, bool] = {}
 
         for node in order:
+            incoming_edges = incoming.get(node.id, [])
+            is_live = (not incoming_edges) or any(
+                live.get(e.source, False) and _edge_fires(
+                    e, nodes_by_id[e.source].type in GATE_TYPES if e.source in nodes_by_id else False,
+                    node_ok.get(e.source, True),
+                )
+                for e in incoming_edges
+            )
+            live[node.id] = is_live
+            if not is_live:
+                continue
+
             if node.type == NodeType.INPUT:
                 trail.append(RecordTraceStep(node_id=node.id, node_type=node.type,
                                               label=node.label or "Input dataset", status="ok"))
@@ -424,9 +563,9 @@ def run_workflow(
                 detail = "; ".join(e.text for e in out.explain)
                 trail.append(RecordTraceStep(node_id=node.id, node_type=node.type,
                                               label=node.label or "Filter", status=status, detail=detail))
-                if not out.result:
+                node_ok[node.id] = out.result
+                if not out.result and not any(e.branch == "not_matched" for e in outgoing.get(node.id, [])):
                     matched = False
-                    break
                 continue
 
             if node.type in (NodeType.LOOKUP, NodeType.ENRICHMENT) and node.lookup:
@@ -468,9 +607,9 @@ def run_workflow(
                                               label=node.label or "Lookup", status=status,
                                               detail=outcome.detail, fields_added=outcome.fields_added))
                 if outcome.reject:
+                    node_ok[node.id] = False
                     matched = False
                     error = f"rejected: {outcome.detail}"
-                    break
                 continue
 
             if node.type == NodeType.CALCULATE and node.calculate:
@@ -496,9 +635,9 @@ def run_workflow(
                 trail.append(RecordTraceStep(node_id=node.id, node_type=node.type,
                                               label=node.label or "Business condition",
                                               status=status, detail=detail))
-                if not out.result:
+                node_ok[node.id] = out.result
+                if not out.result and not any(e.branch == "not_matched" for e in outgoing.get(node.id, [])):
                     matched = False
-                    break
                 continue
 
             if node.type == NodeType.TRANSFORM and node.transform:

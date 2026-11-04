@@ -48,6 +48,20 @@ const NODE_COLORS = {
 
 function uid(prefix) { return `${prefix}_${Math.random().toString(16).slice(2, 10)}`; }
 
+// React Flow's own edge object carries `sourceHandle` (which named
+// connector it was dragged from — "matched"/"not_matched" for a
+// CONDITION node's two outputs, undefined for every other node's single
+// unnamed one) — this is the one place that gets translated into the
+// `branch` field workflow.edges actually stores. Every write-back path
+// (drag a new connection, delete an edge, drag an endpoint to a
+// different node) goes through this so none of them can silently drop it.
+function toWorkflowEdge(e) {
+  return {
+    id: e.id, source: e.source, target: e.target,
+    branch: e.sourceHandle === "not_matched" ? "not_matched" : e.sourceHandle === "matched" ? "matched" : null,
+  };
+}
+
 function newNode(type, index) {
   const base = {
     id: uid("n"), type, label: type.charAt(0).toUpperCase() + type.slice(1),
@@ -139,15 +153,23 @@ const NODE_BOX_STYLE = {
   border: "1px solid #e4e8ee", borderLeftWidth: 3, borderLeftStyle: "solid",
   borderRadius: 8, padding: "8px 12px", minWidth: 160,
   boxShadow: "0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06)",
-  fontFamily: "inherit", boxSizing: "border-box",
+  fontFamily: "inherit", boxSizing: "border-box", position: "relative",
 };
 const HANDLE_STYLE = {
   width: 8, height: 8, background: "#5b6775", border: "1px solid #ffffff", borderRadius: "50%",
 };
 
+// CONDITION nodes get two outgoing connectors instead of one — "matched"
+// (green, left, the normal path) and "not_matched" (red, right, the
+// escape path that lets a failed condition route somewhere other than a
+// dead stop). Every other node type keeps the single bottom handle.
+const MATCHED_HANDLE_STYLE = { ...HANDLE_STYLE, left: "32%", background: "#1f8a4c" };
+const NOT_MATCHED_HANDLE_STYLE = { ...HANDLE_STYLE, left: "68%", background: "#c0392b" };
+
 function RFNode({ data }) {
   const Icon = NODE_ICONS[data.nodeType] || Database;
   const color = NODE_COLORS[data.nodeType] || "#5b6775";
+  const isCondition = data.nodeType === "condition";
   return (
     <div className="rd-node" style={{ ...NODE_BOX_STYLE, borderLeftColor: color }}>
       <Handle type="target" position={Position.Top} style={HANDLE_STYLE} />
@@ -158,7 +180,22 @@ function RFNode({ data }) {
         </div>
         <div className="rd-node-label" style={{ fontSize: 12.5, fontWeight: 600, color: "#16202b" }}>{data.label}</div>
       </div>
-      <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
+      {isCondition ? (
+        <>
+          <Handle type="source" id="matched" position={Position.Bottom} style={MATCHED_HANDLE_STYLE} title="If matched" />
+          <Handle type="source" id="not_matched" position={Position.Bottom} style={NOT_MATCHED_HANDLE_STYLE} title="If not matched" />
+          <div style={{
+            position: "absolute", bottom: -16, left: "32%", transform: "translateX(-50%)",
+            fontSize: 8, color: "#1f8a4c", fontWeight: 700, whiteSpace: "nowrap",
+          }}>match</div>
+          <div style={{
+            position: "absolute", bottom: -16, left: "68%", transform: "translateX(-50%)",
+            fontSize: 8, color: "#c0392b", fontWeight: 700, whiteSpace: "nowrap",
+          }}>no match</div>
+        </>
+      ) : (
+        <Handle type="source" position={Position.Bottom} style={HANDLE_STYLE} />
+      )}
     </div>
   );
 }
@@ -192,13 +229,24 @@ export default function WorkflowCanvas({ workflow, onChange, baseFields, meta })
     onChange({ ...workflow, edges: workflow.edges.filter((e) => e.id !== id) });
   }
 
-  const rfEdges = useMemo(() => workflow.edges.map((e) => ({
-    id: e.id, source: e.source, target: e.target, type: "rd", markerEnd: { type: MarkerType.ArrowClosed },
-    style: { stroke: "#98a4b3" }, data: { onDelete: () => removeEdge(e.id) },
-    // Depends on the whole workflow/onChange (not just workflow.edges) so
-    // removeEdge's closure is never stale — matches onConnect/onEdgesChange
-    // below, which depend on the full workflow object for the same reason.
-  })), [workflow, onChange]);
+  const rfEdges = useMemo(() => workflow.edges.map((e) => {
+    const sourceNode = workflow.nodes.find((n) => n.id === e.source);
+    const isConditionSource = sourceNode?.type === "condition";
+    const isNotMatched = e.branch === "not_matched";
+    return {
+      id: e.id, source: e.source, target: e.target, type: "rd",
+      // Re-anchors to the right of the two CONDITION handles on load; a
+      // legacy edge (branch absent) sourced from a CONDITION node always
+      // lands on "matched" — cosmetic only, behaves exactly like today.
+      sourceHandle: isConditionSource ? (isNotMatched ? "not_matched" : "matched") : undefined,
+      markerEnd: { type: MarkerType.ArrowClosed },
+      style: isNotMatched ? { stroke: "#c0392b", strokeDasharray: "4 3" } : { stroke: "#98a4b3" },
+      data: { onDelete: () => removeEdge(e.id) },
+      // Depends on the whole workflow/onChange (not just workflow.edges) so
+      // removeEdge's closure is never stale — matches onConnect/onEdgesChange
+      // below, which depend on the full workflow object for the same reason.
+    };
+  }), [workflow, onChange]);
 
   const onNodesChange = useCallback((changes) => {
     for (const c of changes) {
@@ -212,19 +260,19 @@ export default function WorkflowCanvas({ workflow, onChange, baseFields, meta })
 
   const onEdgesChange = useCallback((changes) => {
     const next = applyEdgeChanges(changes, rfEdges);
-    onChange({ ...workflow, edges: next.map((e) => ({ id: e.id, source: e.source, target: e.target })) });
+    onChange({ ...workflow, edges: next.map(toWorkflowEdge) });
   }, [rfEdges, workflow, onChange]);
 
   const onConnect = useCallback((conn) => {
     const next = addEdge({ ...conn, id: uid("edge") }, rfEdges);
-    onChange({ ...workflow, edges: next.map((e) => ({ id: e.id, source: e.source, target: e.target })) });
+    onChange({ ...workflow, edges: next.map(toWorkflowEdge) });
   }, [rfEdges, workflow, onChange]);
 
   // Dragging an edge's endpoint to a different node — without this handler
   // the drag interaction shows but nothing actually happens on drop.
   const onReconnect = useCallback((oldEdge, newConnection) => {
     const next = reconnectEdge(oldEdge, newConnection, rfEdges);
-    onChange({ ...workflow, edges: next.map((e) => ({ id: e.id, source: e.source, target: e.target })) });
+    onChange({ ...workflow, edges: next.map(toWorkflowEdge) });
   }, [rfEdges, workflow, onChange]);
 
   function addPaletteNode(type) {

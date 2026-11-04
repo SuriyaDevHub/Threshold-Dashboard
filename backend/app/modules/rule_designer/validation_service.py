@@ -200,15 +200,32 @@ def validate_workflow(rule: Rule, dataset_schema: Optional[Dict[str, FieldType]]
     if not any(n.type == NodeType.INPUT for n in workflow.nodes):
         result.warnings.append("workflow has no explicit INPUT node — the dataset is used as the implicit start")
 
-    order = workflow_engine.topo_order(workflow)
-    if len(order) != len(workflow.nodes):
+    if workflow_engine.has_cycle(workflow):
         result.errors.append("workflow has a circular dependency between nodes")
         return result
+    order = workflow_engine.topo_order(workflow)
 
     node_ids = {n.id for n in workflow.nodes}
+    nodes_by_id = {n.id: n for n in workflow.nodes}
     for e in workflow.edges:
         if e.source not in node_ids or e.target not in node_ids:
             result.errors.append(f"edge references an unknown node ({e.source} -> {e.target})")
+        elif e.branch is not None and nodes_by_id[e.source].type not in workflow_engine.GATE_TYPES:
+            result.errors.append(
+                f"edge {e.id}: branch='{e.branch}' is set on a '{nodes_by_id[e.source].type.value}' "
+                f"source node, which has no match/no-match result — this branch tag has no effect at runtime"
+            )
+
+    for node in workflow.nodes:
+        if node.type in (NodeType.LOOKUP, NodeType.ENRICHMENT) and node.lookup \
+                and node.lookup.lookup_type.value == "self_group":
+            ancestor_ids = workflow_engine.ancestor_node_ids(workflow, node.id)
+            if any(nodes_by_id[a].type in workflow_engine.GATE_TYPES for a in ancestor_ids if a in nodes_by_id):
+                result.warnings.append(
+                    f"[{node.type.value}] {node.label or node.id}: self-group lookup has an upstream "
+                    f"filter/condition — grouping and aggregation always run over the full input dataset "
+                    f"regardless of any upstream gate or branch routing"
+                )
 
     base_fields = list(rule.required_columns) if rule.required_columns else (
         list(dataset_schema.keys()) if dataset_schema else []

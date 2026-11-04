@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest
 from moto import mock_aws
+from pydantic import ValidationError
 
 from app.core import store as dataset_store
 from app.core.config import get_settings
@@ -1113,6 +1114,18 @@ def test_workflow_topo_order_falls_back_on_cycle():
     wf = Workflow(nodes=nodes, edges=edges)
     order = workflow_engine.topo_order(wf)
     assert len(order) == 2  # doesn't drop nodes even on a cycle
+
+
+def test_has_cycle_detects_a_cycle_that_topo_orders_fallback_would_otherwise_hide():
+    """topo_order()'s own cycle fallback always returns a full-length list
+    (by design, so execution never silently drops a node) — which means
+    comparing its return length to len(workflow.nodes) can NEVER detect a
+    cycle. has_cycle() is the real check validation needs instead."""
+    nodes = [WorkflowNode(id="a", type=NodeType.INPUT), WorkflowNode(id="b", type=NodeType.INPUT)]
+    cyclic = Workflow(nodes=nodes, edges=[WorkflowEdge(source="a", target="b"), WorkflowEdge(source="b", target="a")])
+    acyclic = Workflow(nodes=nodes, edges=[WorkflowEdge(source="a", target="b")])
+    assert workflow_engine.has_cycle(cyclic) is True
+    assert workflow_engine.has_cycle(acyclic) is False
 
 
 # --------------------------------------------------------------------------
@@ -2352,6 +2365,228 @@ def test_run_workflow_trail_surfaces_the_parse_date_failure_reason():
     transform_step = next(s for s in trail if s.node_type == NodeType.TRANSFORM)
     assert transform_step.status == "error"
     assert "trade_date" in transform_step.detail and "parse_date" in transform_step.detail
+
+
+# --------------------------------------------------------------------------
+# workflow_engine — node_outputs() must see a multi-column TRANSFORM's
+# fields (the original reported bug: validation flagged a field "not
+# available at this stage" even though a TRANSFORM upstream produces it,
+# because node_outputs() only ever read the legacy single-entry shape)
+# --------------------------------------------------------------------------
+
+def test_node_outputs_reports_every_field_of_a_multi_column_transform():
+    node = WorkflowNode(id="t", type=NodeType.TRANSFORM, transform={"transforms": [
+        {"field": "a_raw", "op": "cast_numeric", "output_field": "a_numeric"},
+        {"field": "b_raw", "op": "cast_numeric", "output_field": "b_numeric"},
+    ]})
+    assert set(workflow_engine.node_outputs(node)) == {"a_numeric", "b_numeric"}
+
+
+def test_fields_before_node_sees_a_multi_column_transforms_output():
+    wf = Workflow(nodes=[
+        WorkflowNode(id="in", type=NodeType.INPUT),
+        WorkflowNode(id="t", type=NodeType.TRANSFORM, transform={"transforms": [
+            {"field": "start_date_raw", "op": "parse_date", "output_field": "start_date_parsed",
+             "input_format": "mdy"},
+        ]}),
+        _cond_node("c", "start_date_parsed", Operator.IS_NOT_NULL, None),
+    ], edges=[WorkflowEdge(source="in", target="t"), WorkflowEdge(source="t", target="c")])
+    available = workflow_engine.fields_before_node(wf, "c", [])
+    assert "start_date_parsed" in available
+
+
+def test_validate_workflow_accepts_a_condition_fed_by_a_multi_column_transform():
+    """End-to-end regression for the reported bug: publishing a rule whose
+    CONDITION reads a multi-column TRANSFORM's output must not raise
+    'field not available at this stage'."""
+    rule = _rule(rule_id="RMCT", name="RMCT", required_columns=["start_date_raw"], workflow=Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="t", type=NodeType.TRANSFORM, transform={"transforms": [
+                {"field": "start_date_raw", "op": "parse_date", "output_field": "start_date_parsed",
+                 "input_format": "mdy"},
+            ]}),
+            _cond_node("c", "start_date_parsed", Operator.IS_NOT_NULL, None),
+            _outcome_node("out"),
+        ],
+        edges=[WorkflowEdge(source="in", target="t"), WorkflowEdge(source="t", target="c"),
+               WorkflowEdge(source="c", target="out")],
+    ))
+    result = validation_service.validate_workflow(rule, {"start_date_raw": FieldType.STRING})
+    assert result.ok, result.errors
+
+
+# --------------------------------------------------------------------------
+# workflow_engine — branching CONDITION nodes (matched / not_matched edges)
+# --------------------------------------------------------------------------
+
+def _cond_node(id_, field, op, value):
+    kwargs = {} if value is None else {"value": ValueRef(type="static", value=value)}
+    return WorkflowNode(id=id_, type=NodeType.CONDITION, condition=ConditionGroup(
+        operator="AND", children=[Condition(field=field, operator=op, **kwargs)]))
+
+
+def _outcome_node(id_, field="Alert", value=True):
+    return WorkflowNode(id=id_, type=NodeType.OUTCOME,
+                         outcomes=[OutcomeAction(field=field, value=ValueRef(type="static", value=value))])
+
+
+def test_branching_if_elif_else_reaches_the_right_outcome():
+    """Two CONDITIONs chained via not_matched edges — an if/elif/else
+    inside ONE workflow."""
+    wf = Workflow(nodes=[
+        WorkflowNode(id="in", type=NodeType.INPUT),
+        _cond_node("a", "amount", Operator.GT, 1000),
+        _cond_node("b", "amount", Operator.GT, 100),
+        _outcome_node("out_high", "Reason", "HIGH"),
+        _outcome_node("out_mid", "Reason", "MID"),
+    ], edges=[
+        WorkflowEdge(source="in", target="a"),
+        WorkflowEdge(source="a", target="out_high", branch="matched"),
+        WorkflowEdge(source="a", target="b", branch="not_matched"),
+        WorkflowEdge(source="b", target="out_mid", branch="matched"),
+        # b's not_matched is deliberately left unwired — falls through to
+        # "no match", today's exact pre-branching behavior.
+    ])
+    results, _, _ = workflow_engine.run_workflow(
+        wf, [{"amount": 5000}, {"amount": 500}, {"amount": 5}], reference_store.reference_loader,
+        record_id_field=None)
+    by_id = {r.record_id: r for r in results}
+    assert by_id[0].matched and by_id[0].outcome["Reason"] == "HIGH"
+    assert by_id[1].matched and by_id[1].outcome["Reason"] == "MID"
+    assert not by_id[2].matched
+
+
+def test_branching_condition_with_no_not_matched_edge_is_a_full_stop_like_today():
+    """Zero regression pin: a CONDITION with NO not_matched wiring behaves
+    exactly like every pre-branching workflow — fail = no match, full
+    stop, nothing downstream runs."""
+    wf = Workflow(nodes=[
+        WorkflowNode(id="in", type=NodeType.INPUT),
+        _cond_node("a", "amount", Operator.GT, 1000),
+        WorkflowNode(id="calc_after", type=NodeType.CALCULATE,
+                     calculate=DeriveSpec(output_field="never_set", formula={"kind": "constant", "value": 1})),
+        _outcome_node("out"),
+    ], edges=[
+        WorkflowEdge(source="in", target="a"),
+        WorkflowEdge(source="a", target="calc_after"),   # unconditional/legacy — only taken if a matches
+        WorkflowEdge(source="calc_after", target="out"),
+    ])
+    results, _, _ = workflow_engine.run_workflow(wf, [{"amount": 5}], reference_store.reference_loader)
+    assert not results[0].matched
+    assert "never_set" not in results[0].final_record  # calc_after never ran — liveness stopped it
+
+
+def test_branching_shared_upstream_transform_runs_once_for_both_downstream_conditions():
+    """Fan-out: one TRANSFORM feeds two downstream CONDITION checks via
+    ordinary (non-branching) edges — must run exactly once, and both
+    branches must see its output."""
+    wf = Workflow(nodes=[
+        WorkflowNode(id="in", type=NodeType.INPUT),
+        WorkflowNode(id="tf", type=NodeType.TRANSFORM, transform={
+            "field": "raw", "op": "cast_numeric", "output_field": "amount"}),
+        _cond_node("a", "amount", Operator.GT, 1000),
+        _cond_node("b", "amount", Operator.GT, 1),
+        _outcome_node("out_a", "Reason", "A"),
+        _outcome_node("out_b", "Reason", "B"),
+    ], edges=[
+        WorkflowEdge(source="in", target="tf"),
+        WorkflowEdge(source="tf", target="a"),
+        WorkflowEdge(source="tf", target="b"),
+        WorkflowEdge(source="a", target="out_a", branch="matched"),
+        WorkflowEdge(source="b", target="out_b", branch="matched"),
+    ])
+    results, _, _ = workflow_engine.run_workflow(wf, [{"raw": "5000"}], reference_store.reference_loader)
+    tf_steps = [s for s in results[0].trail if s.node_id == "tf"]
+    assert len(tf_steps) == 1
+    assert results[0].final_record["amount"] == 5000.0
+
+
+def test_fields_before_node_scopes_availability_to_the_real_branch_not_a_sibling():
+    """A field produced only on branch A's TRANSFORM must NOT be reported
+    available to branch B's CONDITION, even though a flat/arbitrary topo
+    order could place A's TRANSFORM earlier."""
+    wf = Workflow(nodes=[
+        WorkflowNode(id="in", type=NodeType.INPUT),
+        _cond_node("gate", "x", Operator.EQ, 1),
+        WorkflowNode(id="tf_a", type=NodeType.TRANSFORM, transform={
+            "field": "x", "op": "trim", "output_field": "only_on_branch_a"}),
+        _cond_node("cond_b", "only_on_branch_a", Operator.EQ, "1"),
+    ], edges=[
+        WorkflowEdge(source="in", target="gate"),
+        WorkflowEdge(source="gate", target="tf_a", branch="matched"),
+        WorkflowEdge(source="gate", target="cond_b", branch="not_matched"),
+    ])
+    available = workflow_engine.fields_before_node(wf, "cond_b", ["x"])
+    assert "only_on_branch_a" not in available
+
+
+def test_dry_run_trail_only_contains_the_taken_branch_not_the_whole_workflow():
+    wf = Workflow(nodes=[
+        WorkflowNode(id="in", type=NodeType.INPUT),
+        _cond_node("a", "amount", Operator.GT, 1000),
+        WorkflowNode(id="untaken_calc", type=NodeType.CALCULATE,
+                     calculate=DeriveSpec(output_field="x", formula={"kind": "constant", "value": 1})),
+        _outcome_node("out_low", "Reason", "LOW"),
+    ], edges=[
+        WorkflowEdge(source="in", target="a"),
+        WorkflowEdge(source="a", target="untaken_calc", branch="matched"),
+        WorkflowEdge(source="a", target="out_low", branch="not_matched"),
+    ])
+    results, _, _ = workflow_engine.run_workflow(wf, [{"amount": 5}], reference_store.reference_loader)
+    visited_ids = {s.node_id for s in results[0].trail}
+    assert "untaken_calc" not in visited_ids
+    assert results[0].matched and results[0].outcome["Reason"] == "LOW"
+
+
+def test_branching_cycle_via_not_matched_edge_is_still_caught_as_circular():
+    """A careless not_matched edge wired back to an earlier node must
+    still trip validate_workflow's existing circular-dependency check."""
+    rule = _rule(rule_id="RCYC", name="RCYC", required_columns=["x"], workflow=Workflow(
+        nodes=[WorkflowNode(id="in", type=NodeType.INPUT), _cond_node("a", "x", Operator.EQ, 1),
+               _cond_node("b", "x", Operator.EQ, 2)],
+        edges=[WorkflowEdge(source="in", target="a"),
+               WorkflowEdge(source="a", target="b", branch="not_matched"),
+               WorkflowEdge(source="b", target="a", branch="not_matched")],
+    ))
+    result = validation_service.validate_workflow(rule, {"x": FieldType.STRING})
+    assert not result.ok and any("circular" in e for e in result.errors)
+
+
+def test_workflow_edge_rejects_an_invalid_branch_value():
+    with pytest.raises(ValidationError):
+        WorkflowEdge(source="a", target="b", branch="bogus")
+
+
+def test_validate_workflow_flags_a_branch_tag_on_a_non_gate_source():
+    rule = _rule(rule_id="RBAD", name="RBAD", required_columns=["x"], workflow=Workflow(
+        nodes=[WorkflowNode(id="in", type=NodeType.INPUT),
+               WorkflowNode(id="t", type=NodeType.TRANSFORM,
+                            transform={"field": "x", "op": "trim", "output_field": "x2"}),
+               _outcome_node("out")],
+        edges=[WorkflowEdge(source="in", target="t"),
+               WorkflowEdge(source="t", target="out", branch="not_matched")],
+    ))
+    result = validation_service.validate_workflow(rule, {"x": FieldType.STRING})
+    assert not result.ok
+    assert any("branch=" in e and "transform" in e for e in result.errors)
+
+
+def test_validate_workflow_warns_on_self_group_lookup_with_upstream_gate():
+    rule = _rule(rule_id="RSGW", name="RSGW", required_columns=["ccy"], workflow=Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            _cond_node("gate", "ccy", Operator.EQ, "USD"),
+            WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=LookupConfig(
+                lookup_type=LookupType.SELF_GROUP, group_by_field="ccy",
+                fields=[LookupFieldMap(source_column="ccy", output_field="grouped_ccy", aggregate="first")],
+            )),
+        ],
+        edges=[WorkflowEdge(source="in", target="gate"),
+               WorkflowEdge(source="gate", target="lk", branch="matched")],
+    ))
+    result = validation_service.validate_workflow(rule, {"ccy": FieldType.STRING})
+    assert any("self-group" in w and "upstream" in w for w in result.warnings)
 
 
 # --------------------------------------------------------------------------
