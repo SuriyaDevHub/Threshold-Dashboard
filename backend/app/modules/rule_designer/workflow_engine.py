@@ -431,6 +431,22 @@ def _apply_single_transform(cfg: Dict[str, Any], record: dict) -> Tuple[str, Dic
                 return "ok", {out: v}, ""
         return "ok", {out: None}, ""
 
+    if op == "concat":
+        # Builds a new field by joining 2+ existing ones together — e.g.
+        # materializing a composite key (TradingLocation+Currency+Curve+
+        # Tenor) as an actual field, for other rules or a LOOKUP's join
+        # key to match against directly. Like "coalesce" above, this
+        # reads multiple fields straight off `record` rather than going
+        # through transform_ops.apply_transform_op(), which is
+        # deliberately single-value-only. A blank/missing field
+        # contributes "" rather than the literal string "None" — same
+        # convention lookup_engine._key_tuple() already uses for its own
+        # composite reference-key concatenation.
+        out = cfg.get("output_field")
+        sep = cfg.get("separator") or ""
+        parts = ["" if (v := record.get(f)) is None else str(v) for f in cfg.get("fields", [])]
+        return "ok", {out: sep.join(parts)}, ""
+
     src = cfg.get("field")
     out = cfg.get("output_field", src)
     val = record.get(src)

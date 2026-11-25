@@ -2601,6 +2601,66 @@ def test_create_product_clears_rename_tombstone():
     assert product_registry.get_product(TEST_PRODUCT) is not None
 
 
+def test_delete_product_removes_the_registry_entry():
+    product_registry.delete_product(TEST_PRODUCT, "admin")
+    assert product_registry.get_product(TEST_PRODUCT) is None
+
+
+def test_delete_product_unknown_code_raises():
+    with pytest.raises(ValueError):
+        product_registry.delete_product("NO_SUCH_PRODUCT", "admin")
+
+
+def test_delete_product_does_not_resurrect_asset_class_seeded_code():
+    # Same regression rename_product() already guards against — deleting
+    # a code that's also one of ASSET_CLASSES's seeded defaults must not
+    # have it silently reappear on the next ordinary read.
+    product_registry.delete_product("CASH_BONDS", "admin")
+    assert product_registry.get_product("CASH_BONDS") is None
+    product_registry.list_products()
+    assert product_registry.get_product("CASH_BONDS") is None
+
+
+def test_delete_product_route_cascades_to_draft_and_published_rules():
+    draft = _rule(rule_id="DELPROD-DRAFT", name="Draft rule")  # status defaults to DRAFT
+    rule_store.upsert_rule(draft, "tester")
+    published = _rule(rule_id="DELPROD-PUB", name="Published rule", status=RuleStatus.PUBLISHED)
+    rule_store.upsert_rule(published, "tester")
+    assert {r.rule_id for r in rule_store.list_rules(TEST_PRODUCT)} >= {"DELPROD-DRAFT", "DELPROD-PUB"}
+
+    # Mirrors the route handler's own cascade (not an HTTP call — the
+    # route is a thin wrapper over exactly these two calls).
+    rules = rule_store.list_rules(TEST_PRODUCT)
+    for r in rules:
+        rule_store.delete_rule(r.rule_id, "admin", TEST_PRODUCT)
+    product_registry.delete_product(TEST_PRODUCT, "admin")
+
+    assert product_registry.get_product(TEST_PRODUCT) is None
+    assert rule_store.get_rule("DELPROD-DRAFT") is None
+    assert rule_store.get_rule("DELPROD-PUB") is None
+
+
+def test_product_reason_codes_and_rule_count_aggregate_correctly():
+    # Mirrors GET /products/{code}'s own one-liners exactly — the route
+    # has no extraction logic of its own, just this composition over
+    # rule_store.list_rules() + explain_service.extract_reason_code().
+    def _outcome_rule(rule_id, reason):
+        return _rule(rule_id=rule_id, name=rule_id, workflow=Workflow(nodes=[
+            WorkflowNode(id="out", type=NodeType.OUTCOME, outcomes=[
+                OutcomeAction(field="Reason", value=ValueRef(type="static", value=reason)),
+            ]),
+        ]))
+
+    rule_store.upsert_rule(_outcome_rule("RC-1", "MKD-TP Curve"), "tester")
+    rule_store.upsert_rule(_outcome_rule("RC-2", "MKD-TP Curve"), "tester")
+    rule_store.upsert_rule(_outcome_rule("RC-3", "OTHER-CODE"), "tester")
+
+    all_rules = rule_store.list_rules(TEST_PRODUCT)
+    reason_codes = sorted({rc for r in all_rules if (rc := explain_service.extract_reason_code(r))})
+    assert len(all_rules) == 3
+    assert reason_codes == ["MKD-TP Curve", "OTHER-CODE"]
+
+
 def test_consistency_report_flags_orphaned_dir_with_rules():
     yaml_service.save_rules([_rule(rule_id="ORPH1", name="ORPH1", product="ORPHAN_CODE")], actor="tester")
     report = product_registry.consistency_report()
@@ -2752,6 +2812,57 @@ def test_coalesce_transform_prefers_canonical_then_falls_back():
 
     status, fields = workflow_engine._apply_transform(node, {})
     assert fields == {"deal_level": None}
+
+
+def test_concat_transform_joins_fields_with_no_separator():
+    node = WorkflowNode(id="n", type=NodeType.TRANSFORM,
+                         transform={"op": "concat", "output_field": "curve_key",
+                                    "fields": ["ccy", "curve_type"]})
+    status, fields = workflow_engine._apply_transform(node, {"ccy": "USD", "curve_type": "OIS"})
+    assert status == "ok" and fields == {"curve_key": "USDOIS"}
+
+
+def test_concat_transform_joins_fields_with_a_separator():
+    node = WorkflowNode(id="n", type=NodeType.TRANSFORM,
+                         transform={"op": "concat", "output_field": "curve_key", "separator": "-",
+                                    "fields": ["ccy", "curve_type"]})
+    status, fields = workflow_engine._apply_transform(node, {"ccy": "USD", "curve_type": "OIS"})
+    assert fields == {"curve_key": "USD-OIS"}
+
+
+def test_concat_transform_blank_field_contributes_empty_string_not_none():
+    node = WorkflowNode(id="n", type=NodeType.TRANSFORM,
+                         transform={"op": "concat", "output_field": "curve_key",
+                                    "fields": ["ccy", "curve_type"]})
+    status, fields = workflow_engine._apply_transform(node, {"ccy": "USD", "curve_type": None})
+    assert fields == {"curve_key": "USD"}  # not "USDNone"
+
+
+def test_concat_transform_end_to_end_via_run_workflow():
+    lookup_ref = reference_store.upload_version(
+        "curve_key_lookup", [{"CurveKey": "USDOIS", "Rate": 1.55}], "tester",
+    )
+    wf = Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="tx", type=NodeType.TRANSFORM, transform={
+                "op": "concat", "output_field": "curve_key", "fields": ["ccy", "curve_type"],
+            }),
+            WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=LookupConfig(
+                lookup_type=LookupType.EXACT, reference_file_id=lookup_ref.id,
+                join_keys=[{"source": "curve_key", "reference": "CurveKey"}],
+                fields=[LookupFieldMap(source_column="Rate", output_field="Rate")],
+            )),
+        ],
+        edges=[WorkflowEdge(source="in", target="tx"), WorkflowEdge(source="tx", target="lk")],
+    )
+    results, _, summary = workflow_engine.run_workflow(
+        wf, [{"trade_id": 1, "ccy": "USD", "curve_type": "OIS"}],
+        reference_store.reference_loader, record_id_field="trade_id",
+    )
+    assert summary.matched == 1
+    assert results[0].final_record["curve_key"] == "USDOIS"
+    assert results[0].final_record["Rate"] == 1.55
 
 
 def _transform_node(**cfg):

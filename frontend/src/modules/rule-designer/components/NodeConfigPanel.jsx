@@ -133,13 +133,15 @@ function TransformEditor({ transform, onChange, fields }) {
       {entries.map((entry, i) => (
         <div key={i}>
           <div className="lk-row">
-            <select value={entry.field || ""} onChange={(e) => update(i, { field: e.target.value })}>
-              <option value="" disabled>field…</option>
-              {withCurrent(fields, entry.field).map((f) => (
-                <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
-              ))}
-            </select>
-            <TransformOpFields transform={entry} onChange={(t) => update(i, t)} />
+            {entry.op !== "concat" && (
+              <select value={entry.field || ""} onChange={(e) => update(i, { field: e.target.value })}>
+                <option value="" disabled>field…</option>
+                {withCurrent(fields, entry.field).map((f) => (
+                  <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
+                ))}
+              </select>
+            )}
+            <TransformOpFields transform={entry} onChange={(t) => update(i, t)} fields={fields} />
             <input placeholder="output field (optional)" value={entry.output_field || ""}
                    onChange={(e) => update(i, { output_field: e.target.value })} />
             {entries.length > 1 && (

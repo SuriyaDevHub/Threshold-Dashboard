@@ -1,4 +1,5 @@
 import { Plus, Trash2 } from "lucide-react";
+import { withCurrent } from "./ConditionBuilder.jsx";
 
 // Shared transform-op selector + per-op parameter fields — one
 // implementation used both by the Transform workflow node (NodeConfigPanel)
@@ -15,7 +16,7 @@ import { Plus, Trash2 } from "lucide-react";
 // caller can set it directly without re-merging.
 
 const OP_PARAM_KEYS = ["precision", "start", "end", "delimiter", "index", "find", "replace_with", "rules", "default",
-                       "input_format", "custom_pattern", "unit", "amount"];
+                       "input_format", "custom_pattern", "unit", "amount", "fields", "separator"];
 
 const TRANSFORM_OPS = [
   { value: "round", label: "round" },
@@ -53,8 +54,15 @@ const DATE_INPUT_FORMATS = [
   { value: "custom", label: "Custom pattern…" },
 ];
 
-export default function TransformOpFields({ transform, onChange, allowNone }) {
+export default function TransformOpFields({ transform, onChange, allowNone, fields }) {
   const op = transform?.op || (allowNone ? "" : "round");
+  // "concatenate fields" needs a list of this node's available source
+  // fields to pick from — only the TRANSFORM node's own editor
+  // (NodeConfigPanel.jsx) passes `fields`; LOOKUP's two callers (field
+  // mappings, join-key transforms) operate on one already-pulled value
+  // and have no use for a field picker, so the op simply never appears
+  // there.
+  const ops = fields ? [{ value: "concat", label: "concatenate fields" }, ...TRANSFORM_OPS] : TRANSFORM_OPS;
 
   function set(patch) { onChange({ ...transform, ...patch }); }
 
@@ -73,8 +81,12 @@ export default function TransformOpFields({ transform, onChange, allowNone }) {
     <>
       <select value={op} onChange={(e) => setOp(e.target.value)}>
         {allowNone && <option value="">no transform</option>}
-        {TRANSFORM_OPS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        {ops.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
+
+      {op === "concat" && (
+        <ConcatFields transform={transform} onChange={set} fields={fields} />
+      )}
 
       {op === "round" && (
         <label className="control"><span>Decimal places</span>
@@ -156,6 +168,42 @@ export default function TransformOpFields({ transform, onChange, allowNone }) {
   );
 }
 
+function ConcatFields({ transform, onChange, fields }) {
+  // Same "+ combine column" multi-picker idiom already shipped in
+  // LookupConfigForm.jsx's join-key reference side, for a consistent UX
+  // wherever this app lets you build a value from several columns.
+  const cols = transform?.fields || [];
+
+  function updateCol(i, value) {
+    const next = [...cols]; next[i] = value; onChange({ fields: next });
+  }
+  function addCol() { onChange({ fields: [...cols, fields[0]?.field || ""] }); }
+  function removeCol(i) { onChange({ fields: cols.filter((_, idx) => idx !== i) }); }
+
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+      {cols.map((c, i) => (
+        <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+          {i > 0 && <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>+</span>}
+          <select value={c} onChange={(e) => updateCol(i, e.target.value)}>
+            <option value="" disabled>field…</option>
+            {withCurrent(fields, c).map((f) => (
+              <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
+            ))}
+          </select>
+          {cols.length > 1 && (
+            <button className="icon-btn" onClick={() => removeCol(i)}><Trash2 size={11} /></button>
+          )}
+        </span>
+      ))}
+      <button className="btn btn--ghost btn--xs" onClick={addCol}><Plus size={13} /> Add field</button>
+      <label className="control" style={{ minWidth: 120 }}><span>Separator (optional)</span>
+        <input value={transform?.separator ?? ""} onChange={(e) => onChange({ separator: e.target.value })} placeholder="none" />
+      </label>
+    </span>
+  );
+}
+
 function ValueMapFields({ transform, onChange }) {
   const rules = transform?.rules || [];
 
@@ -190,6 +238,7 @@ function ValueMapFields({ transform, onChange }) {
 }
 
 export function transformHint(op) {
+  if (op === "concat") return 'Builds the output field by joining the selected fields\' values together, in order — leave the separator blank to join them directly, or set one (e.g. "-" or "_") to insert between each. Handy for materializing a composite key (e.g. TradingLocation+Currency+Curve+Tenor) as an actual field that other rules or a LOOKUP\'s join key can then match against directly.';
   if (op === "substring") return 'e.g. start 0, end 3 keeps the first 3 characters. Leave end blank to go to the end of the text.';
   if (op === "split") return 'e.g. splitting "HKFXO_052" on "_" at index 1 gives "052".';
   if (op === "value_map") return 'Checked top to bottom — the first rule whose text is found (case-insensitive) anywhere in the value wins, e.g. "London (LN) Branch" containing "LONDON" maps to "LN".';

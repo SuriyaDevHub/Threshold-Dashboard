@@ -174,7 +174,14 @@ async def get_product(code: str):
     if p is None:
         raise HTTPException(404, "product not found")
     active_rules = product_engine.active_rules_for_product(code)
-    return {**p.model_dump(mode="json"), "active_rule_count": len(active_rules)}
+    all_rules = rule_store.list_rules(code)
+    reason_codes = sorted({rc for r in all_rules if (rc := explain_service.extract_reason_code(r))})
+    return {
+        **p.model_dump(mode="json"),
+        "active_rule_count": len(active_rules),
+        "rule_count": len(all_rules),
+        "reason_codes": reason_codes,
+    }
 
 
 class CreateProductBody(Actor):
@@ -260,6 +267,26 @@ async def rename_product(code: str, body: RenameProductBody):
                f"{' (merged into existing product)' if merged else ''}, {moved} rule(s) moved",
     )
     return {"product": product.model_dump(mode="json"), "rules_moved": moved, "merged": merged}
+
+
+@router.delete("/products/{code}")
+async def delete_product(code: str, actor: str = "unknown", role: Role = Role.ADMIN):
+    """Deleting a product cascades to every rule configured under it,
+    draft or published — a product with no rules left to orphan behind
+    it. Reuses rule_store.delete_rule() exactly as the single-rule DELETE
+    route does (it already resolves draft vs. published correctly); only
+    the rule configs themselves are removed, not those rule_ids'
+    historical dry-run results, version history, or audit-log entries."""
+    _require(Actor(actor=actor, role=role), "manage_products")
+    if product_registry.get_product(code) is None:
+        raise HTTPException(404, f"product '{code}' not found")
+    rules = rule_store.list_rules(code)
+    for r in rules:
+        rule_store.delete_rule(r.rule_id, actor, code)
+    product_registry.delete_product(code, actor)
+    audit_service.log(actor, "DELETE", role=role.value,
+                       detail=f"deleted product '{code.upper()}', {len(rules)} rule(s) deleted")
+    return {"deleted": True, "rules_deleted": len(rules)}
 
 
 class EvaluateProductBody(Actor):

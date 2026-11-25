@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Plus, ShieldAlert, Pencil, AlertTriangle } from "lucide-react";
+import { Plus, ShieldAlert, Pencil, AlertTriangle, ChevronDown, ChevronRight, Trash2 } from "lucide-react";
 import { useAsync } from "../../../lib/useAsync.js";
 import { Card, Loader, ErrorState, ModuleHeader } from "../../../components/ui.jsx";
 import { rd } from "../api.js";
@@ -20,6 +20,43 @@ export default function Products() {
   const [renamingCode, setRenamingCode] = useState(null);
   const [renameValue, setRenameValue] = useState("");
   const [renameInFlight, setRenameInFlight] = useState(false);
+  // code -> "loading" | { rule_count, reason_codes, ... } | { error } — fetched
+  // lazily on first expand, cached here so re-collapsing/re-expanding never
+  // re-fetches.
+  const [expanded, setExpanded] = useState({});
+
+  async function toggleExpand(p) {
+    if (expanded[p.code]) {
+      setExpanded((prev) => {
+        const next = { ...prev };
+        delete next[p.code];
+        return next;
+      });
+      return;
+    }
+    setExpanded((prev) => ({ ...prev, [p.code]: "loading" }));
+    try {
+      const detail = await rd.product(p.code);
+      setExpanded((prev) => ({ ...prev, [p.code]: detail }));
+    } catch (e) {
+      setExpanded((prev) => ({ ...prev, [p.code]: { error: String(e.message || e) } }));
+    }
+  }
+
+  async function deleteProduct(p) {
+    if (!isAdmin) return;
+    const info = expanded[p.code];
+    const known = info && info !== "loading" && !info.error ? info.rule_count : null;
+    const warning = known != null
+      ? `Delete ${p.name} (${p.code})? This also deletes all ${known} rule(s) configured under it (draft and published) — this can't be undone.`
+      : `Delete ${p.name} (${p.code})? This also deletes every rule configured under it (draft and published) — this can't be undone.`;
+    if (!confirm(warning)) return;
+    try {
+      const result = await rd.deleteProduct(actor, role, p.code);
+      setNotice({ kind: "pass", text: `${p.name} deleted (${result.rules_deleted} rule(s) removed).` });
+      reload();
+    } catch (e) { setNotice({ kind: "breach", text: String(e.message || e) }); }
+  }
 
   async function toggle(p) {
     if (!isAdmin) return;
@@ -165,6 +202,10 @@ export default function Products() {
             <div className="lk-row" style={{ justifyContent: "space-between" }}>
               <div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <button className="icon-btn" title={expanded[p.code] ? "Collapse" : "Show rule count & reason codes"}
+                          onClick={() => toggleExpand(p)}>
+                    {expanded[p.code] ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  </button>
                   <strong>{p.name}</strong>
                   {renamingCode === p.code ? (
                     <>
@@ -214,8 +255,39 @@ export default function Products() {
                   <input type="checkbox" checked={p.enabled} disabled={!isAdmin} onChange={() => toggle(p)} />
                   <span>{p.enabled ? "Enabled" : "Disabled"}</span>
                 </label>
+                {isAdmin && (
+                  <button className="btn btn--ghost" title="Delete this product" onClick={() => deleteProduct(p)}>
+                    <Trash2 size={14} />
+                  </button>
+                )}
               </div>
             </div>
+            {expanded[p.code] && (
+              <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--line)" }}>
+                {expanded[p.code] === "loading" ? (
+                  <p className="empty-hint" style={{ margin: 0 }}>Loading…</p>
+                ) : expanded[p.code].error ? (
+                  <p className="empty-hint" style={{ margin: 0, color: "var(--breach, #c0392b)" }}>
+                    Couldn't load details: {expanded[p.code].error}
+                  </p>
+                ) : (
+                  <>
+                    <div className="ds-count" style={{ marginBottom: 6 }}>
+                      {expanded[p.code].rule_count} rule(s) ({expanded[p.code].active_rule_count} active)
+                    </div>
+                    {expanded[p.code].reason_codes.length > 0 ? (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                        {expanded[p.code].reason_codes.map((rc) => (
+                          <span key={rc} className="badge mono">{rc}</span>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="empty-hint" style={{ margin: 0 }}>No reason codes configured yet.</p>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
           </Card>
         ))}
       </div>

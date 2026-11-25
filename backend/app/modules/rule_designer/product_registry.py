@@ -300,6 +300,31 @@ def rename_product(old_code: str, new_code: str, actor: str) -> Tuple[Product, b
         return Product.model_validate(data[new_code]), merged
 
 
+def delete_product(code: str, actor: str) -> None:
+    """Removes a product registration outright — the rules themselves
+    (draft and published) are the caller's responsibility to delete
+    first (see the DELETE /products/{code} route, which cascades via
+    rule_store.delete_rule() before calling this); this function only
+    ever touches the registry entry.
+
+    Tombstones `code` the same way rename_product() already has to for
+    its own old-code removal: without it, a code that's also one of
+    ASSET_CLASSES's seeded defaults would silently reappear as a fresh
+    blank product on the very next list_products()/get_product() call,
+    via _load()'s own "reseed any missing ASSET_CLASSES code"
+    reconciliation — exactly the bug rename_product()'s own docstring
+    describes and REMOVED_CODES_KEY exists to prevent."""
+    with _write_lock:
+        data = _load()
+        code = code.upper()
+        if code not in data:
+            raise ValueError(f"product '{code}' not found")
+        del data[code]
+        _save(data)
+        _refresh_load_cache(data)
+        _mark_removed(code)
+
+
 def consistency_report() -> Dict[str, list]:
     """Backend validation for exactly the mismatch this module's rename
     action fixes: a rules prefix on S3 whose code isn't registered
