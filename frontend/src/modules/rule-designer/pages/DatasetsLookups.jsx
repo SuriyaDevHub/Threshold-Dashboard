@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { RefreshCw, Upload } from "lucide-react";
+import { RefreshCw, Trash2, Upload } from "lucide-react";
 import { useAsync } from "../../../lib/useAsync.js";
 import { Card, Loader, ErrorState, ModuleHeader } from "../../../components/ui.jsx";
 import { rd } from "../api.js";
@@ -32,6 +32,7 @@ export default function DatasetsLookups() {
   const [refSheetName, setRefSheetName] = useState("");
   const [refColumnRange, setRefColumnRange] = useState("");
   const [refPasswordEnvVar, setRefPasswordEnvVar] = useState("");
+  const [refPassword, setRefPassword] = useState("");
   // Derived from the path itself, not a separate toggle — so the form can
   // never disagree with what the backend will infer (reference_store.
   // sync_now() falls back to this same .xlsx/.xlsm extension check when
@@ -57,6 +58,10 @@ export default function DatasetsLookups() {
 
   async function configureReferenceSource() {
     if (!refPath.trim() || !refName.trim()) return;
+    if (refPasswordEnvVar.trim() && refPassword.trim()) {
+      setNotice({ kind: "breach", text: "Pick one: a password env var, or a typed password — not both." });
+      return;
+    }
     setBusy(true);
     try {
       const minutes = refAutoRefresh.trim() ? Number(refAutoRefresh) : null;
@@ -64,12 +69,29 @@ export default function DatasetsLookups() {
         sheetName: refSheetName.trim(),
         columnRange: refColumnRange.trim(),
         passwordEnvVar: refPasswordEnvVar.trim(),
+        password: refPassword,
       });
       setRefName(""); setRefPath(""); setRefAutoRefresh("");
-      setRefSheetName(""); setRefColumnRange(""); setRefPasswordEnvVar("");
+      setRefSheetName(""); setRefColumnRange(""); setRefPasswordEnvVar(""); setRefPassword("");
       setNotice({ kind: "pass", text: "Reference file configured and synced." });
     } catch (e) { setNotice({ kind: "breach", text: String(e.message || e) }); }
     reload(); // even on failure — the file is registered with last_sync_error set, worth seeing
+    setBusy(false);
+  }
+
+  async function deleteReference(fileId, name) {
+    setBusy(true);
+    try {
+      const usage = await rd.referenceFileUsage(fileId);
+      const rules = usage.rules || [];
+      const warning = rules.length
+        ? `Used by ${rules.length} rule(s): ${rules.map((r) => `${r.product}/${r.rule_id}`).join(", ")}. Delete anyway?`
+        : `Delete reference file "${name}"? This removes every version and can't be undone.`;
+      if (!window.confirm(warning)) { setBusy(false); return; }
+      await rd.deleteReference(fileId, actor);
+      setNotice({ kind: "pass", text: "Reference file deleted." });
+      reload();
+    } catch (e) { setNotice({ kind: "breach", text: String(e.message || e) }); }
     setBusy(false);
   }
 
@@ -145,6 +167,7 @@ export default function DatasetsLookups() {
                     <td>
                       {isPath ? <span className="mono" title={f.source_path}>path</span> : <span className="mono">upload</span>}
                       {isPath && f.auto_refresh_minutes ? <span className="empty-hint"> · every {f.auto_refresh_minutes}m</span> : null}
+                      {isPath && f.password_configured ? <span className="empty-hint" title="Password configured"> · 🔒</span> : null}
                     </td>
                     <td className="mono">{v ? `v${v.version}` : "—"}</td>
                     <td className="mono">{v ? v.records : "—"}</td>
@@ -158,11 +181,19 @@ export default function DatasetsLookups() {
                       ) : "—"}
                     </td>
                     <td>
-                      {isAdmin && isPath && (
-                        <button className="btn btn--ghost btn--xs" disabled={busy} onClick={() => syncNow(f.id)} title={f.source_path}>
-                          <RefreshCw size={12} /> Sync now
-                        </button>
-                      )}
+                      <div style={{ display: "flex", gap: 6 }}>
+                        {isAdmin && isPath && (
+                          <button className="btn btn--ghost btn--xs" disabled={busy} onClick={() => syncNow(f.id)} title={f.source_path}>
+                            <RefreshCw size={12} /> Sync now
+                          </button>
+                        )}
+                        {isAdmin && (
+                          <button className="btn btn--ghost btn--xs" disabled={busy} onClick={() => deleteReference(f.id, f.name)}
+                                  title="Delete this reference file">
+                            <Trash2 size={12} />
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 );
@@ -211,7 +242,10 @@ export default function DatasetsLookups() {
                         placeholder="e.g. A:I" /></label>
                     <label className="control" style={{ minWidth: 260 }}><span>Password env var (optional)</span>
                       <input value={refPasswordEnvVar} onChange={(e) => setRefPasswordEnvVar(e.target.value)}
-                        placeholder="e.g. TP_MARKET_DATA_XLSX_PASSWORD" /></label>
+                        placeholder="e.g. TP_MARKET_DATA_XLSX_PASSWORD" disabled={!!refPassword.trim()} /></label>
+                    <label className="control" style={{ minWidth: 180 }}><span>— or type a password</span>
+                      <input type="password" value={refPassword} onChange={(e) => setRefPassword(e.target.value)}
+                        placeholder="stored encrypted" disabled={!!refPasswordEnvVar.trim()} /></label>
                   </>
                 )}
                 <button className="btn" disabled={busy || !refPath.trim() || !refName.trim()} onClick={configureReferenceSource}>
@@ -227,10 +261,12 @@ export default function DatasetsLookups() {
           Uploading (or syncing) with the same name creates a new immutable version — published rules keep
           referencing the version they were tested against. A path-configured file is re-read from that path
           on "Sync now" or, if an auto-refresh interval is set, automatically in the background. A path ending
-          in .xlsx/.xlsm is read as Excel — password-protected is fine, give us the name of a server-side
-          environment variable holding the password, never the password itself. If one sheet holds two separate
-          tables side by side, configure a path twice with the same path/sheet and a different column range
-          (e.g. "A:I" and "K:U") and name each one — they become two independent reference files.
+          in .xlsx/.xlsm is read as Excel — password-protected is fine: either name a server-side environment
+          variable holding the password, or type one directly in (it's encrypted before it's stored, never kept
+          as plain text). If one sheet holds two separate tables side by side, configure a path twice with the
+          same path/sheet and a different column range (e.g. "A:I" and "K:U") and name each one — they become
+          two independent reference files. Deleting a reference file removes every version and can't be undone —
+          you'll be warned first if any rule still looks it up.
         </p>
       </Card>
     </>

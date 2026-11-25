@@ -425,9 +425,17 @@ async def upload_dataset(body: UploadDatasetBody):
 # Reference / lookup files
 # --------------------------------------------------------------------------
 
+def _ref_file_dump(f) -> dict:
+    # Never send encrypted_password to a client — there's no legitimate
+    # reason a client needs the ciphertext, even though it's not the raw
+    # secret. password_configured (a computed field) tells the UI whether
+    # a password is set at all, without exposing anything secret-shaped.
+    return f.model_dump(exclude={"encrypted_password"})
+
+
 @router.get("/reference-files")
 async def list_reference_files():
-    return {"files": [f.model_dump() for f in reference_store.list_files()]}
+    return {"files": [_ref_file_dump(f) for f in reference_store.list_files()]}
 
 
 @router.get("/reference-files/{file_id}")
@@ -435,7 +443,7 @@ async def get_reference_file(file_id: str):
     f = reference_store.get_file(file_id)
     if f is None:
         raise HTTPException(404, "reference file not found")
-    return f.model_dump()
+    return _ref_file_dump(f)
 
 
 class UploadReferenceBody(Actor):
@@ -453,7 +461,7 @@ async def upload_reference_file(body: UploadReferenceBody):
     audit_service.log(body.actor, "CREATE", role=body.role.value,
                        detail=f"uploaded reference file '{body.name}' v{f.latest.version}",
                        lookup_files=[f.id])
-    return f.model_dump()
+    return _ref_file_dump(f)
 
 
 class ConfigureReferenceSourceBody(Actor):
@@ -462,13 +470,15 @@ class ConfigureReferenceSourceBody(Actor):
     file_id: Optional[str] = None
     auto_refresh_minutes: Optional[int] = None
     # xlsx-only; all optional, see ReferenceFile's matching fields in
-    # models.py. password_env_var is the NAME of a server-side env var —
-    # never the password itself, which never reaches this body, the
-    # stored config, or the audit log below.
+    # models.py. Two mutually exclusive ways to supply a password: name a
+    # server-side env var (password_env_var), or type one in (password) —
+    # encrypted immediately in reference_store.configure_source() and
+    # never itself reaching the stored config or the audit log below.
     source_format: Optional[str] = None
     sheet_name: Optional[str] = None
     column_range: Optional[str] = None
     password_env_var: Optional[str] = None
+    password: Optional[str] = None
 
 
 @router.post("/reference-files/configure-source")
@@ -483,13 +493,14 @@ async def configure_reference_source(body: ConfigureReferenceSourceBody):
             body.name, body.path, body.auto_refresh_minutes, body.actor, file_id=body.file_id,
             source_format=body.source_format, sheet_name=body.sheet_name,
             column_range=body.column_range, password_env_var=body.password_env_var,
+            password=body.password,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     audit_service.log(body.actor, "CREATE", role=body.role.value,
                        detail=f"configured reference file '{body.name}' from path '{body.path}' -> v{f.latest.version}",
                        lookup_files=[f.id])
-    return f.model_dump()
+    return _ref_file_dump(f)
 
 
 @router.post("/reference-files/{file_id}/sync")
@@ -504,7 +515,7 @@ async def sync_reference_file(file_id: str, actor: str = "unknown", role: Role =
     audit_service.log(actor, "EDIT", role=role.value,
                        detail=f"synced reference file '{f.name}' from path -> v{f.latest.version}",
                        lookup_files=[f.id])
-    return f.model_dump()
+    return _ref_file_dump(f)
 
 
 @router.get("/reference-files/{file_id}/rows")
@@ -513,6 +524,16 @@ async def reference_file_rows(file_id: str, version: Optional[int] = None, limit
     if rows is None:
         raise HTTPException(404, "reference file/version not found")
     return {"rows": rows[:limit], "total": len(rows)}
+
+
+@router.get("/reference-files/{file_id}/usage")
+async def reference_file_usage(file_id: str):
+    """Which rules (if any) still have a LOOKUP node pointing at this
+    reference file — surfaced by the UI as a warning before a delete, not
+    a hard block (deleting an in-use file is still allowed; this just
+    means it's no longer a silent surprise)."""
+    hits = reference_store.find_rules_using(file_id)
+    return {"rules": [{"product": product, "rule_id": rule_id} for product, rule_id in hits]}
 
 
 @router.delete("/reference-files/{file_id}")

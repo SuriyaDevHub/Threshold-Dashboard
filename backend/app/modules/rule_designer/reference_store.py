@@ -17,7 +17,7 @@ import time
 import uuid
 from typing import Dict, List, Optional, Tuple
 
-from app.modules.rule_designer import lookup_engine, s3_store
+from app.modules.rule_designer import lookup_engine, s3_store, secret_crypto
 from app.modules.rule_designer.models import FieldType, LookupConfig, ReferenceFile, ReferenceFileVersion
 from app.modules.rule_designer.schema import infer_schema
 
@@ -127,8 +127,28 @@ def _col_letters_to_indices(column_range: Optional[str]) -> Tuple[Optional[int],
         raise ValueError(f"invalid column_range '{column_range}' (expected e.g. 'A:I')") from exc
 
 
+def _resolve_xlsx_password(password_env_var: Optional[str], encrypted_password: Optional[str]) -> Optional[str]:
+    """Two alternative ways to supply an xlsx password — an encrypted,
+    admin-typed one (see secret_crypto.py) takes precedence if somehow
+    both are set, though configure_source() already rejects setting both
+    at once. Neither path ever returns anything that gets stored back or
+    logged; the resolved plaintext lives only in a local variable, used
+    immediately and then discarded once this call returns."""
+    if encrypted_password:
+        return secret_crypto.decrypt_secret(encrypted_password)
+    if password_env_var:
+        import os
+
+        password = os.getenv(password_env_var)
+        if not password:
+            raise ValueError(f"environment variable '{password_env_var}' is not set (or empty)")
+        return password
+    return None
+
+
 def parse_xlsx_rows(path: str, sheet_name: Optional[str], column_range: Optional[str],
-                     password_env_var: Optional[str]) -> List[dict]:
+                     password_env_var: Optional[str] = None,
+                     encrypted_password: Optional[str] = None) -> List[dict]:
     """xlsx counterpart to parse_csv_text() — produces the exact same
     List[dict] shape (keys = header strings, values = cell values) so
     everything downstream of this function (upload_version(),
@@ -136,23 +156,19 @@ def parse_xlsx_rows(path: str, sheet_name: Optional[str], column_range: Optional
     CONDITION/dry-run pipeline) needs zero awareness the data came from
     Excel.
 
-    An optional password is resolved from an env var NAME at read time —
-    the actual secret value is never returned, stored, or logged; only
-    the name lives in the file's stored config (see ReferenceFile.
-    password_env_var). column_range lets two unrelated tables on the same
-    sheet each be read as an independent reference file."""
+    An optional password is resolved from either a server-side env var
+    NAME or an admin-typed, encrypted-at-rest value (see
+    _resolve_xlsx_password()) — the actual secret value is never
+    returned, stored, or logged by this function; only its source (an env
+    var name, or ciphertext) lives in the file's stored config.
+    column_range lets two unrelated tables on the same sheet each be read
+    as an independent reference file."""
     import openpyxl
 
-    if password_env_var:
-        import os
+    password = _resolve_xlsx_password(password_env_var, encrypted_password)
+    if password:
         import msoffcrypto
 
-        password = os.getenv(password_env_var)
-        if not password:
-            raise ValueError(
-                f"environment variable '{password_env_var}' is not set (or empty) — "
-                f"cannot decrypt xlsx source_path '{path}'"
-            )
         with open(path, "rb") as fh:
             office_file = msoffcrypto.OfficeFile(fh)
             try:
@@ -161,9 +177,8 @@ def parse_xlsx_rows(path: str, sheet_name: Optional[str], column_range: Optional
                 office_file.decrypt(decrypted)
             except Exception as exc:
                 raise ValueError(
-                    f"could not decrypt '{path}' with the password from env var "
-                    f"'{password_env_var}' (wrong password, or file is not actually "
-                    f"encrypted): {exc}"
+                    f"could not decrypt '{path}' with the configured password "
+                    f"(wrong password, or file is not actually encrypted): {exc}"
                 ) from exc
         wb = openpyxl.load_workbook(decrypted, read_only=True, data_only=True)
     else:
@@ -236,6 +251,7 @@ def _to_model(file_id: str, blob: dict) -> ReferenceFile:
         sheet_name=blob.get("sheet_name"),
         column_range=blob.get("column_range"),
         password_env_var=blob.get("password_env_var"),
+        encrypted_password=blob.get("encrypted_password"),
     )
 
 
@@ -291,7 +307,7 @@ def upload_version(name: str, rows: List[dict], uploaded_by: str,
 def configure_source(name: str, path: str, auto_refresh_minutes: Optional[int], actor: str,
                       file_id: Optional[str] = None, source_format: Optional[str] = None,
                       sheet_name: Optional[str] = None, column_range: Optional[str] = None,
-                      password_env_var: Optional[str] = None) -> ReferenceFile:
+                      password_env_var: Optional[str] = None, password: Optional[str] = None) -> ReferenceFile:
     """Registers (or re-registers) a reference file's source as a local/
     network file this app reads itself, instead of a browser upload — so
     an end user never has to manually re-export/re-upload it when the
@@ -299,13 +315,22 @@ def configure_source(name: str, path: str, auto_refresh_minutes: Optional[int], 
     reference_sync_scheduler.py for the automatic side of it). Syncs once
     immediately — configuring a path with nothing pulled yet is useless.
 
-    source_format/sheet_name/column_range/password_env_var are xlsx-only
-    (see parse_xlsx_rows()) and all optional — leaving them unset behaves
+    source_format/sheet_name/column_range are xlsx-only (see
+    parse_xlsx_rows()) and all optional — leaving them unset behaves
     exactly like a plain CSV path source, today's only behavior.
+
+    Two alternative, mutually exclusive ways to supply an xlsx password:
     password_env_var stores only the NAME of a server-side environment
-    variable; the actual password is never passed to this function, never
-    stored here, and never reaches the audit log (see the
-    /reference-files/configure-source route)."""
+    variable (the actual value is never passed to this function); password
+    is a plaintext an admin typed into the config form, which this
+    function encrypts immediately via secret_crypto.encrypt_secret() and
+    stores only as ciphertext — the plaintext parameter is never itself
+    stored or logged (see the /reference-files/configure-source route for
+    the audit-log call, which never interpolates either)."""
+    if password_env_var and password:
+        raise ValueError("set either a password env var name or a typed password, not both")
+    encrypted_password = secret_crypto.encrypt_secret(password) if password else None
+
     idx = _load_index()
     if file_id is None:
         existing = find_by_name(name)
@@ -319,6 +344,7 @@ def configure_source(name: str, path: str, auto_refresh_minutes: Optional[int], 
     blob["sheet_name"] = sheet_name
     blob["column_range"] = column_range
     blob["password_env_var"] = password_env_var
+    blob["encrypted_password"] = encrypted_password
     idx[file_id] = blob
     _save_index(idx)
     return sync_now(file_id, actor)
@@ -344,7 +370,8 @@ def sync_now(file_id: str, actor: str) -> ReferenceFile:
     try:
         if source_format == "xlsx":
             rows = parse_xlsx_rows(
-                path, blob.get("sheet_name"), blob.get("column_range"), blob.get("password_env_var"),
+                path, blob.get("sheet_name"), blob.get("column_range"),
+                blob.get("password_env_var"), blob.get("encrypted_password"),
             )
         else:
             with open(path) as fh:
@@ -429,6 +456,37 @@ def get_lookup_index(file_id: Optional[str], version: Optional[int],
     with _lookup_index_cache_lock:
         _lookup_index_cache[index_cache_key] = index
     return index
+
+
+def find_rules_using(file_id: str) -> List[Tuple[str, str]]:
+    """[(product_code, rule_id), ...] for every rule with a LOOKUP/
+    ENRICHMENT node pointing at file_id (as either its primary
+    reference_file_id or fallback_reference_file_id) — used to warn an
+    admin before deleting a reference file whose versions a published
+    rule may still be pinned to (delete_file() itself doesn't check this;
+    nothing here blocks the delete, it's a warning the caller surfaces).
+
+    Uses rule_store.list_rules() (not yaml_service directly) because a
+    freshly-created or edited rule lives in draft_store until it's
+    published — yaml_service.load_rules() alone would miss it, making a
+    reference file look unused when a draft rule's LOOKUP node already
+    points at it. rule_store.list_rules() already merges both, preferring
+    a draft over its published counterpart, same as the rest of the admin
+    UI does. Bounded, admin-triggered (the delete-confirmation flow), not
+    a hot path — no caching, same as any other one-off admin lookup in
+    this module."""
+    from app.modules.rule_designer import rule_store
+    from app.modules.rule_designer.models import NodeType
+
+    hits: List[Tuple[str, str]] = []
+    for rule in rule_store.list_rules():
+        for node in rule.workflow.nodes:
+            if node.type in (NodeType.LOOKUP, NodeType.ENRICHMENT) and node.lookup and (
+                node.lookup.reference_file_id == file_id or node.lookup.fallback_reference_file_id == file_id
+            ):
+                hits.append((rule.product, rule.rule_id))
+                break
+    return hits
 
 
 def delete_file(file_id: str) -> bool:

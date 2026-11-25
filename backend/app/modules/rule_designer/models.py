@@ -28,7 +28,7 @@ import uuid
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 
 def _id(prefix: str) -> str:
@@ -613,6 +613,20 @@ class ReferenceFile(BaseModel):
     # The NAME of a server-side env var holding the password — never the
     # password itself. None means this xlsx isn't password-protected.
     password_env_var: Optional[str] = None
+    # Alternative to password_env_var: a password an admin typed directly
+    # into the config form, encrypted at rest via secret_crypto.py — never
+    # the plaintext. Mutually exclusive with password_env_var (validated
+    # in reference_store.configure_source()); at most one should be set.
+    encrypted_password: Optional[str] = None
+
+    # @computed_field (not a plain @property) so it actually appears in
+    # model_dump()'s output for the frontend — a plain @property is not
+    # serialized by Pydantic v2's model_dump() (confirmed: the existing
+    # `latest` property below is NOT present in the API's JSON response).
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def password_configured(self) -> bool:
+        return bool(self.password_env_var or self.encrypted_password)
 
     @property
     def latest(self) -> Optional[ReferenceFileVersion]:

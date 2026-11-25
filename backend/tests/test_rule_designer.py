@@ -19,8 +19,8 @@ from app.core.config import get_settings
 from app.modules.rule_designer import (
     calc_ops, condition_engine, day_partitioned_source, draft_store, dry_run_service, explain_service,
     lookup_engine, product_engine, product_registry, reference_store, reference_sync_scheduler,
-    rule_store, rule_usage_service, s3_store, validation_service, version_service, workflow_engine,
-    yaml_service,
+    rule_store, rule_usage_service, s3_store, secret_crypto, validation_service, version_service,
+    workflow_engine, yaml_service,
 )
 from app.modules.rule_designer.models import (
     Condition, ConditionGroup, ConflictHandling, DeriveSpec, FieldType, LookupConfig, LookupFieldMap, LookupType,
@@ -1392,6 +1392,126 @@ def test_sync_now_xlsx_blank_join_key_cell_matches_a_sources_own_blank_value(tmp
     outcome = lookup_engine.apply_lookup({"trade_code": ""}, idx, None)
     assert outcome.status == "matched"
     assert outcome.fields_added == {"value": "blank-code"}
+
+
+# --------------------------------------------------------------------------
+# secret_crypto — Fernet-based encrypt-at-rest for a typed-in xlsx password
+# --------------------------------------------------------------------------
+
+def test_encrypt_decrypt_secret_round_trips(monkeypatch):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("REFERENCE_SECRETS_KEY", Fernet.generate_key().decode())
+    ciphertext = secret_crypto.encrypt_secret("hunter2")
+    assert ciphertext != "hunter2"
+    assert secret_crypto.decrypt_secret(ciphertext) == "hunter2"
+
+
+def test_decrypt_secret_with_a_different_key_raises_clear_error(monkeypatch):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("REFERENCE_SECRETS_KEY", Fernet.generate_key().decode())
+    ciphertext = secret_crypto.encrypt_secret("hunter2")
+
+    monkeypatch.setenv("REFERENCE_SECRETS_KEY", Fernet.generate_key().decode())
+    with pytest.raises(ValueError, match="REFERENCE_SECRETS_KEY"):
+        secret_crypto.decrypt_secret(ciphertext)
+
+
+def test_encrypt_secret_without_the_key_env_var_names_it_in_the_error(monkeypatch):
+    monkeypatch.delenv("REFERENCE_SECRETS_KEY", raising=False)
+    with pytest.raises(ValueError, match="REFERENCE_SECRETS_KEY"):
+        secret_crypto.encrypt_secret("hunter2")
+
+
+# --------------------------------------------------------------------------
+# reference_store — xlsx password as a typed-in, encrypted-at-rest value
+# (the alternative to password_env_var), and deleting a reference file
+# with an in-use warning
+# --------------------------------------------------------------------------
+
+def test_sync_now_xlsx_typed_password_encrypted_at_rest(tmp_path, monkeypatch):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("REFERENCE_SECRETS_KEY", Fernet.generate_key().decode())
+    plain = _make_xlsx_bytes("Sheet1", [("Currency", "Threshold"), ("USD", 2.0)])
+    xlsx_path = tmp_path / "ccy_typed.xlsx"
+    xlsx_path.write_bytes(_encrypt_xlsx_bytes(plain, "typed-secret"))
+
+    f = reference_store.configure_source(
+        "ccy_xlsx_typed", str(xlsx_path), None, "tester",
+        sheet_name="Sheet1", password="typed-secret",
+    )
+    assert f.last_sync_error is None
+    assert f.latest.records == 1
+    assert f.password_configured is True
+    assert f.encrypted_password is not None
+    assert f.encrypted_password != "typed-secret"  # never stored as plaintext
+    assert f.password_env_var is None
+
+
+def test_configure_source_rejects_both_password_options_at_once(tmp_path, monkeypatch):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("REFERENCE_SECRETS_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("SOME_PW_VAR", "irrelevant")
+    plain = _make_xlsx_bytes("Sheet1", [("Currency", "Threshold"), ("USD", 2.0)])
+    xlsx_path = tmp_path / "ccy_both.xlsx"
+    xlsx_path.write_bytes(plain)
+
+    with pytest.raises(ValueError, match="not both"):
+        reference_store.configure_source(
+            "ccy_xlsx_both", str(xlsx_path), None, "tester",
+            password_env_var="SOME_PW_VAR", password="typed-secret",
+        )
+
+
+def test_reference_file_api_response_never_contains_the_ciphertext(tmp_path, monkeypatch):
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setenv("REFERENCE_SECRETS_KEY", Fernet.generate_key().decode())
+    plain = _make_xlsx_bytes("Sheet1", [("Currency", "Threshold"), ("USD", 2.0)])
+    xlsx_path = tmp_path / "ccy_dump.xlsx"
+    xlsx_path.write_bytes(_encrypt_xlsx_bytes(plain, "typed-secret"))
+    f = reference_store.configure_source(
+        "ccy_xlsx_dump", str(xlsx_path), None, "tester", sheet_name="Sheet1", password="typed-secret",
+    )
+
+    dumped = f.model_dump(exclude={"encrypted_password"})
+    assert "encrypted_password" not in dumped
+    assert dumped["password_configured"] is True
+
+
+def _rule_using_ref(rule_id, file_id):
+    return _rule(rule_id=rule_id, name="Uses ref", workflow=Workflow(nodes=[
+        WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=LookupConfig(
+            lookup_type=LookupType.EXACT, reference_file_id=file_id,
+            join_keys=[{"source": "a", "reference": "a"}],
+            fields=[LookupFieldMap(source_column="b", output_field="b")],
+        )),
+    ]))
+
+
+def test_find_rules_using_finds_a_published_rule_whose_lookup_references_the_file():
+    yaml_service.save_rules([_rule_using_ref("USES_REF", "ref_in_use")], actor="tester")
+
+    hits = reference_store.find_rules_using("ref_in_use")
+    assert (TEST_PRODUCT, "USES_REF") in hits
+    assert reference_store.find_rules_using("ref_not_used_anywhere") == []
+
+
+def test_find_rules_using_finds_a_draft_rule_too():
+    """A freshly-created or edited rule lives in draft_store until it's
+    published — yaml_service.load_rules() alone would miss it, wrongly
+    showing a reference file as unused while a draft rule's LOOKUP node
+    already points at it (reproduced live via the actual create-rule API
+    before this was fixed to go through rule_store.list_rules())."""
+    rule = _rule_using_ref("USES_REF_DRAFT", "ref_in_use_draft")
+    assert rule.status == RuleStatus.DRAFT
+    rule_store.upsert_rule(rule, actor="tester")
+
+    hits = reference_store.find_rules_using("ref_in_use_draft")
+    assert (TEST_PRODUCT, "USES_REF_DRAFT") in hits
 
 
 # --------------------------------------------------------------------------

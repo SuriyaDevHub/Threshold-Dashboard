@@ -32,6 +32,7 @@ export const rd = {
   referenceFiles: () => get("/reference-files"),
   referenceFile: (id) => get(`/reference-files/${id}`),
   referenceRows: (id, version, limit = 50) => get(`/reference-files/${id}/rows`, { version, limit }),
+  referenceFileUsage: (id) => get(`/reference-files/${id}/usage`),
   uploadReference: (actor, role, name, csv_text) => post("/reference-files/upload", { actor, role, name, csv_text }),
   configureReferenceSource: (actor, role, name, path, fileId, autoRefreshMinutes, xlsxOpts = {}) =>
     post("/reference-files/configure-source", {
@@ -39,6 +40,7 @@ export const rd = {
       sheet_name: xlsxOpts.sheetName || null,
       column_range: xlsxOpts.columnRange || null,
       password_env_var: xlsxOpts.passwordEnvVar || null,
+      password: xlsxOpts.password || null,
     }),
   syncReference: (id, actor) => post(`/reference-files/${id}/sync`, { actor }),
   deleteReference: (id, actor) => del(`/reference-files/${id}`, { actor }),
