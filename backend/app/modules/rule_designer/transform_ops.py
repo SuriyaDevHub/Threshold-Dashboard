@@ -1,5 +1,6 @@
 """Shared value-transform vocabulary — round/upper/lower/trim/substring/
-split/replace/cast_numeric/cast_string/value_map/parse_date/date_shift.
+split/replace/cast_numeric/cast_string/value_map/parse_date/date_shift/
+normalize_tenor.
 
 Factored out of workflow_engine.py so it has exactly one implementation,
 used by both:
@@ -8,6 +9,12 @@ used by both:
     from a reference file can be cleaned up with the same operations
     available on any other field, instead of always being written
     through verbatim.
+  * A LOOKUP join key's own `transform` (lookup_engine._key_tuple()),
+    applied symmetrically to both the source and reference values before
+    comparing — this is what lets normalize_tenor turn a dataset's
+    numeric Tenor into the same "1M"/"3Y" short code a reference file's
+    own Tenor column uses, right at match time, with no separate
+    upstream TRANSFORM node needed.
 
 A standalone module (not defined in workflow_engine.py and imported by
 lookup_engine.py) specifically to avoid a circular import: workflow_engine
@@ -17,6 +24,7 @@ from __future__ import annotations
 
 import calendar
 import datetime as _dt
+import re
 from typing import Any, Dict, Optional
 
 # Preset strptime patterns a `parse_date` TRANSFORM can select by name —
@@ -109,6 +117,90 @@ def _shift_date(val: Any, cfg: Dict[str, Any]) -> str:
     raise ValueError(f"unknown date_shift unit: {unit!r}")
 
 
+# Simple calendar-day approximations (NOT a real holiday calendar/business-
+# day convention — those vary by currency and are a materially bigger,
+# separate feature). D/W/M/Y are deliberately exact ×1/×7/×30/×365, matching
+# the same "estimate, not a settlement calculation" convention this was
+# specified with.
+_TENOR_UNIT_DAYS: Dict[str, int] = {"D": 1, "W": 7, "M": 30, "Y": 365}
+_TENOR_ALIASES: Dict[str, str] = {
+    "D": "D", "DY": "D",
+    "W": "W", "WK": "W",
+    "M": "M", "MO": "M",
+    "Y": "Y", "YR": "Y", "YRS": "Y",
+}
+# SPT/SNX's real spot-lag varies by currency/market — overridable per
+# transform via cfg["spt_days"]/cfg["snx_days"]; these are just the
+# defaults when neither is configured.
+_TENOR_SPECIAL_DAYS: Dict[str, int] = {"TDY": 0, "TOM": 1, "O/N": 1, "ON": 1, "SPT": 2, "SNX": 3}
+
+_TENOR_COMPONENT_RE = re.compile(r"(\d+(?:\.\d+)?)([A-Z]+)")
+
+
+def _encode_tenor_days(days: float) -> str:
+    """The reverse of parsing: pick the single largest unit that evenly
+    divides `days`, in Y -> M -> W -> D priority, so a round value comes
+    back out as the same short code a reference file's own Tenor column
+    would use ("1M", "3Y", ...) rather than an always-in-days value.
+    Falls back to raw days when nothing divides evenly — deterministic,
+    not a fuzzy "nearest tenor bucket" guess."""
+    if days != int(days):
+        return f"{days:g}D"
+    days_int = int(days)
+    for unit in ("Y", "M", "W"):
+        unit_days = _TENOR_UNIT_DAYS[unit]
+        if days_int != 0 and days_int % unit_days == 0:
+            return f"{days_int // unit_days}{unit}"
+    return f"{days_int}D"
+
+
+def _normalize_tenor(val: Any, cfg: Dict[str, Any]) -> str:
+    """Normalizes a tenor value — however it's represented on either side
+    of a LOOKUP join key — to one canonical short code ("1M", "3Y", "6M",
+    ...), so a dataset's numeric day-count Tenor can match a reference
+    file's own normalized Tenor column. Handles, in order: a plain
+    number (read as a day count, the dataset's own convention); the
+    special codes TDY/TOM/SPT/SNX/O_N (simple calendar-day
+    approximations, not a real holiday calendar — see _TENOR_SPECIAL_DAYS);
+    and one or more <number><unit> components (D/DY, W/WK, M/MO,
+    Y/YR/YRS, case-insensitive, decimals allowed) concatenated together,
+    e.g. "3Y6M" — summed to a total day count using the same simple
+    ×1/×7/×30/×365 conversion. Raises ValueError for anything that
+    doesn't fully parse as one of these — surfaced the same way every
+    other transform op's bad input already is, via
+    workflow_engine._apply_single_transform()'s existing try/except."""
+    raw = str(val).strip()
+    s = raw.upper().replace(" ", "")
+    if not s:
+        raise ValueError("empty tenor value")
+
+    try:
+        return _encode_tenor_days(float(s))
+    except ValueError:
+        pass
+
+    special_days = dict(_TENOR_SPECIAL_DAYS)
+    if cfg.get("spt_days") not in (None, ""):
+        special_days["SPT"] = float(cfg["spt_days"])
+    if cfg.get("snx_days") not in (None, ""):
+        special_days["SNX"] = float(cfg["snx_days"])
+    if s in special_days:
+        return _encode_tenor_days(special_days[s])
+
+    matches = list(_TENOR_COMPONENT_RE.finditer(s))
+    if not matches or "".join(m.group(0) for m in matches) != s:
+        raise ValueError(f"unrecognized tenor '{raw}'")
+    total_days = 0.0
+    for m in matches:
+        qty = float(m.group(1))
+        alias = m.group(2)
+        unit = _TENOR_ALIASES.get(alias)
+        if unit is None:
+            raise ValueError(f"unrecognized tenor unit '{alias}' in '{raw}'")
+        total_days += qty * _TENOR_UNIT_DAYS[unit]
+    return _encode_tenor_days(total_days)
+
+
 def apply_transform_op(op: Optional[str], val: Any, cfg: Dict[str, Any]) -> Any:
     """Pure value transform — never touches a record or field name, just
     the value itself. Returns `val` unchanged for a None value or an
@@ -148,6 +240,8 @@ def apply_transform_op(op: Optional[str], val: Any, cfg: Dict[str, Any]) -> Any:
         return _parse_date(val, cfg)
     if op == "date_shift":
         return _shift_date(val, cfg)
+    if op == "normalize_tenor":
+        return _normalize_tenor(val, cfg)
     if op == "value_map":
         # Free-text -> code normalization: "LONDON (LN)" -> "LN". First
         # matching rule wins (checked in configured order), falling back to

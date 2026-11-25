@@ -16,7 +16,8 @@ import { withCurrent } from "./ConditionBuilder.jsx";
 // caller can set it directly without re-merging.
 
 const OP_PARAM_KEYS = ["precision", "start", "end", "delimiter", "index", "find", "replace_with", "rules", "default",
-                       "input_format", "custom_pattern", "unit", "amount", "fields", "separator"];
+                       "input_format", "custom_pattern", "unit", "amount", "fields", "separator",
+                       "spt_days", "snx_days"];
 
 const TRANSFORM_OPS = [
   { value: "round", label: "round" },
@@ -31,6 +32,7 @@ const TRANSFORM_OPS = [
   { value: "value_map", label: "map text to a value" },
   { value: "parse_date", label: "parse date" },
   { value: "date_shift", label: "shift date" },
+  { value: "normalize_tenor", label: "normalize tenor" },
 ];
 
 // Must match transform_ops.py's _shift_date() units exactly.
@@ -164,6 +166,19 @@ export default function TransformOpFields({ transform, onChange, allowNone, fiel
           </select>
         </>
       )}
+
+      {op === "normalize_tenor" && (
+        <>
+          <label className="control"><span>SPT lag (days, optional)</span>
+            <input type="number" min="0" placeholder="2" value={transform?.spt_days ?? ""}
+                   onChange={(e) => set({ spt_days: e.target.value })} />
+          </label>
+          <label className="control"><span>SNX lag (days, optional)</span>
+            <input type="number" min="0" placeholder="3" value={transform?.snx_days ?? ""}
+                   onChange={(e) => set({ snx_days: e.target.value })} />
+          </label>
+        </>
+      )}
     </>
   );
 }
@@ -244,5 +259,6 @@ export function transformHint(op) {
   if (op === "value_map") return 'Checked top to bottom — the first rule whose text is found (case-insensitive) anywhere in the value wins, e.g. "London (LN) Branch" containing "LONDON" maps to "LN".';
   if (op === "parse_date") return "Output is always stored as YYYY-MM-DD, so it can be compared with before/after/on against any other date field — including one that never needed a transform.";
   if (op === "date_shift") return 'Negative amount shifts earlier, positive shifts later (e.g. months, -1 = "one month before"). Months/years shift by calendar month, not a fixed day count (Mar 31 minus 1 month lands on Feb 28). Combine with a "before"/"after" condition against this field to build thresholds like "more than one month before COB date": shift COB date back 1 month, then check trade date is before the result.';
+  if (op === "normalize_tenor") return 'Normalizes a tenor to one short code ("1M", "3Y", "6M", ...) regardless of how it\'s represented on input — a plain number is read as a day count, strings like "1WK"/"18M"/"3Y6M" are parsed (D/W/M/Y units, decimals and mixed components allowed), and TDY/TOM/SPT/SNX/O_N are simple calendar-day approximations (not a real holiday calendar) — SPT/SNX default to 2/3 days unless overridden below. Put this directly on a LOOKUP join key\'s own transform to make a numeric dataset Tenor match a reference file\'s normalized Tenor column, with no separate TRANSFORM node needed.';
   return null;
 }

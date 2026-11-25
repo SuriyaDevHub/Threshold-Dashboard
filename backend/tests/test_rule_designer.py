@@ -3142,6 +3142,66 @@ def test_node_outputs_tags_date_shift_as_part_of_field_availability():
     assert workflow_engine.node_outputs(node) == ["cob_minus_1mo"]
 
 
+# --------------------------------------------------------------------------
+# normalize_tenor transform — a plain single-value op (transform_ops.py),
+# so it's reachable from a TRANSFORM node, a LOOKUP field mapping, AND a
+# LOOKUP join key's own transform (unlike concat/coalesce, which had to be
+# special-cased in workflow_engine._apply_single_transform).
+# --------------------------------------------------------------------------
+
+def test_normalize_tenor_numeric_day_count_to_short_code():
+    node = _transform_node(op="normalize_tenor", field="tenor_days", output_field="tenor")
+    assert workflow_engine._apply_transform(node, {"tenor_days": 30})[1] == {"tenor": "1M"}
+    assert workflow_engine._apply_transform(node, {"tenor_days": 365})[1] == {"tenor": "1Y"}
+    assert workflow_engine._apply_transform(node, {"tenor_days": 90})[1] == {"tenor": "3M"}
+    assert workflow_engine._apply_transform(node, {"tenor_days": 10})[1] == {"tenor": "10D"}
+
+
+def test_normalize_tenor_alias_strings_including_mixed_components():
+    node = _transform_node(op="normalize_tenor", field="tenor_raw", output_field="tenor")
+    assert workflow_engine._apply_transform(node, {"tenor_raw": "1WK"})[1] == {"tenor": "1W"}
+    assert workflow_engine._apply_transform(node, {"tenor_raw": "18M"})[1] == {"tenor": "18M"}
+    # 3Y6M = 3*365 + 6*30 = 1275 days exactly under this deliberately simple
+    # ×365/×30 convention — not an exact Y/M/W multiple, so it falls back to
+    # raw days (a documented divergence from a 365.25-day-year convention,
+    # which would instead land on ~1,277.5 days).
+    assert workflow_engine._apply_transform(node, {"tenor_raw": "3Y6M"})[1] == {"tenor": "1275D"}
+
+
+def test_normalize_tenor_special_codes_and_overridable_spt_snx_lag():
+    node = _transform_node(op="normalize_tenor", field="tenor_raw", output_field="tenor")
+    assert workflow_engine._apply_transform(node, {"tenor_raw": "TDY"})[1] == {"tenor": "0D"}
+    assert workflow_engine._apply_transform(node, {"tenor_raw": "TOM"})[1] == {"tenor": "1D"}
+    assert workflow_engine._apply_transform(node, {"tenor_raw": "O/N"})[1] == {"tenor": "1D"}
+    assert workflow_engine._apply_transform(node, {"tenor_raw": "SPT"})[1] == {"tenor": "2D"}
+    assert workflow_engine._apply_transform(node, {"tenor_raw": "SNX"})[1] == {"tenor": "3D"}
+
+    custom_node = _transform_node(op="normalize_tenor", field="tenor_raw", output_field="tenor",
+                                   spt_days=5, snx_days=4)
+    assert workflow_engine._apply_transform(custom_node, {"tenor_raw": "SPT"})[1] == {"tenor": "5D"}
+    assert workflow_engine._apply_transform(custom_node, {"tenor_raw": "SNX"})[1] == {"tenor": "4D"}
+
+
+def test_normalize_tenor_unparseable_value_yields_error_status():
+    node = _transform_node(op="normalize_tenor", field="tenor_raw", output_field="tenor")
+    status, fields = workflow_engine._apply_transform(node, {"tenor_raw": "GARBAGE"})
+    assert status == "error" and fields == {}
+
+
+def test_normalize_tenor_as_a_join_key_transform_matches_numeric_to_short_code():
+    # The actual motivating case: the dataset's Tenor is a numeric day
+    # count, the reference file's Tenor column is already a normalized
+    # short code — normalize_tenor on the join key's own transform (not a
+    # separate upstream TRANSFORM node) makes them match directly, applied
+    # symmetrically to both sides by lookup_engine._key_tuple().
+    ref_rows = [{"Tenor": "1M", "Rate": 1.55}, {"Tenor": "3M", "Rate": 2.35}]
+    cfg = _cfg(join_keys=[{"source": "tenor_days", "reference": "Tenor", "transform": {"op": "normalize_tenor"}}],
+               fields=[LookupFieldMap(source_column="Rate", output_field="Rate")])
+    idx = lookup_engine.build_index(ref_rows, cfg)
+    out = lookup_engine.apply_lookup({"tenor_days": 30}, idx)
+    assert out.status == "matched" and out.fields_added["Rate"] == 1.55
+
+
 def test_parse_date_transform_tolerates_trailing_time_component():
     """A "date" column that's really a midnight timestamp in the source
     system (e.g. "15-01-2026 00:00:00" against a date-only DD-MM-YYYY
