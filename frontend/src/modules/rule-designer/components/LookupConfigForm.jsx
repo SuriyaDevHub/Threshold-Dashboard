@@ -126,6 +126,53 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
     updateJoinKey(i, { reference: arr.length === 1 ? arr[0] : arr });
   }
 
+  // Symmetric with the reference-side helpers above — a join key's SOURCE
+  // side can likewise be a list of dataset fields to concatenate (no
+  // separator), as the alternative to pre-building the combined value with
+  // a "concatenate fields" TRANSFORM node. This is what makes a per-column
+  // fallback (below) actually express "default just this one component,
+  // keep the others' real per-record values" — a single fixed fallback
+  // string for an already-merged key could never do that.
+  function srcValueAsArray(jk) {
+    return Array.isArray(jk.source) ? jk.source : [jk.source ?? ""];
+  }
+  function updateJoinKeySourceColumn(i, si, value) {
+    const arr = [...srcValueAsArray((lookup.join_keys || [])[i])];
+    arr[si] = value;
+    updateJoinKey(i, { source: arr.length === 1 ? arr[0] : arr });
+  }
+  function addJoinKeySourceColumn(i) {
+    const arr = [...srcValueAsArray((lookup.join_keys || [])[i]), sourceFields[0]?.field || ""];
+    updateJoinKey(i, { source: arr });
+  }
+  function removeJoinKeySourceColumn(i, si) {
+    const jk = (lookup.join_keys || [])[i];
+    const arr = srcValueAsArray(jk).filter((_, idx) => idx !== si);
+    const defaults = defaultsAsArray(jk).filter((_, idx) => idx !== si);
+    updateJoinKey(i, {
+      source: arr.length === 1 ? arr[0] : arr,
+      default_on_miss: arr.length === 1 ? (defaults[0] || undefined) : defaults,
+    });
+  }
+
+  // A join key's default_on_miss mirrors its source shape: a single
+  // fallback value for a plain string source, or a PARALLEL array (one
+  // slot per source column, blank = no fallback for that column) for a
+  // composite source — see lookup_engine._apply_source_defaults().
+  function defaultsAsArray(jk) {
+    const src = srcValueAsArray(jk);
+    const d = Array.isArray(jk.default_on_miss) ? jk.default_on_miss
+      : (src.length === 1 ? [jk.default_on_miss ?? ""] : []);
+    return src.map((_, i) => d[i] ?? "");
+  }
+  function updateJoinKeyDefault(i, si, value) {
+    const jk = (lookup.join_keys || [])[i];
+    const src = srcValueAsArray(jk);
+    const defaults = defaultsAsArray(jk);
+    defaults[si] = value;
+    updateJoinKey(i, { default_on_miss: src.length === 1 ? (defaults[0] || undefined) : defaults });
+  }
+
   function addFieldMap() {
     set({ fields: [...(lookup.fields || []), { source_column: enrichColumns[0] || "", output_field: "" }] });
   }
@@ -313,11 +360,24 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
             <div key={i} style={{ border: "1px solid var(--line)", borderRadius: 7, padding: 8, marginBottom: 8 }}>
               <div className="lk-row" style={{ marginBottom: 0 }}>
                 <span className="mono">source</span>
-                <select value={jk.source} onChange={(e) => updateJoinKey(i, { source: e.target.value })}>
-                  {withCurrent(sourceFields, jk.source).map((f) => (
-                    <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
-                  ))}
-                </select>
+                {srcValueAsArray(jk).map((srcField, si) => (
+                  <span key={si} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    {si > 0 && <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>+</span>}
+                    <select value={srcField} onChange={(e) => updateJoinKeySourceColumn(i, si, e.target.value)}>
+                      {withCurrent(sourceFields, srcField).map((f) => (
+                        <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
+                      ))}
+                    </select>
+                    {srcValueAsArray(jk).length > 1 && (
+                      <button className="icon-btn" onClick={() => removeJoinKeySourceColumn(i, si)}>
+                        <Trash2 size={11} />
+                      </button>
+                    )}
+                  </span>
+                ))}
+                <button className="btn btn--ghost btn--xs" onClick={() => addJoinKeySourceColumn(i)}>
+                  + combine column
+                </button>
                 <span className="mono">=</span>
                 {refValueAsArray(jk).map((refCol, ri) => (
                   <span key={ri} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
@@ -342,11 +402,37 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
                 </button>
                 <button className="icon-btn" onClick={() => removeJoinKey(i)}><Trash2 size={13} /></button>
               </div>
+              {srcValueAsArray(jk).length > 1 && (
+                <p className="empty-hint" style={{ marginTop: 4 }}>
+                  Built from these dataset fields concatenated together, plain (no separator) —
+                  e.g. {srcValueAsArray(jk).join(" + ")} — for when the dataset has no single field already
+                  holding the combined value (the alternative to a "concatenate fields" TRANSFORM node upstream).
+                </p>
+              )}
               {refValueAsArray(jk).length > 1 && (
                 <p className="empty-hint" style={{ marginTop: 4 }}>
                   Matches against these reference columns' values concatenated together, plain (no separator) —
                   e.g. {refValueAsArray(jk).join(" + ")} — for a reference file that splits one logical key part
                   across more than one of its own columns.
+                </p>
+              )}
+              <div className="lk-row" style={{ marginTop: 6, marginBottom: 0 }}>
+                <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>fallback if no match</span>
+                {srcValueAsArray(jk).map((srcField, si) => (
+                  <label key={si} className="control" style={{ minWidth: 110 }}>
+                    <span>{srcField || "…"}</span>
+                    <input value={defaultsAsArray(jk)[si] ?? ""} placeholder="none"
+                           onChange={(e) => updateJoinKeyDefault(i, si, e.target.value)} />
+                  </label>
+                ))}
+              </div>
+              {defaultsAsArray(jk).some((d) => d) && (
+                <p className="empty-hint" style={{ marginTop: 4 }}>
+                  The record's own value is always tried first. Only if NOTHING matches does this rule retry once
+                  with every filled-in fallback above substituted together (fields left blank keep the record's
+                  own real value) — e.g. a site with no curve of its own falls back to a "DEFAULT" curve while
+                  currency/tenor still use the record's real values. A match found this way is flagged in the
+                  dry-run trail as using a default, not shown as an ordinary match.
                 </p>
               )}
               <div className="lk-row" style={{ marginTop: 6, marginBottom: 0 }}>

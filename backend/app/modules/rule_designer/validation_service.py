@@ -262,8 +262,17 @@ def validate_workflow(rule: Rule, dataset_schema: Optional[Dict[str, FieldType]]
 
         elif node.type in (NodeType.LOOKUP, NodeType.ENRICHMENT) and node.lookup:
             for jk in node.lookup.join_keys:
-                if base_fields and jk.get("source") not in available:
-                    result.errors.append(f"{label}: source field '{jk.get('source')}' not available at this stage")
+                src = jk.get("source")
+                # A composite source (see lookup_engine._key_tuple()) names
+                # 2+ dataset fields to concatenate — every one of them has
+                # to actually be available, not just the first.
+                if isinstance(src, list):
+                    if base_fields:
+                        for c in src:
+                            if c not in available:
+                                result.errors.append(f"{label}: source field '{c}' not available at this stage")
+                elif base_fields and src not in available:
+                    result.errors.append(f"{label}: source field '{src}' not available at this stage")
             if node.lookup.range_field and base_fields and node.lookup.range_field not in available:
                 result.errors.append(f"{label}: source field '{node.lookup.range_field}' not available at this stage")
             if node.lookup.date_field and base_fields and node.lookup.date_field not in available:

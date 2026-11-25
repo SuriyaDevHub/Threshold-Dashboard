@@ -380,6 +380,85 @@ def test_reference_columns_flattens_plain_and_composite_join_keys():
     assert lookup_engine.reference_columns(join_keys) == ["A", "B1", "B2"]
 
 
+# --------------------------------------------------------------------------
+# lookup_engine — join-key default_on_miss (retry with a configured
+# fallback value when the record's own real value(s) don't match)
+# --------------------------------------------------------------------------
+
+def test_default_on_miss_not_consulted_when_the_real_value_already_matches():
+    ref_rows = [{"Site": "London", "Rate": 1.1}, {"Site": "DEFAULT", "Rate": 9.9}]
+    cfg = _cfg(join_keys=[{"source": "site", "reference": "Site", "default_on_miss": "DEFAULT"}],
+               fields=[LookupFieldMap(source_column="Rate", output_field="Rate")])
+    idx = lookup_engine.build_index(ref_rows, cfg)
+    out = lookup_engine.apply_lookup({"site": "London"}, idx)
+    assert out.status == "matched" and out.fields_added["Rate"] == 1.1
+    assert "default" not in out.detail.lower()
+
+
+def test_default_on_miss_plain_source_falls_back_when_real_value_misses():
+    ref_rows = [{"Site": "DEFAULT", "Rate": 9.9}]
+    cfg = _cfg(join_keys=[{"source": "site", "reference": "Site", "default_on_miss": "DEFAULT"}],
+               fields=[LookupFieldMap(source_column="Rate", output_field="Rate")])
+    idx = lookup_engine.build_index(ref_rows, cfg)
+    out = lookup_engine.apply_lookup({"site": "Mumbai"}, idx)
+    assert out.status == "matched" and out.fields_added["Rate"] == 9.9
+    assert "default" in out.detail.lower() and "site" in out.detail.lower()
+
+
+def test_default_on_miss_composite_source_defaults_only_the_configured_component():
+    # Site has no curve of its own; CCY's real value must still be used on
+    # the retry, not also defaulted — a single fixed fallback string for
+    # the whole composite key could never express this.
+    ref_rows = [
+        {"Site": "London", "CCY": "USD", "Rate": 1.1},
+        {"Site": "DEFAULT", "CCY": "USD", "Rate": 2.2},
+        {"Site": "DEFAULT", "CCY": "EUR", "Rate": 3.3},
+    ]
+    cfg = _cfg(join_keys=[{"source": ["site", "ccy"], "reference": ["Site", "CCY"],
+                            "default_on_miss": ["DEFAULT", None]}],
+               fields=[LookupFieldMap(source_column="Rate", output_field="Rate")])
+    idx = lookup_engine.build_index(ref_rows, cfg)
+
+    usd_fallback = lookup_engine.apply_lookup({"site": "Mumbai", "ccy": "USD"}, idx)
+    assert usd_fallback.status == "matched" and usd_fallback.fields_added["Rate"] == 2.2
+
+    eur_fallback = lookup_engine.apply_lookup({"site": "Mumbai", "ccy": "EUR"}, idx)
+    assert eur_fallback.status == "matched" and eur_fallback.fields_added["Rate"] == 3.3
+
+
+def test_no_default_on_miss_configured_behaves_exactly_as_before():
+    ref_rows = [{"Site": "London", "Rate": 1.1}]
+    cfg = _cfg(join_keys=[{"source": "site", "reference": "Site"}],
+               fields=[LookupFieldMap(source_column="Rate", output_field="Rate")])
+    idx = lookup_engine.build_index(ref_rows, cfg)
+    out = lookup_engine.apply_lookup({"site": "Mumbai"}, idx)
+    assert out.status == "missing_null"
+
+
+def test_default_on_miss_combined_with_interpolated_lookup():
+    ref_rows = [
+        {"Site": "DEFAULT", "DaysToMaturity": 30, "TP": 1.0},
+        {"Site": "DEFAULT", "DaysToMaturity": 90, "TP": 2.0},
+    ]
+    cfg = LookupConfig(
+        lookup_type=LookupType.INTERPOLATED, reference_file_id="ref1",
+        join_keys=[{"source": "site", "reference": "Site", "default_on_miss": "DEFAULT"}],
+        interp_source_field="tenor_days", interp_node_field="DaysToMaturity",
+        fields=[LookupFieldMap(source_column="TP", output_field="TP")],
+    )
+    idx = lookup_engine.build_index(ref_rows, cfg)
+    out = lookup_engine.apply_lookup({"site": "Mumbai", "tenor_days": 60}, idx)
+    assert out.status == "matched" and out.fields_added["TP"] == 1.5
+    assert "default" in out.detail.lower() and "interpolated" in out.detail.lower()
+
+
+def test_apply_lookup_matched_detail_is_generic_when_lookup_one_has_no_specific_reason():
+    ref_rows = [{"Currency": "USD", "Threshold": 2.0}]
+    idx = lookup_engine.build_index(ref_rows, _cfg())
+    out = lookup_engine.apply_lookup({"currency": "USD"}, idx)
+    assert out.status == "matched" and out.detail == "matched 1 candidate(s)"
+
+
 def test_lookup_range():
     ref_rows = [{"Risk_Group": "LOW", "Min": 0, "Max": 2}, {"Risk_Group": "MEDIUM", "Min": 2, "Max": 5},
                 {"Risk_Group": "HIGH", "Min": 5, "Max": 100}]
@@ -574,6 +653,24 @@ def test_validate_workflow_flags_unavailable_interp_source_field():
     ], edges=[WorkflowEdge(source="in", target="lk")])
     rule = _rule(rule_id="R-INTERP-AVAIL", name="R-INTERP-AVAIL", required_columns=["curve"], workflow=wf)
     result = validation_service.validate_workflow(rule, {"curve": FieldType.STRING})
+    assert not result.ok
+    assert any("not_a_real_field" in e for e in result.errors)
+
+
+def test_validate_workflow_flags_unavailable_composite_source_column():
+    ref = reference_store.upload_version(
+        "composite_src_validate_avail", [{"Site": "London", "CCY": "USD", "Rate": 1.1}], "tester",
+    )
+    wf = Workflow(nodes=[
+        WorkflowNode(id="in", type=NodeType.INPUT),
+        WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=LookupConfig(
+            lookup_type=LookupType.EXACT, reference_file_id=ref.id,
+            join_keys=[{"source": ["site", "not_a_real_field"], "reference": ["Site", "CCY"]}],
+            fields=[LookupFieldMap(source_column="Rate", output_field="Rate")],
+        )),
+    ], edges=[WorkflowEdge(source="in", target="lk")])
+    rule = _rule(rule_id="R-COMPSRC-AVAIL", name="R-COMPSRC-AVAIL", required_columns=["site"], workflow=wf)
+    result = validation_service.validate_workflow(rule, {"site": FieldType.STRING})
     assert not result.ok
     assert any("not_a_real_field" in e for e in result.errors)
 

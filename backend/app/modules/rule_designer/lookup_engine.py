@@ -225,6 +225,62 @@ def _interpolate_curve(record: dict, idx: LookupIndex, curve_rows: List[dict]) -
     return True, [synthetic], f"interpolated between {lo_n} and {hi_n}"
 
 
+def _apply_source_defaults(record: dict, join_keys: List[Dict[str, Any]]) -> Optional[dict]:
+    """A shallow copy of `record` with each join key's configured
+    `default_on_miss` value(s) written into the corresponding SOURCE
+    FIELD NAME(s) — not a key-tuple value, so the caller can re-run the
+    unchanged `_key_tuple()` over the result afterward (same transform/
+    composite-concatenation logic, no second implementation to keep in
+    sync). Only ever called as a RETRY after the record's own real
+    values have already failed to match anything (see lookup_one()) —
+    never overrides a value that already produced a match.
+
+    For a plain-string source, `default_on_miss` is a single fallback
+    value. For a composite (list) source — e.g. `["Site", "CCY"]` — it's
+    a PARALLEL list of the same length; a blank/None entry at a given
+    position leaves THAT column at its own real value, so a fallback can
+    be configured for just one component (e.g. Site) while the others
+    (CCY) keep varying per record, which a single fixed fallback string
+    for the whole composite key could never express.
+
+    Returns None when no join key has any default configured at all, so
+    the caller can skip a redundant identical retry entirely."""
+    patched: Dict[str, Any] = {}
+    any_default = False
+    for jk in join_keys:
+        col = jk["source"]
+        default = jk.get("default_on_miss")
+        if isinstance(col, list):
+            defaults = default if isinstance(default, list) else []
+            for i, c in enumerate(col):
+                d = defaults[i] if i < len(defaults) else None
+                if d not in (None, ""):
+                    patched[c] = d
+                    any_default = True
+        elif default not in (None, ""):
+            patched[col] = default
+            any_default = True
+    if not any_default:
+        return None
+    return {**record, **patched}
+
+
+def _default_on_miss_columns(join_keys: List[Dict[str, Any]]) -> List[str]:
+    """Source column name(s) that have a `default_on_miss` configured —
+    used only to name them in a default-fallback match's detail message,
+    never for the actual lookup."""
+    cols: List[str] = []
+    for jk in join_keys:
+        col = jk["source"]
+        default = jk.get("default_on_miss")
+        if isinstance(col, list):
+            defaults = default if isinstance(default, list) else []
+            cols.extend(c for i, c in enumerate(col) if i < len(defaults) and defaults[i] not in (None, ""))
+        elif default not in (None, ""):
+            cols.append(col)
+    return cols
+
+
 def lookup_one(record: dict, idx: LookupIndex) -> Tuple[bool, List[dict], str]:
     """Return (matched, candidate_rows, reason_if_no_match)."""
     config = idx.config
@@ -232,11 +288,26 @@ def lookup_one(record: dict, idx: LookupIndex) -> Tuple[bool, List[dict], str]:
         src_cols = [jk["source"] for jk in config.join_keys]
         k = _key_tuple(record, config.join_keys, "source")
         candidates = idx.exact_index.get(k, [])
+        default_detail = ""
+        if not candidates:
+            defaulted_record = _apply_source_defaults(record, config.join_keys)
+            if defaulted_record is not None:
+                k2 = _key_tuple(defaulted_record, config.join_keys, "source")
+                if k2 != k:
+                    default_candidates = idx.exact_index.get(k2, [])
+                    if default_candidates:
+                        candidates = default_candidates
+                        default_detail = "matched using configured default value(s) for: " + ", ".join(
+                            str(c) for c in _default_on_miss_columns(config.join_keys)
+                        )
         if not candidates:
             return False, [], f"no reference row for key {dict(zip(src_cols, [record.get(c) for c in src_cols]))}"
         if config.lookup_type == LookupType.INTERPOLATED:
-            return _interpolate_curve(record, idx, candidates)
-        return True, candidates, ""
+            interp_matched, interp_candidates, interp_detail = _interpolate_curve(record, idx, candidates)
+            if interp_matched and default_detail:
+                interp_detail = f"{default_detail}; {interp_detail}" if interp_detail else default_detail
+            return interp_matched, interp_candidates, interp_detail
+        return True, candidates, default_detail
 
     if config.lookup_type == LookupType.RANGE:
         v = _to_num(record.get(config.range_field))
@@ -295,7 +366,14 @@ def apply_lookup(record: dict, idx: LookupIndex,
                 except (TypeError, ValueError, IndexError):
                     pass  # keep the raw looked-up value rather than fail the whole lookup
             fields[fm.output_field] = raw
-        return LookupOutcome("matched", fields, f"matched {len(candidates)} candidate(s)")
+        # lookup_one() can return a more specific reason even on a match
+        # (a default-fallback note, or — for INTERPOLATED — an
+        # interpolation/clamp note) — surface that instead of the generic
+        # count whenever it has one, so a record that only matched via a
+        # configured default is never indistinguishable from an ordinary
+        # exact match in the dry-run/live trail.
+        detail = reason or f"matched {len(candidates)} candidate(s)"
+        return LookupOutcome("matched", fields, detail)
 
     strategy = config.missing_strategy
     if strategy == MissingLookupStrategy.REJECT:
