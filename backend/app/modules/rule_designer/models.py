@@ -144,6 +144,14 @@ class LookupType(str, Enum):
     # with the representative's fields — e.g. broadcasting a deal's parent
     # leg's PnL/threshold onto every child row sharing its deal reference.
     SELF_GROUP = "self_group"
+    # Curve/tenor-ladder interpolation: join_keys (same as EXACT/COMPOSITE)
+    # locate a GROUP of reference rows (e.g. every tenor node on one curve,
+    # keyed by Site+CCY+CurveType), then the record's own numeric tenor
+    # (interp_source_field) is bracketed between the nearest lower/equal
+    # and next-higher node (by interp_node_field) within that group, and
+    # each enriched field is linearly interpolated between those two
+    # nodes' values — see lookup_engine.lookup_one()'s INTERPOLATED branch.
+    INTERPOLATED = "interpolated"
 
 
 class MissingLookupStrategy(str, Enum):
@@ -414,6 +422,20 @@ class LookupConfig(BaseModel):
     date_field: Optional[str] = None
     date_from_column: Optional[str] = None
     date_to_column: Optional[str] = None
+
+    # interpolated lookup: join_keys (above) locate the curve's rows;
+    # interp_source_field is the record's own numeric tenor (a day count);
+    # interp_node_field is the reference column holding each row's node
+    # value (same day-count convention); each entry in `fields` below names
+    # a reference value column (e.g. a TP rate) to linearly interpolate
+    # between the bracketing nodes. interp_out_of_range controls what
+    # happens when the record's tenor falls outside the curve's own
+    # range: "clamp" (default) uses the nearest edge node's value as-is;
+    # "reject" treats it as no match, handled by missing_strategy below
+    # like any other unmatched lookup.
+    interp_source_field: Optional[str] = None
+    interp_node_field: Optional[str] = None
+    interp_out_of_range: str = "clamp"  # "clamp" | "reject"
 
     fields: List[LookupFieldMap] = Field(default_factory=list)  # columns to enrich
     join_type: JoinType = JoinType.LEFT

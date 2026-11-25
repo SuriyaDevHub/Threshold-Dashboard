@@ -136,7 +136,9 @@ class LookupIndex:
 
     @property
     def is_keyed(self) -> bool:
-        return self.config.lookup_type in (LookupType.EXACT, LookupType.COMPOSITE, LookupType.SELF_GROUP)
+        return self.config.lookup_type in (
+            LookupType.EXACT, LookupType.COMPOSITE, LookupType.SELF_GROUP, LookupType.INTERPOLATED,
+        )
 
 
 def build_index(reference_rows: List[dict], config: LookupConfig) -> LookupIndex:
@@ -145,9 +147,15 @@ def build_index(reference_rows: List[dict], config: LookupConfig) -> LookupIndex
         for row in reference_rows:
             k = _key_tuple(row, config.join_keys, "reference")
             idx.exact_index.setdefault(k, []).append(row)
-        idx.duplicate_keys = {
-            " · ".join(k): len(v) for k, v in idx.exact_index.items() if len(v) > 1
-        }
+        # Duplicate-key detection (spec §29) flags a genuine ambiguous-match
+        # problem for EXACT/COMPOSITE — two reference rows sharing one key
+        # with no stated priority. For INTERPOLATED, many rows sharing one
+        # key is the entire point (a curve's tenor ladder), not a conflict,
+        # so it's never computed for that lookup_type.
+        if config.lookup_type != LookupType.INTERPOLATED:
+            idx.duplicate_keys = {
+                " · ".join(k): len(v) for k, v in idx.exact_index.items() if len(v) > 1
+            }
     return idx
 
 
@@ -169,15 +177,65 @@ def _select_by_priority(candidates: List[dict], config: LookupConfig) -> dict:
     return candidates[0]
 
 
+def _interpolate_curve(record: dict, idx: LookupIndex, curve_rows: List[dict]) -> Tuple[bool, List[dict], str]:
+    """The INTERPOLATED branch of lookup_one(): `curve_rows` is every
+    reference row sharing the matched curve key (e.g. one curve's full
+    tenor ladder). Brackets the record's own numeric tenor between the
+    nearest lower/equal and next-higher node, by `interp_node_field`, and
+    returns a SINGLE synthetic candidate row whose keys are already the
+    `fields[].source_column` names the normal apply_lookup() matched-path
+    reads — so that path needs no awareness interpolation ever happened:
+    an exact node hit or a clamped edge returns that real row as-is (its
+    own column values ARE the answer, no arithmetic needed); only a true
+    in-between case computes a synthetic row at all."""
+    config = idx.config
+    target = _to_num(record.get(config.interp_source_field))
+    if target is None:
+        return False, [], f"{config.interp_source_field} is not numeric"
+
+    nodes = [(_to_num(r.get(config.interp_node_field)), r) for r in curve_rows]
+    nodes = [(n, r) for n, r in nodes if n is not None]
+    if not nodes:
+        return False, [], f"curve has no numeric {config.interp_node_field} values"
+
+    exact = next((r for n, r in nodes if n == target), None)
+    if exact is not None:
+        return True, [exact], ""
+
+    below = [t for t in nodes if t[0] < target]
+    above = [t for t in nodes if t[0] > target]
+    lo = max(below, key=lambda t: t[0]) if below else None
+    hi = min(above, key=lambda t: t[0]) if above else None
+
+    if lo is None or hi is None:
+        edge = lo or hi
+        node_range = f"[{nodes[0][0]}, {nodes[-1][0]}]" if len(nodes) > 1 else f"[{nodes[0][0]}]"
+        if config.interp_out_of_range == "reject":
+            return False, [], f"{config.interp_source_field}={target} is outside the curve's range {node_range}"
+        return True, [edge[1]], f"{target} outside the curve's range {node_range} — clamped to nearest node"
+
+    lo_n, lo_row = lo
+    hi_n, hi_row = hi
+    frac = (target - lo_n) / (hi_n - lo_n)
+    synthetic: Dict[str, Any] = {}
+    for fm in config.fields:
+        lo_v = _to_num(lo_row.get(fm.source_column))
+        hi_v = _to_num(hi_row.get(fm.source_column))
+        synthetic[fm.source_column] = (lo_v + (hi_v - lo_v) * frac) if (lo_v is not None and hi_v is not None) else None
+    return True, [synthetic], f"interpolated between {lo_n} and {hi_n}"
+
+
 def lookup_one(record: dict, idx: LookupIndex) -> Tuple[bool, List[dict], str]:
     """Return (matched, candidate_rows, reason_if_no_match)."""
     config = idx.config
-    if config.lookup_type in (LookupType.EXACT, LookupType.COMPOSITE, LookupType.SELF_GROUP):
+    if config.lookup_type in (LookupType.EXACT, LookupType.COMPOSITE, LookupType.SELF_GROUP, LookupType.INTERPOLATED):
         src_cols = [jk["source"] for jk in config.join_keys]
         k = _key_tuple(record, config.join_keys, "source")
         candidates = idx.exact_index.get(k, [])
         if not candidates:
             return False, [], f"no reference row for key {dict(zip(src_cols, [record.get(c) for c in src_cols]))}"
+        if config.lookup_type == LookupType.INTERPOLATED:
+            return _interpolate_curve(record, idx, candidates)
         return True, candidates, ""
 
     if config.lookup_type == LookupType.RANGE:

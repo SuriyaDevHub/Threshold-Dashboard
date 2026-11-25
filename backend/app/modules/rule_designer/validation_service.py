@@ -123,7 +123,7 @@ def validate_lookup_config(node_label: str, lookup_cfg, result: ValidationResult
             result.errors.append(f"{node_label}: day-partitioned lookup has no path template configured")
         if not lookup_cfg.day_partition_field:
             result.errors.append(f"{node_label}: day-partitioned lookup has no day field configured")
-        if lookup_cfg.lookup_type.value in ("exact", "composite") and not lookup_cfg.join_keys:
+        if lookup_cfg.lookup_type.value in ("exact", "composite", "interpolated") and not lookup_cfg.join_keys:
             result.errors.append(f"{node_label}: no join keys defined")
         if not lookup_cfg.fields:
             result.warnings.append(f"{node_label}: no fields configured to enrich with")
@@ -148,7 +148,7 @@ def validate_lookup_config(node_label: str, lookup_cfg, result: ValidationResult
         return
     ref_cols = set(ver.columns)
 
-    if lookup_cfg.lookup_type.value in ("exact", "composite"):
+    if lookup_cfg.lookup_type.value in ("exact", "composite", "interpolated"):
         if not lookup_cfg.join_keys:
             result.errors.append(f"{node_label}: no join keys defined")
         for jk in lookup_cfg.join_keys:
@@ -165,7 +165,7 @@ def validate_lookup_config(node_label: str, lookup_cfg, result: ValidationResult
                     )
             elif ref not in ref_cols:
                 result.errors.append(f"{node_label}: reference has no column '{ref}'")
-    elif lookup_cfg.lookup_type.value == "range":
+    if lookup_cfg.lookup_type.value == "range":
         for c in (lookup_cfg.range_low_column, lookup_cfg.range_high_column):
             if c not in ref_cols:
                 result.errors.append(f"{node_label}: reference has no range column '{c}'")
@@ -173,6 +173,13 @@ def validate_lookup_config(node_label: str, lookup_cfg, result: ValidationResult
         for c in (lookup_cfg.date_from_column, lookup_cfg.date_to_column):
             if c not in ref_cols:
                 result.errors.append(f"{node_label}: reference has no date column '{c}'")
+    elif lookup_cfg.lookup_type.value == "interpolated":
+        if not lookup_cfg.interp_node_field:
+            result.errors.append(f"{node_label}: interpolated lookup has no reference node column configured")
+        elif lookup_cfg.interp_node_field not in ref_cols:
+            result.errors.append(f"{node_label}: reference has no node column '{lookup_cfg.interp_node_field}'")
+        if not lookup_cfg.interp_source_field:
+            result.errors.append(f"{node_label}: interpolated lookup has no source tenor field configured")
 
     for fm in lookup_cfg.fields:
         if fm.source_column not in ref_cols:
@@ -261,6 +268,10 @@ def validate_workflow(rule: Rule, dataset_schema: Optional[Dict[str, FieldType]]
                 result.errors.append(f"{label}: source field '{node.lookup.range_field}' not available at this stage")
             if node.lookup.date_field and base_fields and node.lookup.date_field not in available:
                 result.errors.append(f"{label}: source field '{node.lookup.date_field}' not available at this stage")
+            if node.lookup.interp_source_field and base_fields and node.lookup.interp_source_field not in available:
+                result.errors.append(
+                    f"{label}: source field '{node.lookup.interp_source_field}' not available at this stage"
+                )
             if node.lookup.group_by_field and base_fields and node.lookup.group_by_field not in available:
                 result.errors.append(f"{label}: group-by field '{node.lookup.group_by_field}' not available at this stage")
             if base_fields:

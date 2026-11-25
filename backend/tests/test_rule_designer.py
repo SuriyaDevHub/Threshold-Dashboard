@@ -403,6 +403,182 @@ def test_lookup_date_range():
 
 
 # --------------------------------------------------------------------------
+# lookup_engine — LookupType.INTERPOLATED (curve/tenor-ladder interpolation)
+# --------------------------------------------------------------------------
+
+def _curve_cfg(**kw) -> LookupConfig:
+    base = dict(
+        lookup_type=LookupType.INTERPOLATED, reference_file_id="ref1",
+        join_keys=[{"source": "curve", "reference": "CurveKey"}],
+        interp_source_field="tenor_days", interp_node_field="DaysToMaturity",
+        fields=[LookupFieldMap(source_column="TP", output_field="TP")],
+    )
+    base.update(kw)
+    return LookupConfig(**base)
+
+
+_CURVE_LADDER = [
+    {"CurveKey": "LondonCHFCOF", "DaysToMaturity": 30, "TP": 1.0},
+    {"CurveKey": "LondonCHFCOF", "DaysToMaturity": 60, "TP": 2.0},
+    {"CurveKey": "LondonCHFCOF", "DaysToMaturity": 90, "TP": 4.0},
+]
+
+
+def test_lookup_interpolated_exact_node_hit_returns_value_unchanged():
+    idx = lookup_engine.build_index(_CURVE_LADDER, _curve_cfg())
+    out = lookup_engine.apply_lookup({"curve": "LondonCHFCOF", "tenor_days": 60}, idx)
+    assert out.status == "matched" and out.fields_added["TP"] == 2.0
+
+
+def test_lookup_interpolated_between_two_nodes_computes_linear_interpolation():
+    idx = lookup_engine.build_index(_CURVE_LADDER, _curve_cfg())
+    out = lookup_engine.apply_lookup({"curve": "LondonCHFCOF", "tenor_days": 45}, idx)
+    assert out.status == "matched" and out.fields_added["TP"] == 1.5  # halfway between 1.0 and 2.0
+
+
+def test_lookup_interpolated_below_range_clamps_to_shortest_node():
+    idx = lookup_engine.build_index(_CURVE_LADDER, _curve_cfg())
+    out = lookup_engine.apply_lookup({"curve": "LondonCHFCOF", "tenor_days": 5}, idx)
+    assert out.status == "matched" and out.fields_added["TP"] == 1.0
+
+
+def test_lookup_interpolated_above_range_clamps_to_longest_node():
+    idx = lookup_engine.build_index(_CURVE_LADDER, _curve_cfg())
+    out = lookup_engine.apply_lookup({"curve": "LondonCHFCOF", "tenor_days": 365}, idx)
+    assert out.status == "matched" and out.fields_added["TP"] == 4.0
+
+
+def test_lookup_interpolated_single_node_curve_returns_that_node_for_any_target():
+    ref_rows = [{"CurveKey": "SingleNode", "DaysToMaturity": 45, "TP": 9.9}]
+    idx = lookup_engine.build_index(ref_rows, _curve_cfg())
+    below = lookup_engine.apply_lookup({"curve": "SingleNode", "tenor_days": 5}, idx)
+    above = lookup_engine.apply_lookup({"curve": "SingleNode", "tenor_days": 500}, idx)
+    assert below.fields_added["TP"] == 9.9
+    assert above.fields_added["TP"] == 9.9
+
+
+def test_lookup_interpolated_out_of_range_reject_yields_missing():
+    idx = lookup_engine.build_index(_CURVE_LADDER, _curve_cfg(interp_out_of_range="reject"))
+    out = lookup_engine.apply_lookup({"curve": "LondonCHFCOF", "tenor_days": 5}, idx)
+    assert out.status == "missing_null"
+
+
+def test_lookup_interpolated_multiple_fields_interpolate_independently():
+    ref_rows = [
+        {"CurveKey": "USDCOF", "DaysToMaturity": 30, "Bid": 1.0, "Ask": 1.2},
+        {"CurveKey": "USDCOF", "DaysToMaturity": 90, "Bid": 2.0, "Ask": 2.8},
+    ]
+    cfg = _curve_cfg(fields=[
+        LookupFieldMap(source_column="Bid", output_field="Bid"),
+        LookupFieldMap(source_column="Ask", output_field="Ask"),
+    ])
+    idx = lookup_engine.build_index(ref_rows, cfg)
+    out = lookup_engine.apply_lookup({"curve": "USDCOF", "tenor_days": 60}, idx)
+    assert out.fields_added["Bid"] == 1.5  # halfway: 1.0 -> 2.0
+    assert out.fields_added["Ask"] == 2.0  # halfway: 1.2 -> 2.8
+
+
+def test_lookup_interpolated_unknown_curve_key_yields_missing():
+    idx = lookup_engine.build_index(_CURVE_LADDER, _curve_cfg())
+    out = lookup_engine.apply_lookup({"curve": "NoSuchCurve", "tenor_days": 45}, idx)
+    assert out.status == "missing_null"
+
+
+def test_lookup_interpolated_non_numeric_source_field_yields_missing():
+    idx = lookup_engine.build_index(_CURVE_LADDER, _curve_cfg())
+    out = lookup_engine.apply_lookup({"curve": "LondonCHFCOF", "tenor_days": "not-a-number"}, idx)
+    assert out.status == "missing_null"
+
+
+def test_lookup_interpolated_duplicate_nodes_per_curve_key_are_not_flagged_as_duplicates():
+    # Many rows sharing one curve key is the whole point here (the tenor
+    # ladder), unlike EXACT/COMPOSITE where it's an ambiguous-match warning.
+    idx = lookup_engine.build_index(_CURVE_LADDER, _curve_cfg())
+    assert idx.duplicate_keys == {}
+
+
+def test_concat_and_composite_reference_key_feed_interpolated_lookup_end_to_end():
+    ref_rows = [
+        {"CurveA": "USD", "CurveB": "OIS", "DaysToMaturity": 30, "Rate": 1.0},
+        {"CurveA": "USD", "CurveB": "OIS", "DaysToMaturity": 90, "Rate": 2.0},
+    ]
+    lookup_ref = reference_store.upload_version("curve_interp_ref", ref_rows, "tester")
+    wf = Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="tx", type=NodeType.TRANSFORM, transform={
+                "op": "concat", "output_field": "curve_key", "fields": ["ccy", "curve_type"],
+            }),
+            WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=LookupConfig(
+                lookup_type=LookupType.INTERPOLATED, reference_file_id=lookup_ref.id,
+                join_keys=[{"source": "curve_key", "reference": ["CurveA", "CurveB"]}],
+                interp_source_field="tenor_days", interp_node_field="DaysToMaturity",
+                fields=[LookupFieldMap(source_column="Rate", output_field="Rate")],
+            )),
+        ],
+        edges=[WorkflowEdge(source="in", target="tx"), WorkflowEdge(source="tx", target="lk")],
+    )
+    results, _, summary = workflow_engine.run_workflow(
+        wf, [{"trade_id": 1, "ccy": "USD", "curve_type": "OIS", "tenor_days": 60}],
+        reference_store.reference_loader, record_id_field="trade_id",
+    )
+    assert summary.matched == 1
+    assert results[0].final_record["Rate"] == 1.5
+
+
+def test_validate_lookup_config_interpolated_requires_node_and_source_fields():
+    ref = reference_store.upload_version(
+        "curve_validate_missing_cfg", [{"CurveKey": "USDOIS", "DaysToMaturity": 30, "TP": 1.0}], "tester",
+    )
+    cfg = LookupConfig(
+        lookup_type=LookupType.INTERPOLATED, reference_file_id=ref.id,
+        join_keys=[{"source": "curve", "reference": "CurveKey"}],
+        fields=[LookupFieldMap(source_column="TP", output_field="TP")],
+        # interp_source_field/interp_node_field left unset
+    )
+    result = validation_service.ValidationResult()
+    validation_service.validate_lookup_config("Node", cfg, result)
+    assert not result.ok
+    assert any("reference node column" in e for e in result.errors)
+    assert any("source tenor field" in e for e in result.errors)
+
+
+def test_validate_lookup_config_interpolated_reports_missing_node_column():
+    ref = reference_store.upload_version(
+        "curve_validate_missing_col", [{"CurveKey": "USDOIS", "TP": 1.0}], "tester",
+    )
+    cfg = LookupConfig(
+        lookup_type=LookupType.INTERPOLATED, reference_file_id=ref.id,
+        join_keys=[{"source": "curve", "reference": "CurveKey"}],
+        interp_source_field="tenor_days", interp_node_field="DaysToMaturity",  # doesn't exist on the file
+        fields=[LookupFieldMap(source_column="TP", output_field="TP")],
+    )
+    result = validation_service.ValidationResult()
+    validation_service.validate_lookup_config("Node", cfg, result)
+    assert not result.ok
+    assert any("DaysToMaturity" in e for e in result.errors)
+
+
+def test_validate_workflow_flags_unavailable_interp_source_field():
+    ref = reference_store.upload_version(
+        "curve_validate_avail", [{"CurveKey": "USDOIS", "DaysToMaturity": 30, "TP": 1.0}], "tester",
+    )
+    wf = Workflow(nodes=[
+        WorkflowNode(id="in", type=NodeType.INPUT),
+        WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=LookupConfig(
+            lookup_type=LookupType.INTERPOLATED, reference_file_id=ref.id,
+            join_keys=[{"source": "curve", "reference": "CurveKey"}],
+            interp_source_field="not_a_real_field", interp_node_field="DaysToMaturity",
+            fields=[LookupFieldMap(source_column="TP", output_field="TP")],
+        )),
+    ], edges=[WorkflowEdge(source="in", target="lk")])
+    rule = _rule(rule_id="R-INTERP-AVAIL", name="R-INTERP-AVAIL", required_columns=["curve"], workflow=wf)
+    result = validation_service.validate_workflow(rule, {"curve": FieldType.STRING})
+    assert not result.ok
+    assert any("not_a_real_field" in e for e in result.errors)
+
+
+# --------------------------------------------------------------------------
 # workflow_engine — end-to-end pipeline execution
 # --------------------------------------------------------------------------
 

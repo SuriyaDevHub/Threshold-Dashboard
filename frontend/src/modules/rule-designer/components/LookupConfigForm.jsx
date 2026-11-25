@@ -24,7 +24,8 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
   // record from its own COB date (e.g. the legacy GfxValidator's
   // RiverIndex — one "All trades.csv" per day), not an admin-uploaded/
   // path-configured reference file — see day_partitioned_source.py.
-  const canBeDayPartitioned = lookup.lookup_type === "exact" || lookup.lookup_type === "composite";
+  const canBeDayPartitioned = lookup.lookup_type === "exact" || lookup.lookup_type === "composite"
+    || lookup.lookup_type === "interpolated";
   const isDayPartitioned = canBeDayPartitioned && lookup.reference_source === "day_partitioned";
   // The reference-file registry still matters for a day-partitioned
   // lookup whose missing_strategy is "fallback" — the fallback file is
@@ -144,6 +145,7 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
             <option value="composite">Composite key</option>
             <option value="range">Range</option>
             <option value="date">Date-based</option>
+            <option value="interpolated">Curve interpolation</option>
             <option value="self_group">Self-group (within dataset)</option>
           </select>
         </label>
@@ -304,9 +306,9 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
         </div>
       )}
 
-      {(lookup.lookup_type === "exact" || lookup.lookup_type === "composite") && (
+      {(lookup.lookup_type === "exact" || lookup.lookup_type === "composite" || lookup.lookup_type === "interpolated") && (
         <div className="lk-block">
-          <div className="lk-block-title">Join keys</div>
+          <div className="lk-block-title">{lookup.lookup_type === "interpolated" ? "Curve key" : "Join keys"}</div>
           {(lookup.join_keys || []).map((jk, i) => (
             <div key={i} style={{ border: "1px solid var(--line)", borderRadius: 7, padding: 8, marginBottom: 8 }}>
               <div className="lk-row" style={{ marginBottom: 0 }}>
@@ -411,6 +413,45 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
               </select>
             </label>
           </div>
+        </div>
+      )}
+
+      {lookup.lookup_type === "interpolated" && (
+        <div className="lk-block">
+          <div className="lk-block-title">Tenor-ladder interpolation</div>
+          <div className="lk-row">
+            <label className="control"><span>Source tenor field (day count)</span>
+              <select value={lookup.interp_source_field || ""} onChange={(e) => set({ interp_source_field: e.target.value })}>
+                <option value="" disabled>field…</option>
+                {withCurrent(sourceFields, lookup.interp_source_field).map((f) => (
+                  <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
+                ))}
+              </select>
+            </label>
+            <label className="control"><span>Reference node column (day count)</span>
+              {isDayPartitioned && dayColumns.length === 0 ? (
+                <input value={lookup.interp_node_field || ""} placeholder="e.g. Days to Maturity"
+                       onChange={(e) => set({ interp_node_field: e.target.value })} />
+              ) : (
+                <select value={lookup.interp_node_field || ""} onChange={(e) => set({ interp_node_field: e.target.value })}>
+                  <option value="" disabled>column…</option>
+                  {dayOrRefColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+                </select>
+              )}
+            </label>
+            <label className="control"><span>Outside the curve's range</span>
+              <select value={lookup.interp_out_of_range || "clamp"} onChange={(e) => set({ interp_out_of_range: e.target.value })}>
+                <option value="clamp">Clamp to nearest edge node</option>
+                <option value="reject">Treat as no match</option>
+              </select>
+            </label>
+          </div>
+          <p className="empty-hint" style={{ marginTop: 6 }}>
+            Within the curve matched by the curve key above, the record's tenor (as a day count) is bracketed
+            between the nearest lower/equal and next-higher node by the reference node column, and each field
+            below is linearly interpolated between those two nodes' values. An exact node hit needs no
+            interpolation; outside the curve's own range, behavior follows the setting above.
+          </p>
         </div>
       )}
 
