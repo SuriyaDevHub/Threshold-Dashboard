@@ -111,6 +111,111 @@ def parse_csv_text(text: str) -> List[dict]:
     return [{(k.strip() if isinstance(k, str) else k): v for k, v in row.items()} for row in reader]
 
 
+def _col_letters_to_indices(column_range: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
+    """"A:I" -> (1, 9); None -> (None, None) meaning "whole sheet". Resolved
+    with openpyxl.utils.column_index_from_string rather than relying on
+    openpyxl's native bracket-slicing ("ws['A:I']"), which isn't supported
+    in the read_only=True mode parse_xlsx_rows() uses — a read-only
+    worksheet only supports iter_rows()/iter_cols()."""
+    if not column_range:
+        return None, None
+    from openpyxl.utils.cell import column_index_from_string
+    try:
+        left, right = column_range.split(":")
+        return column_index_from_string(left.strip()), column_index_from_string(right.strip())
+    except (ValueError, KeyError) as exc:
+        raise ValueError(f"invalid column_range '{column_range}' (expected e.g. 'A:I')") from exc
+
+
+def parse_xlsx_rows(path: str, sheet_name: Optional[str], column_range: Optional[str],
+                     password_env_var: Optional[str]) -> List[dict]:
+    """xlsx counterpart to parse_csv_text() — produces the exact same
+    List[dict] shape (keys = header strings, values = cell values) so
+    everything downstream of this function (upload_version(),
+    infer_schema(), lookup_engine.build_index(), the whole LOOKUP/
+    CONDITION/dry-run pipeline) needs zero awareness the data came from
+    Excel.
+
+    An optional password is resolved from an env var NAME at read time —
+    the actual secret value is never returned, stored, or logged; only
+    the name lives in the file's stored config (see ReferenceFile.
+    password_env_var). column_range lets two unrelated tables on the same
+    sheet each be read as an independent reference file."""
+    import openpyxl
+
+    if password_env_var:
+        import os
+        import msoffcrypto
+
+        password = os.getenv(password_env_var)
+        if not password:
+            raise ValueError(
+                f"environment variable '{password_env_var}' is not set (or empty) — "
+                f"cannot decrypt xlsx source_path '{path}'"
+            )
+        with open(path, "rb") as fh:
+            office_file = msoffcrypto.OfficeFile(fh)
+            try:
+                office_file.load_key(password=password, verify_password=True)
+                decrypted = io.BytesIO()
+                office_file.decrypt(decrypted)
+            except Exception as exc:
+                raise ValueError(
+                    f"could not decrypt '{path}' with the password from env var "
+                    f"'{password_env_var}' (wrong password, or file is not actually "
+                    f"encrypted): {exc}"
+                ) from exc
+        wb = openpyxl.load_workbook(decrypted, read_only=True, data_only=True)
+    else:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+
+    try:
+        if sheet_name:
+            if sheet_name not in wb.sheetnames:
+                raise ValueError(
+                    f"sheet '{sheet_name}' not found in '{path}' — available sheets: {wb.sheetnames}"
+                )
+            ws = wb[sheet_name]
+        elif len(wb.sheetnames) == 1:
+            ws = wb[wb.sheetnames[0]]
+        else:
+            raise ValueError(
+                f"'{path}' has multiple sheets ({wb.sheetnames}) but no sheet_name configured"
+            )
+
+        min_col, max_col = _col_letters_to_indices(column_range)
+        row_iter = ws.iter_rows(min_col=min_col, max_col=max_col, values_only=True)
+        try:
+            header = next(row_iter)
+        except StopIteration:
+            raise ValueError(f"sheet '{ws.title}' in '{path}' has no rows in range '{column_range}'")
+
+        # Same whitespace-strip as parse_csv_text(), same reason: an
+        # incidental header-whitespace change in the next re-export
+        # shouldn't silently stop a LOOKUP's join key from matching.
+        headers = [(h.strip() if isinstance(h, str) else h) for h in header]
+        rows: List[dict] = []
+        for raw_row in row_iter:
+            # openpyxl returns None for a blank cell; lookup_engine.py's
+            # _key_tuple() does str(raw) with no None-handling, so an
+            # unnormalized blank join-key cell would become the literal
+            # string "None" — a different dict key than CSV's own blank-
+            # cell convention ("", via csv.DictReader) — silently
+            # breaking a match against a source record's genuinely empty
+            # value. Normalize here, at the source, instead of teaching
+            # lookup_engine.py a second blank-value convention.
+            values = ["" if v is None else v for v in raw_row]
+            if all(v == "" for v in values):
+                continue  # fully-blank row — common past a shorter table's
+                          # real extent when two tables share one sheet and
+                          # have different row counts (ws.max_row is sheet-
+                          # wide, not per-column-range)
+            rows.append(dict(zip(headers, values)))
+        return rows
+    finally:
+        wb.close()
+
+
 def _rows_path(file_id: str, version: int) -> str:
     return f"{BASE_PREFIX}{file_id}/v{version}.json"
 
@@ -127,6 +232,10 @@ def _to_model(file_id: str, blob: dict) -> ReferenceFile:
         auto_refresh_minutes=blob.get("auto_refresh_minutes"),
         last_synced_at=blob.get("last_synced_at"),
         last_sync_error=blob.get("last_sync_error"),
+        source_format=blob.get("source_format"),
+        sheet_name=blob.get("sheet_name"),
+        column_range=blob.get("column_range"),
+        password_env_var=blob.get("password_env_var"),
     )
 
 
@@ -180,13 +289,23 @@ def upload_version(name: str, rows: List[dict], uploaded_by: str,
 
 
 def configure_source(name: str, path: str, auto_refresh_minutes: Optional[int], actor: str,
-                      file_id: Optional[str] = None) -> ReferenceFile:
+                      file_id: Optional[str] = None, source_format: Optional[str] = None,
+                      sheet_name: Optional[str] = None, column_range: Optional[str] = None,
+                      password_env_var: Optional[str] = None) -> ReferenceFile:
     """Registers (or re-registers) a reference file's source as a local/
     network file this app reads itself, instead of a browser upload — so
     an end user never has to manually re-export/re-upload it when the
     underlying data changes (see sync_now(), and
     reference_sync_scheduler.py for the automatic side of it). Syncs once
-    immediately — configuring a path with nothing pulled yet is useless."""
+    immediately — configuring a path with nothing pulled yet is useless.
+
+    source_format/sheet_name/column_range/password_env_var are xlsx-only
+    (see parse_xlsx_rows()) and all optional — leaving them unset behaves
+    exactly like a plain CSV path source, today's only behavior.
+    password_env_var stores only the NAME of a server-side environment
+    variable; the actual password is never passed to this function, never
+    stored here, and never reaches the audit log (see the
+    /reference-files/configure-source route)."""
     idx = _load_index()
     if file_id is None:
         existing = find_by_name(name)
@@ -196,6 +315,10 @@ def configure_source(name: str, path: str, auto_refresh_minutes: Optional[int], 
     blob["source_mode"] = "path"
     blob["source_path"] = path
     blob["auto_refresh_minutes"] = auto_refresh_minutes
+    blob["source_format"] = source_format
+    blob["sheet_name"] = sheet_name
+    blob["column_range"] = column_range
+    blob["password_env_var"] = password_env_var
     idx[file_id] = blob
     _save_index(idx)
     return sync_now(file_id, actor)
@@ -216,10 +339,17 @@ def sync_now(file_id: str, actor: str) -> ReferenceFile:
     if not path:
         raise ValueError(f"reference file '{file_id}' has no source path configured")
 
+    source_format = blob.get("source_format") or ("xlsx" if path.lower().endswith((".xlsx", ".xlsm")) else "csv")
+
     try:
-        with open(path) as fh:
-            text = fh.read()
-        rows = parse_csv_text(text)
+        if source_format == "xlsx":
+            rows = parse_xlsx_rows(
+                path, blob.get("sheet_name"), blob.get("column_range"), blob.get("password_env_var"),
+            )
+        else:
+            with open(path) as fh:
+                text = fh.read()
+            rows = parse_csv_text(text)
         if not rows:
             raise ValueError(f"no rows parsed from '{path}'")
     except Exception as exc:

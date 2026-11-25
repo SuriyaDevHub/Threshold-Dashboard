@@ -604,6 +604,16 @@ class ReferenceFile(BaseModel):
     last_synced_at: Optional[float] = None
     last_sync_error: Optional[str] = None
 
+    # --- xlsx-specific path-source config. All None (every file saved
+    # before this existed, and every CSV path source) => behave exactly as
+    # a CSV source, same as today. See reference_store.parse_xlsx_rows(). ---
+    source_format: Optional[str] = None       # None -> infer from source_path's extension; "csv" | "xlsx" to force
+    sheet_name: Optional[str] = None          # xlsx only; None -> the workbook's one sheet (error if >1 and unset)
+    column_range: Optional[str] = None        # xlsx only, e.g. "A:I"; None -> whole sheet
+    # The NAME of a server-side env var holding the password — never the
+    # password itself. None means this xlsx isn't password-protected.
+    password_env_var: Optional[str] = None
+
     @property
     def latest(self) -> Optional[ReferenceFileVersion]:
         return self.versions[-1] if self.versions else None

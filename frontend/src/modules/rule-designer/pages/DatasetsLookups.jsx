@@ -29,6 +29,14 @@ export default function DatasetsLookups() {
   const [refFile, setRefFile] = useState(null);
   const [refPath, setRefPath] = useState("");
   const [refAutoRefresh, setRefAutoRefresh] = useState("");
+  const [refSheetName, setRefSheetName] = useState("");
+  const [refColumnRange, setRefColumnRange] = useState("");
+  const [refPasswordEnvVar, setRefPasswordEnvVar] = useState("");
+  // Derived from the path itself, not a separate toggle — so the form can
+  // never disagree with what the backend will infer (reference_store.
+  // sync_now() falls back to this same .xlsx/.xlsm extension check when
+  // source_format isn't explicitly set).
+  const isXlsxPath = /\.(xlsx|xlsm)$/i.test(refPath.trim());
   const [dsLabel, setDsLabel] = useState("");
   const [dsFile, setDsFile] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -52,8 +60,13 @@ export default function DatasetsLookups() {
     setBusy(true);
     try {
       const minutes = refAutoRefresh.trim() ? Number(refAutoRefresh) : null;
-      await rd.configureReferenceSource(actor, role, refName.trim(), refPath.trim(), null, minutes);
+      await rd.configureReferenceSource(actor, role, refName.trim(), refPath.trim(), null, minutes, {
+        sheetName: refSheetName.trim(),
+        columnRange: refColumnRange.trim(),
+        passwordEnvVar: refPasswordEnvVar.trim(),
+      });
       setRefName(""); setRefPath(""); setRefAutoRefresh("");
+      setRefSheetName(""); setRefColumnRange(""); setRefPasswordEnvVar("");
       setNotice({ kind: "pass", text: "Reference file configured and synced." });
     } catch (e) { setNotice({ kind: "breach", text: String(e.message || e) }); }
     reload(); // even on failure — the file is registered with last_sync_error set, worth seeing
@@ -188,6 +201,19 @@ export default function DatasetsLookups() {
                 <label className="control" style={{ minWidth: 160 }}><span>Auto-refresh (minutes, optional)</span>
                   <input type="number" min="0" value={refAutoRefresh} onChange={(e) => setRefAutoRefresh(e.target.value)}
                     placeholder="e.g. 60" /></label>
+                {isXlsxPath && (
+                  <>
+                    <label className="control" style={{ minWidth: 180 }}><span>Sheet name</span>
+                      <input value={refSheetName} onChange={(e) => setRefSheetName(e.target.value)}
+                        placeholder="e.g. TP Market Data" /></label>
+                    <label className="control" style={{ minWidth: 120 }}><span>Column range</span>
+                      <input value={refColumnRange} onChange={(e) => setRefColumnRange(e.target.value)}
+                        placeholder="e.g. A:I" /></label>
+                    <label className="control" style={{ minWidth: 260 }}><span>Password env var (optional)</span>
+                      <input value={refPasswordEnvVar} onChange={(e) => setRefPasswordEnvVar(e.target.value)}
+                        placeholder="e.g. TP_MARKET_DATA_XLSX_PASSWORD" /></label>
+                  </>
+                )}
                 <button className="btn" disabled={busy || !refPath.trim() || !refName.trim()} onClick={configureReferenceSource}>
                   <RefreshCw size={14} style={{ marginRight: 6, verticalAlign: "-2px" }} />Save & sync now
                 </button>
@@ -200,7 +226,11 @@ export default function DatasetsLookups() {
         <p className="empty-hint">
           Uploading (or syncing) with the same name creates a new immutable version — published rules keep
           referencing the version they were tested against. A path-configured file is re-read from that path
-          on "Sync now" or, if an auto-refresh interval is set, automatically in the background.
+          on "Sync now" or, if an auto-refresh interval is set, automatically in the background. A path ending
+          in .xlsx/.xlsm is read as Excel — password-protected is fine, give us the name of a server-side
+          environment variable holding the password, never the password itself. If one sheet holds two separate
+          tables side by side, configure a path twice with the same path/sheet and a different column range
+          (e.g. "A:I" and "K:U") and name each one — they become two independent reference files.
         </p>
       </Card>
     </>

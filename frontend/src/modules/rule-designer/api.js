@@ -33,9 +33,13 @@ export const rd = {
   referenceFile: (id) => get(`/reference-files/${id}`),
   referenceRows: (id, version, limit = 50) => get(`/reference-files/${id}/rows`, { version, limit }),
   uploadReference: (actor, role, name, csv_text) => post("/reference-files/upload", { actor, role, name, csv_text }),
-  configureReferenceSource: (actor, role, name, path, fileId, autoRefreshMinutes) =>
-    post("/reference-files/configure-source",
-      { actor, role, name, path, file_id: fileId, auto_refresh_minutes: autoRefreshMinutes }),
+  configureReferenceSource: (actor, role, name, path, fileId, autoRefreshMinutes, xlsxOpts = {}) =>
+    post("/reference-files/configure-source", {
+      actor, role, name, path, file_id: fileId, auto_refresh_minutes: autoRefreshMinutes,
+      sheet_name: xlsxOpts.sheetName || null,
+      column_range: xlsxOpts.columnRange || null,
+      password_env_var: xlsxOpts.passwordEnvVar || null,
+    }),
   syncReference: (id, actor) => post(`/reference-files/${id}/sync`, { actor }),
   deleteReference: (id, actor) => del(`/reference-files/${id}`, { actor }),
   dayPartitionedColumns: (pathTemplate, dayValue) =>

@@ -4,6 +4,7 @@ Run with:  cd backend && .venv/bin/python -m pytest tests/test_rule_designer.py 
 """
 from __future__ import annotations
 
+import io
 import os
 import sys
 
@@ -1239,6 +1240,158 @@ def test_scheduler_tick_syncs_when_due_and_skips_when_not(tmp_path):
 def test_scheduler_tick_ignores_upload_mode_and_disabled_auto_refresh():
     reference_store.upload_version("plain_upload", [{"a": "1"}], "tester")
     reference_sync_scheduler._tick()  # noqa: SLF001 — should be a no-op, not raise
+
+
+# --------------------------------------------------------------------------
+# reference_store — xlsx path-based sources (password-protected, optional
+# column range) — fixtures built fully in-process via openpyxl + the
+# msoffcrypto-tool encrypt path, no checked-in binary file needed.
+# --------------------------------------------------------------------------
+
+def _make_xlsx_bytes(sheet_name, rows, second_table=None, second_table_gap=1):
+    """Builds a plain (unencrypted) .xlsx in memory. `rows` is a list of
+    row-tuples including the header row. `second_table`, if given, is
+    written starting `second_table_gap` blank columns after `rows`' own
+    width — reproducing the real file's "two tables separated by a blank
+    spacer column" layout."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = sheet_name
+    for r in rows:
+        ws.append(list(r))
+    if second_table:
+        width = len(rows[0])
+        start_col = width + second_table_gap + 1  # 1-indexed
+        for i, r in enumerate(second_table, start=1):
+            for j, v in enumerate(r):
+                ws.cell(row=i, column=start_col + j, value=v)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _encrypt_xlsx_bytes(plain_bytes, password):
+    import msoffcrypto
+
+    office_file = msoffcrypto.OfficeFile(io.BytesIO(plain_bytes))
+    out = io.BytesIO()
+    office_file.encrypt(password, out)
+    return out.getvalue()
+
+
+def test_sync_now_xlsx_correct_password_parses_configured_column_range(tmp_path, monkeypatch):
+    plain = _make_xlsx_bytes("Sheet1", [
+        ("Currency", "Threshold"),
+        ("USD", 2.0),
+        ("EUR", 3.0),
+    ])
+    xlsx_path = tmp_path / "ccy.xlsx"
+    xlsx_path.write_bytes(_encrypt_xlsx_bytes(plain, "secret123"))
+    monkeypatch.setenv("TEST_XLSX_PW", "secret123")
+
+    f = reference_store.configure_source(
+        "ccy_xlsx", str(xlsx_path), None, "tester",
+        sheet_name="Sheet1", column_range="A:B", password_env_var="TEST_XLSX_PW",
+    )
+    assert f.last_sync_error is None
+    assert f.latest.columns == ["Currency", "Threshold"]
+    assert f.latest.records == 2
+    rows = reference_store.get_rows(f.id)
+    assert rows == [{"Currency": "USD", "Threshold": 2.0}, {"Currency": "EUR", "Threshold": 3.0}]
+
+
+def test_sync_now_xlsx_wrong_password_records_clear_error_without_crashing(tmp_path, monkeypatch):
+    plain = _make_xlsx_bytes("Sheet1", [("Currency", "Threshold"), ("USD", 2.0)])
+    xlsx_path = tmp_path / "ccy.xlsx"
+    xlsx_path.write_bytes(_encrypt_xlsx_bytes(plain, "right-password"))
+    monkeypatch.setenv("TEST_XLSX_PW", "wrong-password")
+
+    with pytest.raises(ValueError):
+        reference_store.configure_source(
+            "ccy_xlsx_wrongpw", str(xlsx_path), None, "tester",
+            sheet_name="Sheet1", password_env_var="TEST_XLSX_PW",
+        )
+    f = reference_store.find_by_name("ccy_xlsx_wrongpw")
+    assert f.last_sync_error is not None
+    assert f.versions == []
+
+
+def test_sync_now_xlsx_missing_password_env_var_names_it_in_the_error(tmp_path, monkeypatch):
+    plain = _make_xlsx_bytes("Sheet1", [("Currency", "Threshold"), ("USD", 2.0)])
+    xlsx_path = tmp_path / "ccy.xlsx"
+    xlsx_path.write_bytes(_encrypt_xlsx_bytes(plain, "secret123"))
+    monkeypatch.delenv("TEST_XLSX_PW_UNSET", raising=False)
+
+    with pytest.raises(ValueError, match="TEST_XLSX_PW_UNSET"):
+        reference_store.configure_source(
+            "ccy_xlsx_nopw", str(xlsx_path), None, "tester",
+            sheet_name="Sheet1", password_env_var="TEST_XLSX_PW_UNSET",
+        )
+
+    # The scheduler's own swallow-ValueError tick must not crash either.
+    reference_sync_scheduler._tick()  # noqa: SLF001
+
+
+def test_sync_now_xlsx_unknown_sheet_name_lists_the_real_sheets(tmp_path, monkeypatch):
+    plain = _make_xlsx_bytes("TP Market Data", [("Currency", "Threshold"), ("USD", 2.0)])
+    xlsx_path = tmp_path / "tp.xlsx"
+    xlsx_path.write_bytes(plain)  # unencrypted — password_env_var left unset
+
+    with pytest.raises(ValueError, match="TP Market Data"):
+        reference_store.configure_source(
+            "tp_xlsx_badsheet", str(xlsx_path), None, "tester", sheet_name="DoesNotExist",
+        )
+
+
+def test_sync_now_xlsx_two_tables_one_sheet_read_independently_via_column_range(tmp_path):
+    table_a = [("SITE", "Currency", "Tenor"), ("LN", "USD", "1Y"), ("LN", "EUR", "2Y")]
+    table_b = [("SITE", "Curve Name"), ("LN", "TP-USD"), ("LN", "TP-EUR"), ("LN", "TP-GBP")]
+    plain = _make_xlsx_bytes("TP Market Data", table_a, second_table=table_b)
+    xlsx_path = tmp_path / "tp_two_tables.xlsx"
+    xlsx_path.write_bytes(plain)
+
+    f_a = reference_store.configure_source(
+        "tp_table_a", str(xlsx_path), None, "tester", sheet_name="TP Market Data", column_range="A:C",
+    )
+    f_b = reference_store.configure_source(
+        "tp_table_b", str(xlsx_path), None, "tester", sheet_name="TP Market Data", column_range="E:F",
+    )
+
+    assert f_a.latest.columns == ["SITE", "Currency", "Tenor"]
+    assert f_a.latest.records == 2
+    rows_a = reference_store.get_rows(f_a.id)
+    assert "Curve Name" not in rows_a[0]
+
+    assert f_b.latest.columns == ["SITE", "Curve Name"]
+    assert f_b.latest.records == 3  # table B has one more row than table A
+    rows_b = reference_store.get_rows(f_b.id)
+    assert "Currency" not in rows_b[0]
+    assert "Tenor" not in rows_b[0]
+
+
+def test_sync_now_xlsx_blank_join_key_cell_matches_a_sources_own_blank_value(tmp_path):
+    """Regression test for the None-vs-"" mismatch between openpyxl (blank
+    cell -> None) and lookup_engine._key_tuple()'s str(raw) (no None
+    handling) — without parse_xlsx_rows()'s normalization, a blank xlsx
+    cell would become the literal string "None", a different dict key
+    than CSV's own blank-cell convention ("")."""
+    plain = _make_xlsx_bytes("Sheet1", [("Code", "Value"), ("USD", "dollar"), ("", "blank-code")])
+    xlsx_path = tmp_path / "blanks.xlsx"
+    xlsx_path.write_bytes(plain)
+
+    f = reference_store.configure_source("blanks_xlsx", str(xlsx_path), None, "tester", sheet_name="Sheet1")
+    rows = reference_store.get_rows(f.id)
+    assert rows[1]["Code"] == ""  # not the string "None"
+
+    cfg = LookupConfig(lookup_type=LookupType.EXACT, reference_file_id=f.id,
+                        join_keys=[{"source": "trade_code", "reference": "Code"}],
+                        fields=[LookupFieldMap(source_column="Value", output_field="value")])
+    idx = lookup_engine.build_index(rows, cfg)
+    outcome = lookup_engine.apply_lookup({"trade_code": ""}, idx, None)
+    assert outcome.status == "matched"
+    assert outcome.fields_added == {"value": "blank-code"}
 
 
 # --------------------------------------------------------------------------

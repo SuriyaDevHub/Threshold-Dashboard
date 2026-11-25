@@ -461,6 +461,14 @@ class ConfigureReferenceSourceBody(Actor):
     path: str
     file_id: Optional[str] = None
     auto_refresh_minutes: Optional[int] = None
+    # xlsx-only; all optional, see ReferenceFile's matching fields in
+    # models.py. password_env_var is the NAME of a server-side env var —
+    # never the password itself, which never reaches this body, the
+    # stored config, or the audit log below.
+    source_format: Optional[str] = None
+    sheet_name: Optional[str] = None
+    column_range: Optional[str] = None
+    password_env_var: Optional[str] = None
 
 
 @router.post("/reference-files/configure-source")
@@ -473,6 +481,8 @@ async def configure_reference_source(body: ConfigureReferenceSourceBody):
     try:
         f = reference_store.configure_source(
             body.name, body.path, body.auto_refresh_minutes, body.actor, file_id=body.file_id,
+            source_format=body.source_format, sheet_name=body.sheet_name,
+            column_range=body.column_range, password_env_var=body.password_env_var,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
