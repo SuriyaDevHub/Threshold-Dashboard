@@ -1490,6 +1490,64 @@ def test_dry_run_explainability_keeps_matches_past_the_sample_cap():
     assert summary.not_matched_shown == 3  # not-matched bucket capped independently
 
 
+def test_dry_run_full_mode_caps_detailed_records_but_not_summary_counts(monkeypatch):
+    # A "full"/entire-dataset dry run must not keep a complete per-node trail
+    # for every production-scale record (the actual cost on a large dataset
+    # — file I/O is already cached per day/version) — only the UI-facing
+    # detail list is bounded; summary counts and match rate must still
+    # reflect every record.
+    monkeypatch.setattr(dry_run_service, "_FULL_MODE_EXPLAIN_CAP", 3)
+    ref = reference_store.upload_version("ccy_ref_cap", [{"Currency": "USD", "Threshold": 2.0}], "tester")
+    rows = [{"trade_id": i, "currency": "USD", "Deviation": 6.0} for i in range(20)]  # all 20 match
+    ds = dataset_store.put("UPLOAD", {"product_type": "CapTest"}, rows)
+    rule = _rule(rule_id="DRYRUNCAP1", name="DRYRUNCAP1", workflow=_demo_workflow(ref.id))
+    rule_store.upsert_rule(rule, "tester")
+
+    result = dry_run_service.run_dry_run(rule, ds.id, "tester", "full", record_id_field="trade_id")
+    assert result.summary.total_records == 20
+    assert result.summary.matched == 20  # every record counted, not just the kept sample
+    assert result.summary.matched_shown == 3  # but only the cap's worth of detail is kept
+    assert len(result.records) == 3
+
+
+def test_dry_run_sample_mode_is_not_capped_by_the_full_mode_default(monkeypatch):
+    # An explicit sample_1000 pull already bounds the INPUT before
+    # run_workflow ever runs — the admin asked to see that many records in
+    # detail, so the full-mode cap must not additionally truncate it.
+    monkeypatch.setattr(dry_run_service, "_FULL_MODE_EXPLAIN_CAP", 3)
+    ref = reference_store.upload_version("ccy_ref_cap2", [{"Currency": "USD", "Threshold": 2.0}], "tester")
+    rows = [{"trade_id": i, "currency": "USD", "Deviation": 6.0} for i in range(10)]
+    ds = dataset_store.put("UPLOAD", {"product_type": "CapTest2"}, rows)
+    rule = _rule(rule_id="DRYRUNCAP2", name="DRYRUNCAP2", workflow=_demo_workflow(ref.id))
+    rule_store.upsert_rule(rule, "tester")
+
+    result = dry_run_service.run_dry_run(rule, ds.id, "tester", "sample_1000", record_id_field="trade_id")
+    assert result.summary.matched == 10
+    assert result.summary.matched_shown == 10  # not capped at 3 like "full" mode would be
+    assert len(result.records) == 10
+
+
+def test_dry_run_results_store_evicts_oldest_past_the_cap(monkeypatch):
+    monkeypatch.setattr(dry_run_service, "_MAX_STORED_DRY_RUNS", 2)
+    ref = reference_store.upload_version("ccy_ref_evict", [{"Currency": "USD", "Threshold": 2.0}], "tester")
+    rule = _rule(rule_id="DRYRUNEVICT1", name="DRYRUNEVICT1", workflow=_demo_workflow(ref.id))
+    rule_store.upsert_rule(rule, "tester")
+    ds = dataset_store.put("UPLOAD", {"product_type": "EvictTest"}, [{"trade_id": 1, "currency": "USD"}])
+
+    ids = []
+    for i in range(4):
+        result = dry_run_service.run_dry_run(rule, ds.id, "tester", "full", record_id_field="trade_id")
+        ids.append(result.id)
+        import time as _time
+        _time.sleep(0.001)  # ensure strictly increasing created_at for a deterministic oldest-first eviction
+
+    assert len(dry_run_service._results) == 2  # noqa: SLF001
+    assert dry_run_service.get_dry_run(ids[0]) is None  # oldest two evicted
+    assert dry_run_service.get_dry_run(ids[1]) is None
+    assert dry_run_service.get_dry_run(ids[2]) is not None
+    assert dry_run_service.get_dry_run(ids[3]) is not None
+
+
 def test_workflow_topo_order_falls_back_on_cycle():
     nodes = [WorkflowNode(id="a", type=NodeType.INPUT), WorkflowNode(id="b", type=NodeType.INPUT)]
     edges = [WorkflowEdge(source="a", target="b"), WorkflowEdge(source="b", target="a")]
