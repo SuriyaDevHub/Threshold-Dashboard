@@ -3436,6 +3436,74 @@ def test_normalize_tenor_as_a_join_key_transform_matches_numeric_to_short_code()
     assert out.status == "matched" and out.fields_added["Rate"] == 1.55
 
 
+_PNL_THRESHOLD_BLOB = (
+    "SALES_MGN_BPS:0.5|SALES_MGN:50000|BENCHMARK_WIDENING:0.05|"
+    "SALES_MGN_INT_RATE_RATIO:0.5|PL_NOTIONAL_RATIO:0.0001|BENCHMARK_DEVIATION:0.05|PL:50000"
+)
+
+
+def test_extract_kv_finds_the_key_regardless_of_position():
+    node = _transform_node(op="extract_kv", field="blob", output_field="deviation", key="BENCHMARK_DEVIATION")
+    status, fields = workflow_engine._apply_transform(node, {"blob": _PNL_THRESHOLD_BLOB})
+    assert status == "ok" and fields == {"deviation": "0.05"}
+
+    # First pair in the string, not just a middle one.
+    node2 = _transform_node(op="extract_kv", field="blob", output_field="bps", key="SALES_MGN_BPS")
+    status2, fields2 = workflow_engine._apply_transform(node2, {"blob": _PNL_THRESHOLD_BLOB})
+    assert fields2 == {"bps": "0.5"}
+
+    # Last pair in the string.
+    node3 = _transform_node(op="extract_kv", field="blob", output_field="pl", key="PL")
+    status3, fields3 = workflow_engine._apply_transform(node3, {"blob": _PNL_THRESHOLD_BLOB})
+    assert fields3 == {"pl": "50000"}
+
+
+def test_extract_kv_missing_key_yields_null_not_an_error():
+    node = _transform_node(op="extract_kv", field="blob", output_field="missing", key="NOT_A_REAL_KEY")
+    status, fields = workflow_engine._apply_transform(node, {"blob": _PNL_THRESHOLD_BLOB})
+    assert status == "ok" and fields == {"missing": None}
+
+
+def test_extract_kv_custom_delimiters():
+    node = _transform_node(op="extract_kv", field="blob", output_field="x", key="A",
+                            pair_delimiter=";", kv_delimiter="=")
+    status, fields = workflow_engine._apply_transform(node, {"blob": "A=1;B=2;C=3"})
+    assert status == "ok" and fields == {"x": "1"}
+
+
+def test_extract_kv_skips_malformed_pair_without_failing_the_rest():
+    node = _transform_node(op="extract_kv", field="blob", output_field="x", key="B")
+    status, fields = workflow_engine._apply_transform(node, {"blob": "garbage-no-colon|B:2"})
+    assert status == "ok" and fields == {"x": "2"}
+
+
+def test_extract_kv_requires_a_key_configured():
+    node = _transform_node(op="extract_kv", field="blob", output_field="x")
+    status, fields = workflow_engine._apply_transform(node, {"blob": _PNL_THRESHOLD_BLOB})
+    assert status == "error"
+
+
+def test_extract_kv_chained_with_cast_numeric_end_to_end_via_run_workflow():
+    wf = Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="tx", type=NodeType.TRANSFORM, transform={"transforms": [
+                {"field": "omrctradePnlthreshold", "op": "extract_kv", "output_field": "deviation_threshold",
+                 "key": "BENCHMARK_DEVIATION"},
+                {"field": "deviation_threshold", "op": "cast_numeric", "output_field": "deviation_threshold"},
+            ]}),
+        ],
+        edges=[WorkflowEdge(source="in", target="tx")],
+    )
+    results, _, summary = workflow_engine.run_workflow(
+        wf, [{"trade_id": 1, "omrctradePnlthreshold": _PNL_THRESHOLD_BLOB}],
+        reference_store.reference_loader, record_id_field="trade_id",
+    )
+    assert summary.matched == 1
+    assert results[0].final_record["deviation_threshold"] == 0.05
+    assert isinstance(results[0].final_record["deviation_threshold"], float)
+
+
 def test_parse_date_transform_tolerates_trailing_time_component():
     """A "date" column that's really a midnight timestamp in the source
     system (e.g. "15-01-2026 00:00:00" against a date-only DD-MM-YYYY

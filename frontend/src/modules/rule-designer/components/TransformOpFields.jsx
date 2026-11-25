@@ -17,7 +17,7 @@ import { withCurrent } from "./ConditionBuilder.jsx";
 
 const OP_PARAM_KEYS = ["precision", "start", "end", "delimiter", "index", "find", "replace_with", "rules", "default",
                        "input_format", "custom_pattern", "unit", "amount", "fields", "separator",
-                       "spt_days", "snx_days"];
+                       "spt_days", "snx_days", "key", "pair_delimiter", "kv_delimiter"];
 
 const TRANSFORM_OPS = [
   { value: "round", label: "round" },
@@ -33,6 +33,7 @@ const TRANSFORM_OPS = [
   { value: "parse_date", label: "parse date" },
   { value: "date_shift", label: "shift date" },
   { value: "normalize_tenor", label: "normalize tenor" },
+  { value: "extract_kv", label: "extract key:value" },
 ];
 
 // Must match transform_ops.py's _shift_date() units exactly.
@@ -179,6 +180,23 @@ export default function TransformOpFields({ transform, onChange, allowNone, fiel
           </label>
         </>
       )}
+
+      {op === "extract_kv" && (
+        <>
+          <label className="control"><span>Key</span>
+            <input placeholder="e.g. BENCHMARK_DEVIATION" value={transform?.key ?? ""}
+                   onChange={(e) => set({ key: e.target.value })} />
+          </label>
+          <label className="control"><span>Pair delimiter (optional)</span>
+            <input placeholder="|" value={transform?.pair_delimiter ?? ""}
+                   onChange={(e) => set({ pair_delimiter: e.target.value })} />
+          </label>
+          <label className="control"><span>Key:value delimiter (optional)</span>
+            <input placeholder=":" value={transform?.kv_delimiter ?? ""}
+                   onChange={(e) => set({ kv_delimiter: e.target.value })} />
+          </label>
+        </>
+      )}
     </>
   );
 }
@@ -260,5 +278,6 @@ export function transformHint(op) {
   if (op === "parse_date") return "Output is always stored as YYYY-MM-DD, so it can be compared with before/after/on against any other date field — including one that never needed a transform.";
   if (op === "date_shift") return 'Negative amount shifts earlier, positive shifts later (e.g. months, -1 = "one month before"). Months/years shift by calendar month, not a fixed day count (Mar 31 minus 1 month lands on Feb 28). Combine with a "before"/"after" condition against this field to build thresholds like "more than one month before COB date": shift COB date back 1 month, then check trade date is before the result.';
   if (op === "normalize_tenor") return 'Normalizes a tenor to one short code ("1M", "3Y", "6M", ...) regardless of how it\'s represented on input — a plain number is read as a day count, strings like "1WK"/"18M"/"3Y6M" are parsed (D/W/M/Y units, decimals and mixed components allowed), and TDY/TOM/SPT/SNX/O_N are simple calendar-day approximations (not a real holiday calendar) — SPT/SNX default to 2/3 days unless overridden below. Put this directly on a LOOKUP join key\'s own transform to make a numeric dataset Tenor match a reference file\'s normalized Tenor column, with no separate TRANSFORM node needed.';
+  if (op === "extract_kv") return 'Pulls one named value out of a packed "KEY:VALUE|KEY:VALUE|..." column (e.g. a threshold-config blob) by key, regardless of where that key falls in the string. A missing key becomes blank, not an error. The result is always text (e.g. "0.05") — chain a second "cast to number" step afterward if you need it numeric for a condition or calculation.';
   return null;
 }

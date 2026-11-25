@@ -1,6 +1,6 @@
 """Shared value-transform vocabulary — round/upper/lower/trim/substring/
 split/replace/cast_numeric/cast_string/value_map/parse_date/date_shift/
-normalize_tenor.
+normalize_tenor/extract_kv.
 
 Factored out of workflow_engine.py so it has exactly one implementation,
 used by both:
@@ -201,6 +201,33 @@ def _normalize_tenor(val: Any, cfg: Dict[str, Any]) -> str:
     return _encode_tenor_days(total_days)
 
 
+def _extract_kv(val: Any, cfg: Dict[str, Any]) -> Optional[str]:
+    """Pulls one named value out of a packed `KEY:VALUE|KEY:VALUE|...`
+    string (e.g. a threshold-config blob column) — key-aware, so it works
+    regardless of where that key happens to fall in the string, unlike a
+    fixed-position `split`. Returns the raw string value (e.g. "0.05");
+    chain a `cast_numeric` TRANSFORM step afterward for a numeric
+    comparison, same single-responsibility shape as every other op here.
+    A key that isn't present in this particular value returns None rather
+    than raising — a row whose config blob happens to omit this key is a
+    normal "not configured for this row" case, not malformed data (same
+    precedent as `split`'s own out-of-range-index -> None). A pair with no
+    kv_delimiter in it is skipped rather than failing the whole value, so
+    one malformed/empty pair never blocks extracting a later, good one."""
+    key = cfg.get("key")
+    if not key:
+        raise ValueError("extract_kv requires a 'key' to look up")
+    pair_delim = cfg.get("pair_delimiter") or "|"
+    kv_delim = cfg.get("kv_delimiter") or ":"
+    for pair in str(val).split(pair_delim):
+        if kv_delim not in pair:
+            continue
+        k, v = pair.split(kv_delim, 1)
+        if k.strip() == key:
+            return v.strip()
+    return None
+
+
 def apply_transform_op(op: Optional[str], val: Any, cfg: Dict[str, Any]) -> Any:
     """Pure value transform — never touches a record or field name, just
     the value itself. Returns `val` unchanged for a None value or an
@@ -242,6 +269,8 @@ def apply_transform_op(op: Optional[str], val: Any, cfg: Dict[str, Any]) -> Any:
         return _shift_date(val, cfg)
     if op == "normalize_tenor":
         return _normalize_tenor(val, cfg)
+    if op == "extract_kv":
+        return _extract_kv(val, cfg)
     if op == "value_map":
         # Free-text -> code normalization: "LONDON (LN)" -> "LN". First
         # matching rule wins (checked in configured order), falling back to
