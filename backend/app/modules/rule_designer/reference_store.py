@@ -127,13 +127,21 @@ def _col_letters_to_indices(column_range: Optional[str]) -> Tuple[Optional[int],
         raise ValueError(f"invalid column_range '{column_range}' (expected e.g. 'A:I')") from exc
 
 
-def _resolve_xlsx_password(password_env_var: Optional[str], encrypted_password: Optional[str]) -> Optional[str]:
-    """Two alternative ways to supply an xlsx password — an encrypted,
-    admin-typed one (see secret_crypto.py) takes precedence if somehow
-    both are set, though configure_source() already rejects setting both
-    at once. Neither path ever returns anything that gets stored back or
-    logged; the resolved plaintext lives only in a local variable, used
-    immediately and then discarded once this call returns."""
+def _resolve_xlsx_password(password_env_var: Optional[str], encrypted_password: Optional[str],
+                            password: Optional[str] = None) -> Optional[str]:
+    """Three alternative ways to supply an xlsx password. `password` (a
+    plaintext value already in hand for this one call — e.g. a typed,
+    one-shot preview password that's never persisted) takes precedence,
+    since routing it through encrypt-then-immediately-decrypt would gain
+    nothing; an encrypted, admin-typed one (see secret_crypto.py) comes
+    next; configure_source() rejects setting both of the stored forms at
+    once, so in practice at most one of encrypted_password/
+    password_env_var is ever set anyway. Neither path ever returns
+    anything that gets stored back or logged; the resolved plaintext
+    lives only in a local variable, used immediately and then discarded
+    once this call returns."""
+    if password:
+        return password
     if encrypted_password:
         return secret_crypto.decrypt_secret(encrypted_password)
     if password_env_var:
@@ -148,7 +156,8 @@ def _resolve_xlsx_password(password_env_var: Optional[str], encrypted_password: 
 
 def parse_xlsx_rows(path: str, sheet_name: Optional[str], column_range: Optional[str],
                      password_env_var: Optional[str] = None,
-                     encrypted_password: Optional[str] = None) -> List[dict]:
+                     encrypted_password: Optional[str] = None,
+                     password: Optional[str] = None) -> List[dict]:
     """xlsx counterpart to parse_csv_text() — produces the exact same
     List[dict] shape (keys = header strings, values = cell values) so
     everything downstream of this function (upload_version(),
@@ -165,7 +174,7 @@ def parse_xlsx_rows(path: str, sheet_name: Optional[str], column_range: Optional
     as an independent reference file."""
     import openpyxl
 
-    password = _resolve_xlsx_password(password_env_var, encrypted_password)
+    password = _resolve_xlsx_password(password_env_var, encrypted_password, password)
     if password:
         import msoffcrypto
 

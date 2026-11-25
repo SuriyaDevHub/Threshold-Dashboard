@@ -10,7 +10,6 @@ import Dashboard from "./pages/Dashboard.jsx";
 import Products from "./pages/Products.jsx";
 import RuleList from "./pages/RuleList.jsx";
 import RuleWorkspace from "./pages/RuleWorkspace.jsx";
-import DatasetsLookups from "./pages/DatasetsLookups.jsx";
 import Versions from "./pages/Versions.jsx";
 import Audit from "./pages/Audit.jsx";
 
@@ -33,7 +32,6 @@ const ALL_TOP_TABS = [
   { id: "dashboard", label: "Dashboard" },
   { id: "products", label: "Products" },
   { id: "rules", label: "Rules" },
-  { id: "data", label: "Datasets & Lookups", adminOnly: true },
   { id: "versions", label: "Versions", adminOnly: true },
   { id: "audit", label: "Audit", adminOnly: true },
 ];
@@ -73,7 +71,6 @@ function RuleDesignerInner() {
       {tab === "rules" && selectedRule && (
         <RuleWorkspace ruleId={selectedRule} onBack={() => setSelectedRule(null)} onDeleted={() => setSelectedRule(null)} />
       )}
-      {tab === "data" && !selectedRule && <DatasetsLookups />}
       {tab === "versions" && !selectedRule && <Versions />}
       {tab === "audit" && !selectedRule && <Audit />}
     </>

@@ -962,6 +962,103 @@ def test_get_day_index_never_shares_cache_across_different_field_mappings(tmp_pa
     assert outcome_b.fields_added == {"RuleB_Limit": "50"}
 
 
+# --------------------------------------------------------------------------
+# day_partitioned_source — xlsx support (a day's file can be a password-
+# protected .xlsx with two unrelated tables on one sheet, exactly like a
+# static reference file — reuses reference_store.parse_xlsx_rows())
+# --------------------------------------------------------------------------
+
+def test_load_day_rows_xlsx_reads_both_column_ranges_as_independent_sources(tmp_path, monkeypatch):
+    plain = _make_xlsx_bytes(
+        "TP Market Data",
+        [("Site", "COF"), ("LDN", 1.5), ("NYC", 2.5)],
+        second_table=[("Site", "VOF"), ("LDN", 9.1), ("NYC", 9.2)],
+        second_table_gap=1,
+    )
+    day_dir = tmp_path / "20261124"
+    day_dir.mkdir()
+    xlsx_path = day_dir / "TP Market Data.xlsx"
+    xlsx_path.write_bytes(_encrypt_xlsx_bytes(plain, "tp-secret"))
+    template = str(tmp_path / "%Y%m%d" / "TP Market Data.xlsx")
+    monkeypatch.setenv("TP_XLSX_PW", "tp-secret")
+
+    left = day_partitioned_source.load_day_rows(
+        template, "2026-11-24", ["Site"],
+        sheet_name="TP Market Data", column_range="A:B", password_env_var="TP_XLSX_PW",
+    )
+    right = day_partitioned_source.load_day_rows(
+        template, "2026-11-24", ["Site"],
+        sheet_name="TP Market Data", column_range="D:E", password_env_var="TP_XLSX_PW",
+    )
+    assert left == [{"Site": "LDN", "COF": 1.5}, {"Site": "NYC", "COF": 2.5}]
+    assert right == [{"Site": "LDN", "VOF": 9.1}, {"Site": "NYC", "VOF": 9.2}]
+
+
+def test_load_day_rows_infers_xlsx_format_from_extension(tmp_path, monkeypatch):
+    plain = _make_xlsx_bytes("Sheet1", [("Site", "Rate"), ("LDN", 1.0)])
+    day_dir = tmp_path / "20261124"
+    day_dir.mkdir()
+    xlsx_path = day_dir / "rates.xlsx"
+    xlsx_path.write_bytes(plain)  # no password this time
+    template = str(tmp_path / "%Y%m%d" / "rates.xlsx")
+
+    rows = day_partitioned_source.load_day_rows(template, "2026-11-24", ["Site"])  # no source_format given
+    assert rows == [{"Site": "LDN", "Rate": 1.0}]
+
+
+def test_get_day_index_reads_xlsx_via_config_fields(tmp_path, monkeypatch):
+    plain = _make_xlsx_bytes("TP Market Data", [("Site", "COF"), ("LDN", 1.5)])
+    day_dir = tmp_path / "20261124"
+    day_dir.mkdir()
+    xlsx_path = day_dir / "TP Market Data.xlsx"
+    xlsx_path.write_bytes(_encrypt_xlsx_bytes(plain, "tp-secret"))
+    template = str(tmp_path / "%Y%m%d" / "TP Market Data.xlsx")
+    monkeypatch.setenv("TP_XLSX_PW2", "tp-secret")
+
+    cfg = LookupConfig(
+        lookup_type=LookupType.EXACT, reference_source="day_partitioned",
+        day_partition_path_template=template, day_partition_field="d",
+        day_partition_sheet_name="TP Market Data", day_partition_column_range="A:B",
+        day_partition_password_env_var="TP_XLSX_PW2",
+        join_keys=[{"source": "site", "reference": "Site"}],
+        fields=[LookupFieldMap(source_column="COF", output_field="CofRate")],
+    )
+    idx = day_partitioned_source.get_day_index(template, "2026-11-24", cfg)
+    outcome = lookup_engine.apply_lookup({"site": "LDN"}, idx)
+    assert outcome.status == "matched"
+    assert outcome.fields_added == {"CofRate": 1.5}
+
+
+def test_peek_columns_xlsx_returns_real_header(tmp_path, monkeypatch):
+    plain = _make_xlsx_bytes("TP Market Data", [("Site", "COF"), ("LDN", 1.5)])
+    day_dir = tmp_path / "20261124"
+    day_dir.mkdir()
+    xlsx_path = day_dir / "TP Market Data.xlsx"
+    xlsx_path.write_bytes(_encrypt_xlsx_bytes(plain, "tp-secret"))
+    template = str(tmp_path / "%Y%m%d" / "TP Market Data.xlsx")
+
+    columns, error = day_partitioned_source.peek_columns(
+        template, "2026-11-24", sheet_name="TP Market Data", column_range="A:B", password="tp-secret",
+    )
+    assert columns == ["Site", "COF"]
+    assert error is None
+
+
+def test_peek_columns_xlsx_wrong_password_reports_error_not_exception(tmp_path):
+    plain = _make_xlsx_bytes("Sheet1", [("Site", "COF"), ("LDN", 1.5)])
+    day_dir = tmp_path / "20261124"
+    day_dir.mkdir()
+    xlsx_path = day_dir / "rates.xlsx"
+    xlsx_path.write_bytes(_encrypt_xlsx_bytes(plain, "right-pw"))
+    template = str(tmp_path / "%Y%m%d" / "rates.xlsx")
+
+    columns, error = day_partitioned_source.peek_columns(
+        template, "2026-11-24", sheet_name="Sheet1", password="wrong-pw",
+    )
+    assert columns == []
+    assert error is not None
+
+
 def test_get_lookup_index_reuses_built_index_within_ttl():
     ref = reference_store.upload_version("idx_ttl_test", [{"Currency": "USD", "Threshold": 2.0}], "tester")
     cfg = LookupConfig(
@@ -1078,6 +1175,53 @@ def test_evaluate_record_reuses_day_partitioned_index_across_many_calls(tmp_path
         lookup_engine.build_index = real_build
 
     assert calls["n"] == 1  # built once (first trade), reused for every subsequent trade
+
+
+def test_upsert_rule_encrypts_a_typed_day_partition_password_and_clears_the_plaintext(monkeypatch):
+    from cryptography.fernet import Fernet
+    monkeypatch.setenv("REFERENCE_SECRETS_KEY", Fernet.generate_key().decode())
+
+    lookup = LookupConfig(
+        lookup_type=LookupType.EXACT, reference_source="day_partitioned",
+        day_partition_path_template="/mnt/x/%Y%m%d/TP Market Data.xlsx", day_partition_field="d",
+        day_partition_sheet_name="TP Market Data", day_partition_column_range="A:I",
+        day_partition_password="typed-in-plaintext",
+        join_keys=[{"source": "UTI", "reference": "UTI"}],
+        fields=[LookupFieldMap(source_column="Rate", output_field="Rate")],
+    )
+    rule = _rule(rule_id="DPXLSXPW1", name="DPXLSXPW1", workflow=Workflow(
+        nodes=[WorkflowNode(id="in", type=NodeType.INPUT), WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup)],
+        edges=[WorkflowEdge(source="in", target="lk")],
+    ))
+    rule_store.upsert_rule(rule, "tester")
+
+    saved_lookup = rule.workflow.nodes[1].lookup
+    assert saved_lookup.day_partition_password is None  # plaintext never persisted
+    assert saved_lookup.day_partition_encrypted_password is not None
+    assert saved_lookup.day_partition_encrypted_password != "typed-in-plaintext"
+    assert secret_crypto.decrypt_secret(saved_lookup.day_partition_encrypted_password) == "typed-in-plaintext"
+
+    # Saving again with no new password untouched keeps the same ciphertext
+    # (the UI never re-sends the plaintext once it's been encrypted).
+    rule_store.upsert_rule(rule, "tester")
+    assert rule.workflow.nodes[1].lookup.day_partition_encrypted_password == saved_lookup.day_partition_encrypted_password
+
+
+def test_upsert_rule_rejects_day_partition_password_and_env_var_together():
+    lookup = LookupConfig(
+        lookup_type=LookupType.EXACT, reference_source="day_partitioned",
+        day_partition_path_template="/mnt/x/%Y%m%d/TP Market Data.xlsx", day_partition_field="d",
+        day_partition_password_env_var="TP_XLSX_PW",
+        day_partition_password="also-typed",
+        join_keys=[{"source": "UTI", "reference": "UTI"}],
+        fields=[LookupFieldMap(source_column="Rate", output_field="Rate")],
+    )
+    rule = _rule(rule_id="DPXLSXPW2", name="DPXLSXPW2", workflow=Workflow(
+        nodes=[WorkflowNode(id="in", type=NodeType.INPUT), WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=lookup)],
+        edges=[WorkflowEdge(source="in", target="lk")],
+    ))
+    with pytest.raises(ValueError):
+        rule_store.upsert_rule(rule, "tester")
 
 
 def test_dry_run_explainability_keeps_matches_past_the_sample_cap():

@@ -24,14 +24,20 @@ from datetime import datetime
 from itertools import chain
 from typing import Dict, List, Optional, Tuple
 
-from app.modules.rule_designer import lookup_engine
+from app.modules.rule_designer import lookup_engine, reference_store
 from app.modules.rule_designer.models import LookupConfig
 
 _ENCODINGS_TO_TRY = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
 _MAX_HEADER_SCAN_LINES = 2000
 
 _cache_lock = threading.Lock()
-_cache: Dict[str, Tuple[float, List[dict]]] = {}  # resolved path -> (mtime, rows)
+# Keyed by (resolved path, sheet_name, column_range) rather than just the
+# path — a CSV day file has only one reading of it, but an xlsx day file
+# can be read multiple distinct ways (two unrelated tables on one sheet,
+# selected by column_range), so two LOOKUP nodes sharing a day's xlsx file
+# with different sheet/column_range must never collide on the same cached
+# rows. sheet_name/column_range are both "" for CSV, same as today.
+_cache: Dict[Tuple[str, str, str], Tuple[float, List[dict]]] = {}
 
 # Built LookupIndex cache — the actual fix for the per-trade slowdown vs.
 # the legacy RiverIndex: that class builds its by_uti dict once per day
@@ -129,28 +135,54 @@ def _load_csv(path: str, key_columns: List[str]) -> List[dict]:
     raise last_err or ValueError(f"could not read {path}")
 
 
-def load_day_rows(template: str, day_value: Optional[str], key_columns: List[str]) -> List[dict]:
+def _resolved_format(path: str, source_format: Optional[str]) -> str:
+    """Explicit `source_format` wins; otherwise infer from the resolved
+    path's extension — same fallback reference_store.sync_now() uses for
+    a static reference file, so the two "which format is this" rules
+    never disagree."""
+    if source_format:
+        return source_format
+    return "xlsx" if path.lower().endswith((".xlsx", ".xlsm")) else "csv"
+
+
+def load_day_rows(template: str, day_value: Optional[str], key_columns: List[str], *,
+                   source_format: Optional[str] = None, sheet_name: Optional[str] = None,
+                   column_range: Optional[str] = None, password_env_var: Optional[str] = None,
+                   encrypted_password: Optional[str] = None) -> List[dict]:
     """Rows for the file `day_value` resolves to, cached per (resolved
     path, mtime) so repeated records for the same day — in one batch, or
     across dry runs — never re-read the file from disk. Returns []
     (never raises) when the day doesn't parse or the file doesn't exist —
     that record's lookup simply misses, handled the same as any other
-    unmatched record by lookup_engine.apply_lookup()'s missing_strategy."""
+    unmatched record by lookup_engine.apply_lookup()'s missing_strategy.
+
+    A day's file can be a password-protected .xlsx with two unrelated
+    tables on one sheet, exactly like a static reference file — the xlsx
+    keyword args are passed straight through to
+    reference_store.parse_xlsx_rows(), which already owns that logic;
+    this function only decides CSV vs xlsx and owns the per-day cache."""
     path = resolve_path(template, day_value)
     if path is None or not os.path.exists(path):
         return []
+    cache_key = (path, sheet_name or "", column_range or "")
     mtime = os.path.getmtime(path)
     with _cache_lock:
-        cached = _cache.get(path)
+        cached = _cache.get(cache_key)
         if cached is not None and cached[0] == mtime:
             return cached[1]
-    rows = _load_csv(path, key_columns)
+    if _resolved_format(path, source_format) == "xlsx":
+        rows = reference_store.parse_xlsx_rows(path, sheet_name, column_range, password_env_var, encrypted_password)
+    else:
+        rows = _load_csv(path, key_columns)
     with _cache_lock:
-        _cache[path] = (mtime, rows)
+        _cache[cache_key] = (mtime, rows)
     return rows
 
 
-def peek_columns(template: str, day_value: Optional[str]) -> Tuple[List[str], Optional[str]]:
+def peek_columns(template: str, day_value: Optional[str], *, source_format: Optional[str] = None,
+                  sheet_name: Optional[str] = None, column_range: Optional[str] = None,
+                  password_env_var: Optional[str] = None, encrypted_password: Optional[str] = None,
+                  password: Optional[str] = None) -> Tuple[List[str], Optional[str]]:
     """(columns, error) for the file `day_value` resolves to — reads just
     enough to find the header row and return its (whitespace-stripped)
     column names, so LookupConfigForm.jsx can populate join-key/enrich-
@@ -158,12 +190,29 @@ def peek_columns(template: str, day_value: Optional[str]) -> Tuple[List[str], Op
     blind (the free-text entry that caused the mismatched-header bug
     `_load_csv` now guards against). Never raises — a bad path/day/file
     is reported back as an error string, not an exception, since this is
-    a best-effort UX helper and the UI keeps its free-text fallback."""
+    a best-effort UX helper and the UI keeps its free-text fallback.
+
+    `password` is a one-shot, never-persisted preview password (e.g.
+    typed into the form before it's ever saved/encrypted) — distinct from
+    `encrypted_password`, which is the already-stored ciphertext for a
+    config that's been saved. Passed straight through to
+    reference_store.parse_xlsx_rows() via _resolve_xlsx_password()'s
+    precedence (password > encrypted_password > password_env_var)."""
     path = resolve_path(template, day_value)
     if path is None:
         return [], f"'{day_value}' is not a recognizable date"
     if not os.path.exists(path):
         return [], f"no file at '{path}'"
+    if _resolved_format(path, source_format) == "xlsx":
+        try:
+            rows = reference_store.parse_xlsx_rows(
+                path, sheet_name, column_range, password_env_var, encrypted_password, password,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort preview, report back as text
+            return [], str(exc)
+        if not rows:
+            return [], f"sheet has a header but no data rows yet for '{day_value}' — can't infer columns"
+        return list(rows[0].keys()), None
     last_err: Optional[Exception] = None
     for enc in _ENCODINGS_TO_TRY:
         try:
@@ -198,7 +247,14 @@ def get_day_index(template: str, day_value: Optional[str], config: LookupConfig)
         cached = _index_cache.get(cache_key)
         if cached is not None and cached[0] == mtime:
             return cached[1]
-    rows = load_day_rows(template, day_value, key_columns)
+    rows = load_day_rows(
+        template, day_value, key_columns,
+        source_format=config.day_partition_source_format,
+        sheet_name=config.day_partition_sheet_name,
+        column_range=config.day_partition_column_range,
+        password_env_var=config.day_partition_password_env_var,
+        encrypted_password=config.day_partition_encrypted_password,
+    )
     index = lookup_engine.build_index(rows, config)
     with _index_cache_lock:
         _index_cache[cache_key] = (mtime, index)

@@ -362,6 +362,25 @@ class LookupConfig(BaseModel):
     # "/mnt/river/%Y/%m/%d/All trades.csv", "/mnt/river/%Y/%B/trades_%Y%m%d.csv", etc.
     day_partition_path_template: Optional[str] = None
     day_partition_field: Optional[str] = None  # record field holding the COB date
+    # Day-partitioned counterparts of ReferenceFile's own xlsx fields (see
+    # reference_store.parse_xlsx_rows()) — a day's file can be a
+    # password-protected .xlsx with two unrelated tables side by side on
+    # one sheet, exactly like a static reference file can, just delivered
+    # as one dated file per day instead of one evolving one.
+    day_partition_source_format: Optional[str] = None  # None -> infer from the template's extension; "csv" | "xlsx"
+    day_partition_sheet_name: Optional[str] = None  # xlsx only
+    day_partition_column_range: Optional[str] = None  # xlsx only, e.g. "A:I"
+    day_partition_password_env_var: Optional[str] = None  # xlsx only, NAME of a server env var
+    day_partition_encrypted_password: Optional[str] = None  # xlsx only, Fernet ciphertext (secret_crypto.py) — never plaintext
+    # Write-only: a just-typed plaintext password, present only in a
+    # request body between the LookupConfigForm.jsx save and
+    # rule_store.upsert_rule() encrypting it into day_partition_
+    # encrypted_password above and clearing this back to None — the same
+    # one-shot shape ConfigureReferenceSourceBody.password has for a
+    # static reference file, just carried inline here since a LOOKUP
+    # node's day-partitioned config has no separate save endpoint of its
+    # own. Never read by the lookup engine itself.
+    day_partition_password: Optional[str] = None
 
     # self_group only: which field groups input rows together (e.g. a deal
     # reference or exception id), and which row within each group is the

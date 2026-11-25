@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Plus, Trash2 } from "lucide-react";
 import { rd } from "../api.js";
+import { useActor } from "../RoleContext.jsx";
 import ConditionBuilder, { newGroup, withCurrent } from "./ConditionBuilder.jsx";
+import ReferenceFileManager from "./ReferenceFileManager.jsx";
 import TransformOpFields, { transformHint } from "./TransformOpFields.jsx";
 
 // Visual lookup/enrichment designer (spec §11-15, §29): exact / composite /
@@ -12,8 +14,10 @@ import TransformOpFields, { transformHint } from "./TransformOpFields.jsx";
 // duplicate-key resolution strategy round out every mode.
 
 export default function LookupConfigForm({ lookup, onChange, sourceFields, meta }) {
+  const { actor, role, isAdmin } = useActor();
   const [refFiles, setRefFiles] = useState([]);
   const [refDetail, setRefDetail] = useState(null);
+  const [showRefManager, setShowRefManager] = useState(false);
   const isSelfGroup = lookup.lookup_type === "self_group";
   const groupByLabel = [lookup.group_by_field, ...(lookup.group_by_fields || [])].filter(Boolean).join(" + ") || "group";
   // Day-partitioned: the reference rows come from a file resolved per
@@ -22,6 +26,11 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
   // path-configured reference file — see day_partitioned_source.py.
   const canBeDayPartitioned = lookup.lookup_type === "exact" || lookup.lookup_type === "composite";
   const isDayPartitioned = canBeDayPartitioned && lookup.reference_source === "day_partitioned";
+  // The reference-file registry still matters for a day-partitioned
+  // lookup whose missing_strategy is "fallback" — the fallback file is
+  // always a registry file, independent of how the primary source works.
+  const needsRefRegistry = !isSelfGroup && (!isDayPartitioned || lookup.missing_strategy === "fallback");
+  const isXlsxDayTemplate = /\.(xlsx|xlsm)$/i.test((lookup.day_partition_path_template || "").trim());
 
   // Day-partitioned has no admin-known file to introspect ahead of time —
   // its columns are only knowable by actually reading some day's resolved
@@ -35,7 +44,8 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
   const [dayColumnsError, setDayColumnsError] = useState(null);
   const [loadingDayColumns, setLoadingDayColumns] = useState(false);
 
-  useEffect(() => { rd.referenceFiles().then((d) => setRefFiles(d.files || [])); }, []);
+  function reloadRefFiles() { return rd.referenceFiles().then((d) => setRefFiles(d.files || [])); }
+  useEffect(() => { reloadRefFiles(); }, []);
   useEffect(() => {
     if (lookup.reference_file_id && !isDayPartitioned) {
       rd.referenceFile(lookup.reference_file_id).then(setRefDetail).catch(() => setRefDetail(null));
@@ -52,7 +62,13 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
     if (!lookup.day_partition_path_template) return;
     setLoadingDayColumns(true);
     try {
-      const d = await rd.dayPartitionedColumns(lookup.day_partition_path_template, daySampleDate);
+      const d = await rd.dayPartitionedColumns(lookup.day_partition_path_template, daySampleDate, {
+        sourceFormat: lookup.day_partition_source_format,
+        sheetName: lookup.day_partition_sheet_name,
+        columnRange: lookup.day_partition_column_range,
+        passwordEnvVar: lookup.day_partition_password_env_var,
+        password: lookup.day_partition_password,
+      });
       setDayColumns(d.columns || []);
       setDayColumnsError(d.error || null);
     } catch (e) {
@@ -124,6 +140,12 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
             </select>
           </label>
         )}
+        {needsRefRegistry && (
+          <button type="button" className="btn btn--ghost btn--xs" style={{ alignSelf: "flex-end" }}
+                  onClick={() => setShowRefManager((v) => !v)}>
+            {showRefManager ? <ChevronDown size={13} /> : <ChevronRight size={13} />} Reference files
+          </button>
+        )}
         <label className="control"><span>Join type</span>
           <select value={lookup.join_type} onChange={(e) => set({ join_type: e.target.value })}>
             <option value="left">LEFT (default)</option>
@@ -133,6 +155,13 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
           </select>
         </label>
       </div>
+
+      {needsRefRegistry && showRefManager && (
+        <div className="lk-block">
+          <div className="lk-block-title">Reference files</div>
+          <ReferenceFileManager actor={actor} role={role} isAdmin={isAdmin} onChanged={reloadRefFiles} />
+        </div>
+      )}
 
       {isSelfGroup && (
         <div className="lk-block">
@@ -200,12 +229,38 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
               </select>
             </label>
           </div>
+          {isXlsxDayTemplate && (
+            <div className="lk-row" style={{ marginTop: 6 }}>
+              <label className="control" style={{ minWidth: 180 }}><span>Sheet name</span>
+                <input value={lookup.day_partition_sheet_name || ""}
+                       onChange={(e) => set({ day_partition_sheet_name: e.target.value })}
+                       placeholder="e.g. TP Market Data" /></label>
+              <label className="control" style={{ minWidth: 120 }}><span>Column range</span>
+                <input value={lookup.day_partition_column_range || ""}
+                       onChange={(e) => set({ day_partition_column_range: e.target.value })}
+                       placeholder="e.g. A:I" /></label>
+              <label className="control" style={{ minWidth: 260 }}><span>Password env var (optional)</span>
+                <input value={lookup.day_partition_password_env_var || ""}
+                       onChange={(e) => set({ day_partition_password_env_var: e.target.value })}
+                       placeholder="e.g. TP_MARKET_DATA_XLSX_PASSWORD"
+                       disabled={!!(lookup.day_partition_password || "").trim()} /></label>
+              <label className="control" style={{ minWidth: 180 }}><span>— or type a password</span>
+                <input type="password" value={lookup.day_partition_password || ""}
+                       onChange={(e) => set({ day_partition_password: e.target.value })}
+                       placeholder={lookup.day_partition_encrypted_password ? "unchanged (stored encrypted)" : "stored encrypted"}
+                       disabled={!!(lookup.day_partition_password_env_var || "").trim()} /></label>
+            </div>
+          )}
           <p className="empty-hint" style={{ marginTop: 6 }}>
             For each record, the Day field's value (e.g. OMRCTRADECLOSEOFBUSINESSDATE) is parsed as a date and
             the path template is rendered as a strftime pattern against it — standard codes anywhere in the
             path, including the filename: %Y (4-digit year), %y (2-digit year), %m (01-12), %b/%B (Sep/September),
             %d (01-31). E.g. "/mnt/river/%Y/%B/trades_%Y%m%d.csv" → "/mnt/river/2026/September/trades_20260924.csv".
             So each record is looked up against its own day's file, however that file's path is actually laid out.
+            A path ending in .xlsx/.xlsm is read as Excel — password-protected is fine (name a server env var, or
+            type a password directly in; it's encrypted before it's saved, never kept as plain text), and if one
+            sheet holds two separate tables side by side, a second LOOKUP node with the same path/sheet and the
+            other table's column range (e.g. "A:I" vs. "K:U") reads it as an independent source.
           </p>
           <div className="lk-row" style={{ marginTop: 10 }}>
             <label className="control"><span>Sample day (to read column names from)</span>

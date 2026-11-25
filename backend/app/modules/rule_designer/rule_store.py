@@ -14,8 +14,8 @@ import re
 import time
 from typing import List, Optional
 
-from app.modules.rule_designer import draft_store, product_registry, yaml_service
-from app.modules.rule_designer.models import LEGAL_TRANSITIONS, Rule, RuleStatus
+from app.modules.rule_designer import draft_store, product_registry, secret_crypto, yaml_service
+from app.modules.rule_designer.models import LEGAL_TRANSITIONS, NodeType, Rule, RuleStatus
 
 # Statuses whose working copy lives only on local disk — production
 # evaluation (product_engine.py) only ever reads PUBLISHED rules, so
@@ -108,7 +108,31 @@ def get_rule(rule_id: str, product: Optional[str] = None) -> Optional[Rule]:
     return None
 
 
+def _encrypt_day_partition_passwords(rule: Rule) -> None:
+    """A day-partitioned LOOKUP/ENRICHMENT node's xlsx password arrives
+    from LookupConfigForm.jsx as plaintext in `day_partition_password`
+    (see LookupConfig) — this is the one choke point every rule save goes
+    through (draft or published), so it's where that plaintext gets
+    turned into `day_partition_encrypted_password` and cleared, the same
+    way reference_store.configure_source() does for a static reference
+    file's own typed password. Mutates `rule` in place."""
+    for node in rule.workflow.nodes:
+        if node.type not in (NodeType.LOOKUP, NodeType.ENRICHMENT) or node.lookup is None:
+            continue
+        cfg = node.lookup
+        if not cfg.day_partition_password:
+            continue
+        if cfg.day_partition_password_env_var:
+            raise ValueError(
+                f"node '{node.label or node.id}': pick one: a day-partition password env var, "
+                "or a typed password — not both"
+            )
+        cfg.day_partition_encrypted_password = secret_crypto.encrypt_secret(cfg.day_partition_password)
+        cfg.day_partition_password = None
+
+
 def upsert_rule(rule: Rule, actor: str) -> Rule:
+    _encrypt_day_partition_passwords(rule)
     rule.updated_by = actor
     rule.updated_at = time.time()
     if rule.status in _LOCAL_STATUSES:

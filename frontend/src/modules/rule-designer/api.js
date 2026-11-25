@@ -44,8 +44,15 @@ export const rd = {
     }),
   syncReference: (id, actor) => post(`/reference-files/${id}/sync`, { actor }),
   deleteReference: (id, actor) => del(`/reference-files/${id}`, { actor }),
-  dayPartitionedColumns: (pathTemplate, dayValue) =>
-    get("/lookup/day-partitioned/columns", { path_template: pathTemplate, day_value: dayValue }),
+  dayPartitionedColumns: (pathTemplate, dayValue, xlsxOpts = {}) =>
+    post("/lookup/day-partitioned/columns", {
+      path_template: pathTemplate, day_value: dayValue,
+      source_format: xlsxOpts.sourceFormat || null,
+      sheet_name: xlsxOpts.sheetName || null,
+      column_range: xlsxOpts.columnRange || null,
+      password_env_var: xlsxOpts.passwordEnvVar || null,
+      password: xlsxOpts.password || null,
+    }),
 
   rules: (product) => get("/rules", { product }),
   rule: (id) => get(`/rules/${id}`),

@@ -545,16 +545,37 @@ async def delete_reference_file(file_id: str, actor: str = "unknown"):
     return {"deleted": True}
 
 
-@router.get("/lookup/day-partitioned/columns")
-async def day_partitioned_columns(path_template: str, day_value: str):
+class DayPartitionedColumnsBody(BaseModel):
+    path_template: str
+    day_value: str
+    # xlsx-only; all optional, same meaning as LookupConfig's matching
+    # day_partition_* fields. `password` is a one-shot preview password
+    # (e.g. typed before the node's config has even been saved) — it's
+    # used for this single read and never stored or logged, distinct from
+    # password_env_var/an already-saved encrypted password.
+    source_format: Optional[str] = None
+    sheet_name: Optional[str] = None
+    column_range: Optional[str] = None
+    password_env_var: Optional[str] = None
+    password: Optional[str] = None
+
+
+@router.post("/lookup/day-partitioned/columns")
+async def day_partitioned_columns(body: DayPartitionedColumnsBody):
     """Lets LookupConfigForm.jsx populate a day-partitioned LOOKUP node's
     join-key/enrich-field pickers from the real column names in the
     resolved day's file, instead of the admin hand-typing a column name
-    blind — see day_partitioned_source.peek_columns(). Read-only, no
-    _require() gate (matches every other read-only GET in this module,
-    e.g. /datasets/{id}/schema) — never raises, errors come back as a
-    field in the body so the UI can fall back to free text."""
-    columns, error = day_partitioned_source.peek_columns(path_template, day_value)
+    blind — see day_partitioned_source.peek_columns(). POST rather than
+    GET specifically so a typed preview password never has to ride in a
+    URL query string. Read-only, no _require() gate (matches every other
+    read-only GET in this module, e.g. /datasets/{id}/schema) — never
+    raises, errors come back as a field in the body so the UI can fall
+    back to free text."""
+    columns, error = day_partitioned_source.peek_columns(
+        body.path_template, body.day_value, source_format=body.source_format,
+        sheet_name=body.sheet_name, column_range=body.column_range,
+        password_env_var=body.password_env_var, password=body.password,
+    )
     return {"columns": columns, "error": error}
 
 
@@ -619,7 +640,10 @@ async def create_rule(body: CreateRuleBody):
     body.rule.setdefault("created_by", body.actor)
     body.rule.setdefault("updated_by", body.actor)
     rule = Rule.model_validate(body.rule)
-    rule_store.upsert_rule(rule, body.actor)
+    try:
+        rule_store.upsert_rule(rule, body.actor)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     audit_service.log(body.actor, "CREATE", role=body.role.value, rule_id=rule.rule_id,
                        rule_name=rule.name, new_version=rule.version)
     return rule.model_dump(mode="json")
@@ -652,7 +676,10 @@ async def update_rule(rule_id: str, body: UpdateRuleBody):
         rule.status = RuleStatus.DRAFT
     else:
         rule.fast_track_eligible = False
-    rule_store.upsert_rule(rule, body.actor)
+    try:
+        rule_store.upsert_rule(rule, body.actor)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
     audit_service.log(body.actor, "EDIT", role=body.role.value, rule_id=rule.rule_id,
                        rule_name=rule.name, previous_version=prev_version, new_version=rule.version)
     return rule.model_dump(mode="json")
