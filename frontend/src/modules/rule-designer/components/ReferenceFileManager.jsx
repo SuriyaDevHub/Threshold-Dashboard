@@ -35,7 +35,7 @@ export default function ReferenceFileManager({ actor, role, isAdmin, onChanged }
   const [refColumnRange, setRefColumnRange] = useState("");
   const [refPasswordEnvVar, setRefPasswordEnvVar] = useState("");
   const [refPassword, setRefPassword] = useState("");
-  const isXlsxPath = /\.(xlsx|xlsm)$/i.test(refPath.trim());
+  const isXlsxPath = /\.(xlsx|xlsm|xlsb)$/i.test(refPath.trim());
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState(null);
 
@@ -228,7 +228,7 @@ export default function ReferenceFileManager({ actor, role, isAdmin, onChanged }
         Uploading (or syncing) with the same name creates a new immutable version — published rules keep
         referencing the version they were tested against. A path-configured file is re-read from that path
         on "Sync now" or, if an auto-refresh interval is set, automatically in the background. A path ending
-        in .xlsx/.xlsm is read as Excel — password-protected is fine: either name a server-side environment
+        in .xlsx/.xlsm/.xlsb is read as Excel — password-protected is fine: either name a server-side environment
         variable holding the password, or type one directly in (it's encrypted before it's stored, never kept
         as plain text). If one sheet holds two separate tables side by side, configure a path twice with the
         same path/sheet and a different column range (e.g. "A:I" and "K:U") and name each one — they become

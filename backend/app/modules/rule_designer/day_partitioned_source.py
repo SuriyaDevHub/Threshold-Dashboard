@@ -137,12 +137,11 @@ def _load_csv(path: str, key_columns: List[str]) -> List[dict]:
 
 def _resolved_format(path: str, source_format: Optional[str]) -> str:
     """Explicit `source_format` wins; otherwise infer from the resolved
-    path's extension — same fallback reference_store.sync_now() uses for
-    a static reference file, so the two "which format is this" rules
-    never disagree."""
-    if source_format:
-        return source_format
-    return "xlsx" if path.lower().endswith((".xlsx", ".xlsm")) else "csv"
+    path's extension via reference_store._infer_excel_format() — the
+    exact same rule a static reference file uses, reused rather than
+    duplicated so the two "which format is this" lists (.xlsx/.xlsm/
+    .xlsb) can never drift apart."""
+    return source_format or reference_store._infer_excel_format(path)  # noqa: SLF001
 
 
 def load_day_rows(template: str, day_value: Optional[str], key_columns: List[str], *,
@@ -156,11 +155,12 @@ def load_day_rows(template: str, day_value: Optional[str], key_columns: List[str
     that record's lookup simply misses, handled the same as any other
     unmatched record by lookup_engine.apply_lookup()'s missing_strategy.
 
-    A day's file can be a password-protected .xlsx with two unrelated
-    tables on one sheet, exactly like a static reference file — the xlsx
-    keyword args are passed straight through to
+    A day's file can be a password-protected .xlsx/.xlsm/.xlsb with two
+    unrelated tables on one sheet, exactly like a static reference file —
+    the Excel-only keyword args are passed straight through to
     reference_store.parse_xlsx_rows(), which already owns that logic;
-    this function only decides CSV vs xlsx and owns the per-day cache."""
+    this function only decides CSV vs Excel (and which Excel format) and
+    owns the per-day cache."""
     path = resolve_path(template, day_value)
     if path is None or not os.path.exists(path):
         return []
@@ -170,8 +170,11 @@ def load_day_rows(template: str, day_value: Optional[str], key_columns: List[str
         cached = _cache.get(cache_key)
         if cached is not None and cached[0] == mtime:
             return cached[1]
-    if _resolved_format(path, source_format) == "xlsx":
-        rows = reference_store.parse_xlsx_rows(path, sheet_name, column_range, password_env_var, encrypted_password)
+    fmt = _resolved_format(path, source_format)
+    if fmt != "csv":
+        rows = reference_store.parse_xlsx_rows(
+            path, sheet_name, column_range, password_env_var, encrypted_password, source_format=fmt,
+        )
     else:
         rows = _load_csv(path, key_columns)
     with _cache_lock:
@@ -203,10 +206,12 @@ def peek_columns(template: str, day_value: Optional[str], *, source_format: Opti
         return [], f"'{day_value}' is not a recognizable date"
     if not os.path.exists(path):
         return [], f"no file at '{path}'"
-    if _resolved_format(path, source_format) == "xlsx":
+    fmt = _resolved_format(path, source_format)
+    if fmt != "csv":
         try:
             rows = reference_store.parse_xlsx_rows(
                 path, sheet_name, column_range, password_env_var, encrypted_password, password,
+                source_format=fmt,
             )
         except Exception as exc:  # noqa: BLE001 — best-effort preview, report back as text
             return [], str(exc)

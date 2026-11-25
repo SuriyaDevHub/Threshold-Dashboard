@@ -30,7 +30,7 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
   // lookup whose missing_strategy is "fallback" — the fallback file is
   // always a registry file, independent of how the primary source works.
   const needsRefRegistry = !isSelfGroup && (!isDayPartitioned || lookup.missing_strategy === "fallback");
-  const isXlsxDayTemplate = /\.(xlsx|xlsm)$/i.test((lookup.day_partition_path_template || "").trim());
+  const isXlsxDayTemplate = /\.(xlsx|xlsm|xlsb)$/i.test((lookup.day_partition_path_template || "").trim());
 
   // Day-partitioned has no admin-known file to introspect ahead of time —
   // its columns are only knowable by actually reading some day's resolved
@@ -257,7 +257,7 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
             path, including the filename: %Y (4-digit year), %y (2-digit year), %m (01-12), %b/%B (Sep/September),
             %d (01-31). E.g. "/mnt/river/%Y/%B/trades_%Y%m%d.csv" → "/mnt/river/2026/September/trades_20260924.csv".
             So each record is looked up against its own day's file, however that file's path is actually laid out.
-            A path ending in .xlsx/.xlsm is read as Excel — password-protected is fine (name a server env var, or
+            A path ending in .xlsx/.xlsm/.xlsb is read as Excel — password-protected is fine (name a server env var, or
             type a password directly in; it's encrypted before it's saved, never kept as plain text), and if one
             sheet holds two separate tables side by side, a second LOOKUP node with the same path/sheet and the
             other table's column range (e.g. "A:I" vs. "K:U") reads it as an independent source.

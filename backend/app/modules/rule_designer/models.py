@@ -367,7 +367,7 @@ class LookupConfig(BaseModel):
     # password-protected .xlsx with two unrelated tables side by side on
     # one sheet, exactly like a static reference file can, just delivered
     # as one dated file per day instead of one evolving one.
-    day_partition_source_format: Optional[str] = None  # None -> infer from the template's extension; "csv" | "xlsx"
+    day_partition_source_format: Optional[str] = None  # None -> infer from the template's extension; "csv" | "xlsx" | "xlsb"
     day_partition_sheet_name: Optional[str] = None  # xlsx only
     day_partition_column_range: Optional[str] = None  # xlsx only, e.g. "A:I"
     day_partition_password_env_var: Optional[str] = None  # xlsx only, NAME of a server env var
@@ -626,7 +626,7 @@ class ReferenceFile(BaseModel):
     # --- xlsx-specific path-source config. All None (every file saved
     # before this existed, and every CSV path source) => behave exactly as
     # a CSV source, same as today. See reference_store.parse_xlsx_rows(). ---
-    source_format: Optional[str] = None       # None -> infer from source_path's extension; "csv" | "xlsx" to force
+    source_format: Optional[str] = None       # None -> infer from source_path's extension; "csv" | "xlsx" | "xlsb" to force
     sheet_name: Optional[str] = None          # xlsx only; None -> the workbook's one sheet (error if >1 and unset)
     column_range: Optional[str] = None        # xlsx only, e.g. "A:I"; None -> whole sheet
     # The NAME of a server-side env var holding the password — never the

@@ -14,3 +14,5 @@ moto[s3]>=5.0
 # workbooks read from a network share) ---
 openpyxl>=3.1
 msoffcrypto-tool>=5.3
+# --- Rule Designer: .xlsb (Excel Binary Workbook) support alongside xlsx ---
+pyxlsb>=1.0

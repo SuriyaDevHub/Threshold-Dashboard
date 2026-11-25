@@ -1626,6 +1626,168 @@ def test_reference_file_api_response_never_contains_the_ciphertext(tmp_path, mon
     assert dumped["password_configured"] is True
 
 
+# --------------------------------------------------------------------------
+# .xlsb (Excel Binary Workbook) support — a different binary format
+# openpyxl cannot open at all, read instead via pyxlsb. No real .xlsb
+# binary was available to author for these tests (pyxlsb is read-only,
+# and the available LibreOffice build has no .xlsb export filter), so
+# `pyxlsb.open_workbook` is monkeypatched with a fake built from pyxlsb's
+# own Cell(r, c, v) namedtuple shape — this exercises reference_store.py's
+# OWN glue code (sheet resolution, column_range slicing, blank/header
+# handling) against pyxlsb's real API, the same trust boundary already
+# drawn around openpyxl/msoffcrypto (trusted to parse real bytes
+# correctly; not re-tested here).
+# --------------------------------------------------------------------------
+
+def _fake_xlsb_workbook(sheets: dict):
+    """`sheets` maps sheet name -> grid (list of rows, each a list of raw
+    cell values, None for blank) — mirrors what pyxlsb.open_workbook()
+    returns: `.sheets` is a plain name list, `.get_sheet()` resolves a
+    case-insensitive name or a 1-based index, and `.rows()` yields each
+    row as a list of `Cell(r, c, v)` namedtuples already indexed by
+    absolute 0-based column number."""
+    from pyxlsb.worksheet import Cell
+
+    class _FakeSheet:
+        def __init__(self, name, grid):
+            self.name = name
+            self._grid = grid
+            self.closed = False
+
+        def rows(self, sparse=False):
+            for r, row in enumerate(self._grid):
+                yield [Cell(r, c, v) for c, v in enumerate(row)]
+
+        def close(self):
+            self.closed = True
+
+    class _FakeWorkbook:
+        def __init__(self):
+            self.closed = False
+
+        @property
+        def sheets(self):
+            return list(sheets.keys())
+
+        def get_sheet(self, idx):
+            if isinstance(idx, str):
+                for name in sheets:
+                    if name.lower() == idx.lower():
+                        return _FakeSheet(name, sheets[name])
+                raise IndexError(idx)
+            name = list(sheets.keys())[idx - 1]
+            return _FakeSheet(name, sheets[name])
+
+        def close(self):
+            self.closed = True
+
+    return _FakeWorkbook()
+
+
+def test_parse_xlsx_rows_xlsb_two_tables_via_column_range(monkeypatch):
+    import pyxlsb
+
+    grid = {
+        "TP Market Data": [
+            ["Site", "COF", None, "Site", "VOF"],
+            ["LDN", 1.55, None, "LDN", 9.11],
+            ["NYC", 2.35, None, "NYC", 9.22],
+        ],
+    }
+    monkeypatch.setattr(pyxlsb, "open_workbook", lambda source: _fake_xlsb_workbook(grid))
+
+    left = reference_store.parse_xlsx_rows("tp.xlsb", "TP Market Data", "A:B", source_format="xlsb")
+    right = reference_store.parse_xlsx_rows("tp.xlsb", "TP Market Data", "D:E", source_format="xlsb")
+    assert left == [{"Site": "LDN", "COF": 1.55}, {"Site": "NYC", "COF": 2.35}]
+    assert right == [{"Site": "LDN", "VOF": 9.11}, {"Site": "NYC", "VOF": 9.22}]
+
+
+def test_parse_xlsx_rows_infers_xlsb_from_extension(monkeypatch):
+    import pyxlsb
+
+    grid = {"Sheet1": [["A", "B"], [1, 2]]}
+    monkeypatch.setattr(pyxlsb, "open_workbook", lambda source: _fake_xlsb_workbook(grid))
+
+    rows = reference_store.parse_xlsx_rows("whatever.xlsb", "Sheet1", None)  # no source_format given
+    assert rows == [{"A": 1, "B": 2}]
+
+
+def test_parse_xlsx_rows_xlsb_unknown_sheet_lists_real_sheets(monkeypatch):
+    import pyxlsb
+
+    grid = {"Sheet1": [["A"], [1]]}
+    monkeypatch.setattr(pyxlsb, "open_workbook", lambda source: _fake_xlsb_workbook(grid))
+
+    with pytest.raises(ValueError, match="Sheet1"):
+        reference_store.parse_xlsx_rows("x.xlsb", "NoSuchSheet", None, source_format="xlsb")
+
+
+def test_parse_xlsx_rows_xlsb_blank_cells_normalize_to_empty_string(monkeypatch):
+    import pyxlsb
+
+    grid = {"Sheet1": [["UTI", "Notional"], ["ABC", None], [None, None]]}
+    monkeypatch.setattr(pyxlsb, "open_workbook", lambda source: _fake_xlsb_workbook(grid))
+
+    rows = reference_store.parse_xlsx_rows("x.xlsb", "Sheet1", None, source_format="xlsb")
+    assert rows == [{"UTI": "ABC", "Notional": ""}]  # fully-blank second row skipped
+
+
+def test_sync_now_xlsb_password_protected_decrypts_then_parses(tmp_path, monkeypatch):
+    """The password-resolve-and-decrypt step is shared, format-agnostic
+    code already covered by the xlsx password tests above — this test's
+    job is only to confirm that decrypted output actually reaches the
+    xlsb reader branch (not just the xlsx one), by faking both
+    msoffcrypto's decrypt and pyxlsb's read."""
+    import msoffcrypto
+    import pyxlsb
+
+    grid = {"Sheet1": [["Currency", "Threshold"], ["USD", 2.0]]}
+    monkeypatch.setattr(pyxlsb, "open_workbook", lambda source: _fake_xlsb_workbook(grid))
+
+    class _FakeOfficeFile:
+        def __init__(self, fh):
+            pass
+
+        def load_key(self, password, verify_password):
+            assert password == "secret123"
+
+        def decrypt(self, out):
+            out.write(b"irrelevant-bytes")  # content doesn't matter — pyxlsb.open_workbook is faked too
+
+    monkeypatch.setattr(msoffcrypto, "OfficeFile", _FakeOfficeFile)
+    monkeypatch.setenv("TEST_XLSB_PW", "secret123")
+
+    xlsb_path = tmp_path / "ccy.xlsb"
+    xlsb_path.write_bytes(b"not-really-encrypted-bytes")  # only ever opened, never really parsed
+
+    rows = reference_store.parse_xlsx_rows(str(xlsb_path), "Sheet1", None, password_env_var="TEST_XLSB_PW")
+    assert rows == [{"Currency": "USD", "Threshold": 2.0}]
+
+
+def test_get_day_index_reads_xlsb_via_extension_inference(tmp_path, monkeypatch):
+    import pyxlsb
+
+    grid = {"TP Market Data": [["Site", "COF"], ["LDN", 1.55]]}
+    monkeypatch.setattr(pyxlsb, "open_workbook", lambda source: _fake_xlsb_workbook(grid))
+
+    day_dir = tmp_path / "20261124"
+    day_dir.mkdir()
+    (day_dir / "TP Market Data.xlsb").write_bytes(b"fake-xlsb-bytes")  # content irrelevant, reader is faked
+    template = str(tmp_path / "%Y%m%d" / "TP Market Data.xlsb")
+
+    cfg = LookupConfig(
+        lookup_type=LookupType.EXACT, reference_source="day_partitioned",
+        day_partition_path_template=template, day_partition_field="d",
+        day_partition_sheet_name="TP Market Data", day_partition_column_range="A:B",
+        join_keys=[{"source": "site", "reference": "Site"}],
+        fields=[LookupFieldMap(source_column="COF", output_field="CofRate")],
+    )
+    idx = day_partitioned_source.get_day_index(template, "2026-11-24", cfg)
+    outcome = lookup_engine.apply_lookup({"site": "LDN"}, idx)
+    assert outcome.status == "matched"
+    assert outcome.fields_added == {"CofRate": 1.55}
+
+
 def _rule_using_ref(rule_id, file_id):
     return _rule(rule_id=rule_id, name="Uses ref", workflow=Workflow(nodes=[
         WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=LookupConfig(
