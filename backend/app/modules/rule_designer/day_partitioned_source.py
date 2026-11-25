@@ -242,7 +242,7 @@ def get_day_index(template: str, day_value: Optional[str], config: LookupConfig)
     first-build shape RiverIndex already has. Never raises — a day that
     doesn't parse or has no file yields an index built from []."""
     path = resolve_path(template, day_value)
-    key_columns = [jk["reference"] for jk in config.join_keys]
+    key_columns = lookup_engine.reference_columns(config.join_keys)
     if path is None or not os.path.exists(path):
         return lookup_engine.build_index([], config)
     mtime = os.path.getmtime(path)

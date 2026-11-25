@@ -102,6 +102,29 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
     set({ join_keys: (lookup.join_keys || []).filter((_, idx) => idx !== i) });
   }
 
+  // A join key's reference side is normally a single column name, but can
+  // be a list of column names to concatenate (no separator) — a reference
+  // file that splits what the dataset treats as one logical field across
+  // two (or more) of its own columns. These helpers keep that collapsed
+  // back down to a plain string whenever there's only one column, so an
+  // ordinary (non-composite) join key's saved shape never changes.
+  function refValueAsArray(jk) {
+    return Array.isArray(jk.reference) ? jk.reference : [jk.reference ?? ""];
+  }
+  function updateJoinKeyReferenceColumn(i, ri, value) {
+    const arr = [...refValueAsArray((lookup.join_keys || [])[i])];
+    arr[ri] = value;
+    updateJoinKey(i, { reference: arr.length === 1 ? arr[0] : arr });
+  }
+  function addJoinKeyReferenceColumn(i) {
+    const arr = [...refValueAsArray((lookup.join_keys || [])[i]), dayOrRefColumns[0] || ""];
+    updateJoinKey(i, { reference: arr });
+  }
+  function removeJoinKeyReferenceColumn(i, ri) {
+    const arr = refValueAsArray((lookup.join_keys || [])[i]).filter((_, idx) => idx !== ri);
+    updateJoinKey(i, { reference: arr.length === 1 ? arr[0] : arr });
+  }
+
   function addFieldMap() {
     set({ fields: [...(lookup.fields || []), { source_column: enrichColumns[0] || "", output_field: "" }] });
   }
@@ -294,16 +317,36 @@ export default function LookupConfigForm({ lookup, onChange, sourceFields, meta 
                   ))}
                 </select>
                 <span className="mono">=</span>
-                {isDayPartitioned && dayColumns.length === 0 ? (
-                  <input value={jk.reference || ""} placeholder="e.g. UTI"
-                         onChange={(e) => updateJoinKey(i, { reference: e.target.value })} />
-                ) : (
-                  <select value={jk.reference} onChange={(e) => updateJoinKey(i, { reference: e.target.value })}>
-                    {dayOrRefColumns.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
-                )}
+                {refValueAsArray(jk).map((refCol, ri) => (
+                  <span key={ri} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    {ri > 0 && <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>+</span>}
+                    {isDayPartitioned && dayColumns.length === 0 ? (
+                      <input value={refCol || ""} placeholder="e.g. UTI" style={{ width: 110 }}
+                             onChange={(e) => updateJoinKeyReferenceColumn(i, ri, e.target.value)} />
+                    ) : (
+                      <select value={refCol} onChange={(e) => updateJoinKeyReferenceColumn(i, ri, e.target.value)}>
+                        {dayOrRefColumns.map((c) => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                    )}
+                    {refValueAsArray(jk).length > 1 && (
+                      <button className="icon-btn" onClick={() => removeJoinKeyReferenceColumn(i, ri)}>
+                        <Trash2 size={11} />
+                      </button>
+                    )}
+                  </span>
+                ))}
+                <button className="btn btn--ghost btn--xs" onClick={() => addJoinKeyReferenceColumn(i)}>
+                  + combine column
+                </button>
                 <button className="icon-btn" onClick={() => removeJoinKey(i)}><Trash2 size={13} /></button>
               </div>
+              {refValueAsArray(jk).length > 1 && (
+                <p className="empty-hint" style={{ marginTop: 4 }}>
+                  Matches against these reference columns' values concatenated together, plain (no separator) —
+                  e.g. {refValueAsArray(jk).join(" + ")} — for a reference file that splits one logical key part
+                  across more than one of its own columns.
+                </p>
+              )}
               <div className="lk-row" style={{ marginTop: 6, marginBottom: 0 }}>
                 <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>transform</span>
                 <TransformOpFields transform={jk.transform} onChange={(t) => updateJoinKey(i, { transform: t })} allowNone />

@@ -341,6 +341,45 @@ def test_join_key_without_transform_is_unaffected():
     assert out.status == "missing_null"  # case mismatch, no transform configured -> no match
 
 
+def test_lookup_composite_reference_key_concatenates_two_columns():
+    # The reference file splits what the dataset treats as one logical
+    # "Curve" value across two of its own columns — the join key's
+    # reference side names both, concatenated (no separator) to
+    # reconstruct the value the source field actually holds.
+    ref_rows = [{"CcyCode": "USD", "CurveType": "OIS", "Threshold": 2.0},
+                {"CcyCode": "EUR", "CurveType": "OIS", "Threshold": 3.0}]
+    cfg = _cfg(join_keys=[{"source": "curve", "reference": ["CcyCode", "CurveType"]}])
+    idx = lookup_engine.build_index(ref_rows, cfg)
+    out = lookup_engine.apply_lookup({"curve": "USDOIS"}, idx)
+    assert out.status == "matched" and out.fields_added["Threshold"] == 2.0
+    miss = lookup_engine.apply_lookup({"curve": "GBPOIS"}, idx)
+    assert miss.status == "missing_null"
+
+
+def test_lookup_composite_reference_key_blank_column_contributes_empty_string():
+    ref_rows = [{"CcyCode": "USD", "CurveType": None, "Threshold": 2.0}]
+    cfg = _cfg(join_keys=[{"source": "curve", "reference": ["CcyCode", "CurveType"]}])
+    idx = lookup_engine.build_index(ref_rows, cfg)
+    out = lookup_engine.apply_lookup({"curve": "USD"}, idx)  # not "USDNone"
+    assert out.status == "matched" and out.fields_added["Threshold"] == 2.0
+
+
+def test_lookup_composite_reference_key_transform_applies_to_concatenated_value():
+    ref_rows = [{"CcyCode": "usd", "CurveType": "ois", "Threshold": 2.0}]
+    cfg = _cfg(join_keys=[{"source": "curve", "reference": ["CcyCode", "CurveType"], "transform": {"op": "upper"}}])
+    idx = lookup_engine.build_index(ref_rows, cfg)
+    out = lookup_engine.apply_lookup({"curve": "USDOIS"}, idx)
+    assert out.status == "matched" and out.fields_added["Threshold"] == 2.0
+
+
+def test_reference_columns_flattens_plain_and_composite_join_keys():
+    join_keys = [
+        {"source": "a", "reference": "A"},
+        {"source": "b", "reference": ["B1", "B2"]},
+    ]
+    assert lookup_engine.reference_columns(join_keys) == ["A", "B1", "B2"]
+
+
 def test_lookup_range():
     ref_rows = [{"Risk_Group": "LOW", "Min": 0, "Max": 2}, {"Risk_Group": "MEDIUM", "Min": 2, "Max": 5},
                 {"Risk_Group": "HIGH", "Min": 5, "Max": 100}]
@@ -962,6 +1001,28 @@ def test_get_day_index_never_shares_cache_across_different_field_mappings(tmp_pa
     assert outcome_b.fields_added == {"RuleB_Limit": "50"}
 
 
+def test_get_day_index_composite_reference_key_end_to_end(tmp_path):
+    # The day's file splits what the dataset treats as one "Curve" value
+    # across two of its own columns — reference_columns() flattening both
+    # into the CSV header-scan's key_columns is what makes this resolve
+    # at all (the old `[jk["reference"] for jk in ...]` would have tried
+    # to .upper() a list and crashed _find_header_line()).
+    day_dir = tmp_path / "20260924"
+    day_dir.mkdir()
+    (day_dir / "TP Curve.csv").write_text("CcyCode,CurveType,Rate\nUSD,OIS,1.55\nEUR,OIS,2.25\n")
+    template = str(tmp_path / "%Y%m%d" / "TP Curve.csv")
+    cfg = LookupConfig(
+        lookup_type=LookupType.EXACT, reference_source="day_partitioned",
+        day_partition_path_template=template, day_partition_field="d",
+        join_keys=[{"source": "curve", "reference": ["CcyCode", "CurveType"]}],
+        fields=[LookupFieldMap(source_column="Rate", output_field="Rate")],
+    )
+    idx = day_partitioned_source.get_day_index(template, "2026-09-24", cfg)
+    outcome = lookup_engine.apply_lookup({"curve": "USDOIS"}, idx)
+    assert outcome.status == "matched"
+    assert outcome.fields_added == {"Rate": "1.55"}
+
+
 # --------------------------------------------------------------------------
 # day_partitioned_source — xlsx support (a day's file can be a password-
 # protected .xlsx with two unrelated tables on one sheet, exactly like a
@@ -1294,6 +1355,33 @@ def test_validation_workflow_flags_unavailable_field():
     result = validation_service.validate_workflow(rule, {})
     assert not result.ok
     assert any("Nonexistent" in e for e in result.errors)
+
+
+def test_validate_lookup_config_composite_reference_key_reports_missing_column():
+    ref = reference_store.upload_version("curve_ref_missing", [{"CcyCode": "USD", "Threshold": 2.0}], "tester")
+    cfg = LookupConfig(
+        lookup_type=LookupType.EXACT, reference_file_id=ref.id,
+        join_keys=[{"source": "curve", "reference": ["CcyCode", "CurveType"]}],  # CurveType doesn't exist
+        fields=[LookupFieldMap(source_column="Threshold", output_field="Threshold")],
+    )
+    result = validation_service.ValidationResult()
+    validation_service.validate_lookup_config("Node", cfg, result)
+    assert not result.ok
+    assert any("CurveType" in e for e in result.errors)
+
+
+def test_validate_lookup_config_composite_reference_key_passes_when_both_columns_exist():
+    ref = reference_store.upload_version(
+        "curve_ref_ok", [{"CcyCode": "USD", "CurveType": "OIS", "Threshold": 2.0}], "tester",
+    )
+    cfg = LookupConfig(
+        lookup_type=LookupType.EXACT, reference_file_id=ref.id,
+        join_keys=[{"source": "curve", "reference": ["CcyCode", "CurveType"]}],
+        fields=[LookupFieldMap(source_column="Threshold", output_field="Threshold")],
+    )
+    result = validation_service.ValidationResult()
+    validation_service.validate_lookup_config("Node", cfg, result)
+    assert result.ok
 
 
 def test_validation_between_requires_two_values():

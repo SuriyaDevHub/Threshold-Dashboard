@@ -58,16 +58,31 @@ def cache_signature(config: LookupConfig) -> str:
 
 
 def _key_tuple(row: dict, join_keys: List[Dict[str, Any]], side: str) -> Tuple[Any, ...]:
-    """side: "source" or "reference" — which column name each join key
-    entry supplies to pull the raw value out of `row`. A join key's
-    optional `transform` is applied on BOTH sides (building the
-    reference index and matching an incoming record) so the two stay
-    comparable however the source/reference values are normalized —
-    e.g. an "upper" transform makes "hkfxo_052" match "HKFXO_052"
-    regardless of which side is actually in mixed case."""
+    """side: "source" or "reference" — which column name(s) each join key
+    entry supplies to pull the raw value out of `row`. `jk[side]` is
+    normally a single column name, but MAY be a list of column names —
+    a composite reference key, for a reference file that splits what the
+    other side treats as one logical field across two (or more) of its
+    own columns (e.g. the dataset's single "Curve" value has to match
+    reference columns A and B concatenated together, because the
+    external file has no single column holding that combined value).
+    Concatenation is plain (no separator) and blank/missing columns
+    contribute "" rather than the literal string "None".
+
+    A join key's optional `transform` is applied on BOTH sides (building
+    the reference index and matching an incoming record) so the two stay
+    comparable however the source/reference values are normalized — e.g.
+    an "upper" transform makes "hkfxo_052" match "HKFXO_052" regardless
+    of which side is actually in mixed case. For a composite side,
+    transform runs once against the already-concatenated value, not
+    separately per column."""
     vals = []
     for jk in join_keys:
-        raw = row.get(jk[side])
+        col = jk[side]
+        if isinstance(col, list):
+            raw = "".join("" if (v := row.get(c)) is None else str(v) for c in col)
+        else:
+            raw = row.get(col)
         transform = jk.get("transform")
         if transform:
             try:
@@ -76,6 +91,24 @@ def _key_tuple(row: dict, join_keys: List[Dict[str, Any]], side: str) -> Tuple[A
                 pass  # keep the raw value rather than fail the whole lookup
         vals.append(str(raw))
     return tuple(vals)
+
+
+def reference_columns(join_keys: List[Dict[str, Any]]) -> List[str]:
+    """Every individual reference-side column name a lookup's join keys
+    touch, flattened — a composite (list) reference like
+    ["ColumnA", "ColumnB"] contributes both names, alongside every plain
+    single-column entry. For code that needs the flat set of real
+    reference-file columns a lookup depends on (CSV preamble-scanning
+    header detection, validation's column-existence checks), never for
+    the actual per-row key value itself — that's _key_tuple()'s job."""
+    cols: List[str] = []
+    for jk in join_keys:
+        ref = jk.get("reference")
+        if isinstance(ref, list):
+            cols.extend(ref)
+        elif ref:
+            cols.append(ref)
+    return cols
 
 
 def _to_num(v: Any) -> Optional[float]:

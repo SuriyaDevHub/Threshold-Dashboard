@@ -152,8 +152,19 @@ def validate_lookup_config(node_label: str, lookup_cfg, result: ValidationResult
         if not lookup_cfg.join_keys:
             result.errors.append(f"{node_label}: no join keys defined")
         for jk in lookup_cfg.join_keys:
-            if jk.get("reference") not in ref_cols:
-                result.errors.append(f"{node_label}: reference has no column '{jk.get('reference')}'")
+            ref = jk.get("reference")
+            # A composite reference key (see lookup_engine._key_tuple()) names
+            # 2+ reference-file columns to concatenate — every one of them
+            # has to actually exist, not just the first.
+            if isinstance(ref, list):
+                missing = [c for c in ref if c not in ref_cols]
+                if missing:
+                    result.errors.append(
+                        f"{node_label}: reference has no column "
+                        f"'{missing[0] if len(missing) == 1 else missing}'"
+                    )
+            elif ref not in ref_cols:
+                result.errors.append(f"{node_label}: reference has no column '{ref}'")
     elif lookup_cfg.lookup_type.value == "range":
         for c in (lookup_cfg.range_low_column, lookup_cfg.range_high_column):
             if c not in ref_cols:
