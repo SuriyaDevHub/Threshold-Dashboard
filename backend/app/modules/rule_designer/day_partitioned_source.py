@@ -20,6 +20,7 @@ from __future__ import annotations
 import csv
 import os
 import threading
+import time
 from datetime import datetime
 from itertools import chain
 from typing import Dict, List, Optional, Tuple
@@ -240,10 +241,24 @@ def get_day_index(template: str, day_value: Optional[str], config: LookupConfig)
     evaluate_record()'s per-trade loop) reuse the same index object
     instead of rebuilding it from scratch each time, the same O(1)-after-
     first-build shape RiverIndex already has. Never raises — a day that
-    doesn't parse or has no file yields an index built from []."""
+    doesn't parse or has no file yields an index built from [].
+
+    Prints one line per call (hit or miss) — deliberately a plain print(),
+    not the `logging` module: a password-protected day-partitioned file is
+    read at most once per distinct day per dry run/batch (never per
+    record), so this is cheap, and print() is guaranteed to reach the
+    console of a packaged exe regardless of whatever (if any) logging
+    config the host app wires up — unlike `logging`, which silently goes
+    nowhere without a configured handler. This is the one piece of
+    visibility a slow dry run had NONE of before (see dry_run_service.py's
+    own docstring) — enough on its own to tell "still re-reading every
+    file every run despite a handful of distinct days" (a real caching
+    problem) apart from "reading each file once, correctly cached, but
+    each one is just genuinely slow to decrypt/parse" (a different fix)."""
     path = resolve_path(template, day_value)
     key_columns = lookup_engine.reference_columns(config.join_keys)
     if path is None or not os.path.exists(path):
+        print(f"[day_partitioned_source] day={day_value!r}: no file at resolved path (template={template!r})")
         return lookup_engine.build_index([], config)
     mtime = os.path.getmtime(path)
     sig = lookup_engine.cache_signature(config)
@@ -251,7 +266,9 @@ def get_day_index(template: str, day_value: Optional[str], config: LookupConfig)
     with _index_cache_lock:
         cached = _index_cache.get(cache_key)
         if cached is not None and cached[0] == mtime:
+            print(f"[day_partitioned_source] day={day_value!r} path={path!r}: index cache HIT (mtime unchanged)")
             return cached[1]
+    started = time.monotonic()
     rows = load_day_rows(
         template, day_value, key_columns,
         source_format=config.day_partition_source_format,
@@ -261,6 +278,9 @@ def get_day_index(template: str, day_value: Optional[str], config: LookupConfig)
         encrypted_password=config.day_partition_encrypted_password,
     )
     index = lookup_engine.build_index(rows, config)
+    elapsed = time.monotonic() - started
+    print(f"[day_partitioned_source] day={day_value!r} path={path!r}: index cache MISS — "
+          f"read/decrypt/parse/build took {elapsed:.2f}s for {len(rows)} row(s)")
     with _index_cache_lock:
         _index_cache[cache_key] = (mtime, index)
     return index
