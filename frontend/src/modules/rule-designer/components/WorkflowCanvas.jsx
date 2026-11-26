@@ -112,9 +112,22 @@ export function nodeOutputs(node) {
   // Each entry is {field, type} — type is best-effort ("string" when the
   // real type can't be known client-side, e.g. an enriched column).
   if ((node.type === "lookup" || node.type === "enrichment") && node.lookup) {
+    // A field mapping's own `transform` (e.g. "cast to number") changes
+    // what actually reaches downstream nodes just as surely as a
+    // TRANSFORM node's does — reuse the exact same transformOutputType()
+    // used for TRANSFORM below, instead of always falling back to
+    // "string" for anything but a numeric self_group aggregate. Without
+    // this, a field the admin explicitly cast to a number still shows as
+    // "(string)" in every later Field picker, AND loses access to
+    // numeric comparison operators in a CONDITION node (opsForField()
+    // keys off this same type) — a cosmetic-looking label was actually
+    // gating real functionality.
     const out = (node.lookup.fields || [])
       .filter((f) => f.output_field)
-      .map((f) => ({ field: f.output_field, type: NUMERIC_AGGREGATES.has(f.aggregate) ? "numeric" : "string" }));
+      .map((f) => ({
+        field: f.output_field,
+        type: NUMERIC_AGGREGATES.has(f.aggregate) ? "numeric" : transformOutputType(f.transform?.op),
+      }));
     if (node.lookup.flag_field) out.push({ field: node.lookup.flag_field, type: "boolean" });
     return out;
   }
