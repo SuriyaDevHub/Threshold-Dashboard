@@ -32,8 +32,17 @@ class CalcError(ValueError):
 
 
 def _to_number(v: Any) -> float:
-    if v is None:
-        raise CalcError("null value in formula")
+    """A missing value (None, or a blank/whitespace-only string — e.g. a
+    field a LOOKUP left null because nothing matched, or that was never
+    populated for this record) becomes 0.0 rather than failing the whole
+    calculation — the record is still something to evaluate, just with
+    "nothing here" treated the same way an admin manually typing 0 into
+    that field would be. This is deliberately narrower than "tolerate bad
+    data": a value that's actually PRESENT but not numeric (e.g. "N/A",
+    a typo) still raises below — that's a real data-quality problem
+    worth surfacing, not a blank to fill in."""
+    if v is None or (isinstance(v, str) and v.strip() == ""):
+        return 0.0
     if isinstance(v, (int, float)):
         return float(v)
     try:

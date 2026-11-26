@@ -138,6 +138,30 @@ def test_calc_ops_round_uses_precision():
     assert calc_ops.evaluate_formula(formula, {"x": 1.2345}) == 1.2
 
 
+def test_calc_ops_null_field_value_treated_as_zero_not_an_error():
+    # A field present in the record but null (e.g. a LOOKUP that matched
+    # nothing for this one record, or was never populated) used to fail
+    # the whole calculation with "null value in formula" — it's now
+    # treated as 0 so the formula still evaluates.
+    formula = _op("subtract", [_field("deal_margin"), _field("TP_Rates")])
+    assert calc_ops.evaluate_formula(formula, {"deal_margin": 10, "TP_Rates": None}) == 10.0
+
+
+def test_calc_ops_blank_string_field_value_treated_as_zero_not_an_error():
+    formula = _op("add", [_field("a"), _field("b")])
+    assert calc_ops.evaluate_formula(formula, {"a": 5, "b": "   "}) == 5.0
+    assert calc_ops.evaluate_formula(formula, {"a": 5, "b": ""}) == 5.0
+
+
+def test_calc_ops_non_numeric_present_value_still_raises_calc_error():
+    # A null/blank value is treated as "nothing here" (0); a value that IS
+    # present but isn't numeric (a typo, "N/A", ...) is a real data
+    # problem and must still surface as an error, not also become 0.
+    formula = _op("add", [_field("a"), _field("b")])
+    with pytest.raises(calc_ops.CalcError):
+        calc_ops.evaluate_formula(formula, {"a": 5, "b": "N/A"})
+
+
 def test_calc_ops_validate_formula_catches_arity_errors():
     # subtract needs >= 2 operands, abs needs exactly 1
     assert calc_ops.validate_formula(_op("subtract", [_field("a")]))
@@ -743,6 +767,35 @@ def _demo_workflow(ref_id: str) -> Workflow:
     edges = [WorkflowEdge(source="in", target="lk"), WorkflowEdge(source="lk", target="calc"),
              WorkflowEdge(source="calc", target="cond"), WorkflowEdge(source="cond", target="out")]
     return Workflow(nodes=nodes, edges=edges)
+
+
+def test_calculate_node_does_not_error_when_upstream_lookup_leaves_field_null():
+    # Regression: a CALCULATE formula used to fail the whole step
+    # ("null value in formula") whenever one of its fields was null —
+    # e.g. a LOOKUP that matched nothing for this record and left its
+    # enriched field null (missing_strategy continue_null, the default).
+    # It's now treated as 0, same as if an admin had typed 0 in by hand.
+    ref = reference_store.upload_version("ccy_ref_null_calc", [{"Currency": "USD", "Threshold": 2.0}], "tester")
+    wf = Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="lk", type=NodeType.LOOKUP, lookup=LookupConfig(
+                lookup_type=LookupType.EXACT, reference_file_id=ref.id,
+                join_keys=[{"source": "currency", "reference": "Currency"}],
+                fields=[LookupFieldMap(source_column="Threshold", output_field="Threshold")],
+            )),
+            WorkflowNode(id="calc", type=NodeType.CALCULATE, calculate=DeriveSpec(
+                output_field="Ratio", formula=_op("subtract", [_field("Deviation"), _field("Threshold")]))),
+        ],
+        edges=[WorkflowEdge(source="in", target="lk"), WorkflowEdge(source="lk", target="calc")],
+    )
+    results, _, summary = workflow_engine.run_workflow(
+        wf, [{"trade_id": 1, "currency": "EUR", "Deviation": 7.0}],  # EUR has no reference row -> Threshold stays null
+        reference_store.reference_loader, record_id_field="trade_id",
+    )
+    calc_step = next(s for s in results[0].trail if s.node_type == NodeType.CALCULATE)
+    assert calc_step.status == "ok"
+    assert results[0].final_record["Ratio"] == 7.0  # 7.0 - 0 (null treated as 0)
 
 
 def _self_group_workflow(group_by_field: str, selector=None, missing_strategy=MissingLookupStrategy.CONTINUE_NULL,
