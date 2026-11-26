@@ -459,6 +459,49 @@ def test_apply_lookup_matched_detail_is_generic_when_lookup_one_has_no_specific_
     assert out.status == "matched" and out.detail == "matched 1 candidate(s)"
 
 
+def test_composite_source_join_key_total_miss_does_not_crash():
+    # Regression: a composite source (jk["source"] a list) made the "no
+    # reference row for key ..." diagnostic crash with
+    # "TypeError: unhashable type: 'list'" — dict(zip(src_cols, ...)) and
+    # record.get(c) both choke on a raw list used as a dict key. Reported
+    # live against a real deployment once a record's real values (and any
+    # configured default) both failed to match anything at all, a case no
+    # earlier test exercised (the default_on_miss tests above always end
+    # up matching, via the real value or the default).
+    ref_rows = [{"Site": "London", "CCY": "USD", "Rate": 1.1}]
+    cfg = _cfg(join_keys=[{"source": ["site", "ccy"], "reference": ["Site", "CCY"]}],
+               fields=[LookupFieldMap(source_column="Rate", output_field="Rate")])
+    idx = lookup_engine.build_index(ref_rows, cfg)
+    out = lookup_engine.apply_lookup({"site": "Mumbai", "ccy": "EUR"}, idx)
+    assert out.status == "missing_null"
+
+
+def test_composite_source_join_key_unmatched_diagnostics_do_not_crash():
+    # Same regression as above, exercised through run_workflow()'s own
+    # enrichment-diagnostics bookkeeping (workflow_engine.py's
+    # stats["unmatched"] list), which has an independent
+    # `wr.get(jk["source"])` that chokes on a list exactly the same way.
+    ref = reference_store.upload_version(
+        "composite_src_unmatched", [{"Site": "London", "CCY": "USD", "Rate": 1.1}], "tester")
+    wf = Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="lk", type=NodeType.LOOKUP, label="Site lookup", lookup=LookupConfig(
+                lookup_type=LookupType.EXACT, reference_file_id=ref.id,
+                join_keys=[{"source": ["site", "ccy"], "reference": ["Site", "CCY"]}],
+                fields=[LookupFieldMap(source_column="Rate", output_field="Rate")],
+            )),
+        ],
+        edges=[WorkflowEdge(source="in", target="lk")],
+    )
+    results, diagnostics, summary = workflow_engine.run_workflow(
+        wf, [{"trade_id": 1, "site": "Mumbai", "ccy": "EUR"}],
+        reference_store.reference_loader, record_id_field="trade_id",
+    )
+    assert summary.lookup_failures == 1
+    assert diagnostics[0].unmatched_keys == [["Mumbai", "EUR"]]
+
+
 def test_lookup_range():
     ref_rows = [{"Risk_Group": "LOW", "Min": 0, "Max": 2}, {"Risk_Group": "MEDIUM", "Min": 2, "Max": 5},
                 {"Risk_Group": "HIGH", "Min": 5, "Max": 100}]

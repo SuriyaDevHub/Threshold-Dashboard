@@ -281,11 +281,29 @@ def _default_on_miss_columns(join_keys: List[Dict[str, Any]]) -> List[str]:
     return cols
 
 
+def _flat_source_columns(join_keys: List[Dict[str, Any]]) -> List[str]:
+    """Every individual source-side column name a lookup's join keys
+    touch, flattened — a composite (list) source like ["Site", "CCY"]
+    contributes both names, alongside every plain single-column entry.
+    Mirrors reference_columns() for the source side; used only to build
+    a human-readable "no reference row for key {...}" diagnostic (a plain
+    `[jk["source"] for jk in join_keys]` would include a raw list, which
+    is unhashable and crashes `record.get()`/`dict(zip(...))`)."""
+    cols: List[str] = []
+    for jk in join_keys:
+        src = jk["source"]
+        if isinstance(src, list):
+            cols.extend(src)
+        elif src:
+            cols.append(src)
+    return cols
+
+
 def lookup_one(record: dict, idx: LookupIndex) -> Tuple[bool, List[dict], str]:
     """Return (matched, candidate_rows, reason_if_no_match)."""
     config = idx.config
     if config.lookup_type in (LookupType.EXACT, LookupType.COMPOSITE, LookupType.SELF_GROUP, LookupType.INTERPOLATED):
-        src_cols = [jk["source"] for jk in config.join_keys]
+        src_cols = _flat_source_columns(config.join_keys)
         k = _key_tuple(record, config.join_keys, "source")
         candidates = idx.exact_index.get(k, [])
         default_detail = ""

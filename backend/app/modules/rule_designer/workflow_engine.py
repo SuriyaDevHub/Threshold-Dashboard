@@ -615,9 +615,18 @@ def run_workflow(
                     had_lookup_failure = True
                     status = "lookup_miss"
                     if len(stats["unmatched"]) < 50:
-                        keys = [wr.get(jk["source"]) for jk in node.lookup.join_keys] \
-                            if node.lookup.lookup_type.value in ("exact", "composite") else \
-                            [wr.get(node.lookup.range_field or node.lookup.date_field)]
+                        # A join key's source can itself be composite (a list
+                        # of dataset fields to concatenate — see
+                        # lookup_engine._key_tuple()), so this can't just
+                        # read jk["source"] directly: wr.get([...]) raises
+                        # (a list isn't hashable) rather than looking
+                        # anything up. _flat_source_columns() expands any
+                        # composite entry to its individual column names
+                        # first, same as reference_columns() does for the
+                        # reference side.
+                        keys = [wr.get(c) for c in lookup_engine._flat_source_columns(node.lookup.join_keys)] \
+                            if node.lookup.lookup_type.value in ("exact", "composite", "interpolated") else \
+                            [wr.get(node.lookup.range_field or node.lookup.date_field)]  # noqa: SLF001
                         stats["unmatched"].append(keys[0] if len(keys) == 1 else keys)
                 trail.append(RecordTraceStep(node_id=node.id, node_type=node.type,
                                               label=node.label or "Lookup", status=status,
