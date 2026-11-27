@@ -12,6 +12,18 @@ import WorkflowCanvas from "../components/WorkflowCanvas.jsx";
 import DryRunResults from "../components/DryRunResults.jsx";
 import DiffView from "../components/DiffView.jsx";
 
+// Swaps a button's leading icon for the shared small spinner while its own
+// action is the one in flight — used by every Save/Validate/Submit/Approve/
+// Reject/Publish/enable-toggle button below so each shows its own visible
+// "something is happening" signal instead of the whole action bar just
+// going gray with no indication of what, or whether anything really
+// started.
+function actionIcon(Icon, isBusy) {
+  return isBusy
+    ? <span className="spinner spinner--sm" />
+    : <Icon size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />;
+}
+
 const ALL_TABS = [
   { id: "workflow", label: "Workflow / Rule builder", adminOnly: true },
   { id: "dryrun", label: "Dry run" },
@@ -35,7 +47,14 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
   const [schema, setSchema] = useState([]);
   const [datasetId, setDatasetId] = useState("");
   const [validation, setValidation] = useState(null);
-  const [busy, setBusy] = useState(false);
+  // Which async action is in flight, if any — lets each button show its
+  // own spinner + "-ing…" label instead of every button just going gray
+  // with no sign of which one is actually running (or that anything is
+  // running at all). `busy` (any action in flight) still gates every
+  // `disabled=` check exactly as the old single boolean did, so
+  // concurrent actions stay blocked.
+  const [busyAction, setBusyAction] = useState(null);
+  const busy = busyAction !== null;
   const [notice, setNotice] = useState(null);
   const [meta, setMeta] = useState(null);
 
@@ -101,30 +120,36 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
     setDirty(true);
   }
 
+  // The actual save request, with no busy-state handling of its own — so
+  // doValidate() below can run it as part of "Validating…" without the
+  // label flickering to "Saving…" and back for a save that's really just
+  // one step of validating.
+  async function doSave() {
+    const updated = await rd.updateRule(ruleId, actor, role, { ...rule, dataset_id: datasetId });
+    setRule(updated); setDirty(false);
+    setNotice({ kind: "pass", text: "Saved." });
+  }
+
   async function save() {
-    setBusy(true);
-    try {
-      const updated = await rd.updateRule(ruleId, actor, role, { ...rule, dataset_id: datasetId });
-      setRule(updated); setDirty(false);
-      setNotice({ kind: "pass", text: "Saved." });
-    } catch (e) { setNotice({ kind: "breach", text: String(e.message || e) }); }
-    setBusy(false);
+    setBusyAction("save");
+    try { await doSave(); } catch (e) { setNotice({ kind: "breach", text: String(e.message || e) }); }
+    setBusyAction(null);
   }
 
   async function doValidate() {
-    setBusy(true);
+    setBusyAction("validate");
     try {
-      if (dirty) await save();
+      if (dirty) await doSave();
       const v = await rd.validateRule(ruleId, actor, role);
       setValidation(v);
       setRule((r) => ({ ...r, status: v.status }));
       setNotice(v.ok ? { kind: "pass", text: "Validation passed." } : { kind: "breach", text: `${v.errors.length} error(s) found.` });
     } catch (e) { setNotice({ kind: "breach", text: String(e.message || e) }); }
-    setBusy(false);
+    setBusyAction(null);
   }
 
   async function transition(action) {
-    setBusy(true);
+    setBusyAction(action);
     try {
       const body = { actor, role, comment: "" };
       const fn = { submit: rd.submit, approve: rd.approve, reject: rd.reject, publish: rd.publish }[action];
@@ -132,7 +157,7 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
       setRule(result.rule || result);
       setNotice({ kind: "pass", text: `${action} ok.` });
     } catch (e) { setNotice({ kind: "breach", text: String(e.message || e) }); }
-    setBusy(false);
+    setBusyAction(null);
   }
 
   async function remove() {
@@ -142,13 +167,13 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
   }
 
   async function toggleEnabled() {
-    setBusy(true);
+    setBusyAction("toggle");
     try {
       const updated = await rd.setRuleEnabled(ruleId, actor, role, !rule.enabled);
       setRule(updated);
       setNotice({ kind: "pass", text: `Rule ${updated.enabled ? "enabled" : "disabled"}.` });
     } catch (e) { setNotice({ kind: "breach", text: String(e.message || e) }); }
-    setBusy(false);
+    setBusyAction(null);
   }
 
   if (loading) return <Loader label="Loading rule…" />;
@@ -187,22 +212,44 @@ export default function RuleWorkspace({ ruleId, onBack, onDeleted }) {
             )}
             {!rule.enabled && <span className="badge badge--breach">disabled</span>}
             <span className="mono ds-count">v{rule.version}</span>
-            {isAdmin && dirty && <button className="btn" disabled={busy} onClick={save}><Save size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Save</button>}
-            {isAdmin && <button className="btn btn--ghost" disabled={busy} onClick={doValidate}><CheckCircle2 size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Validate</button>}
-            {isAdmin && canSubmit && (
-              <button className="btn btn--ghost" disabled={busy} onClick={() => transition("submit")}>
-                <Send size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />
-                {fastTrack ? "Submit for approval (skip validate/dry-run)" : "Submit for approval"}
+            {isAdmin && dirty && (
+              <button className="btn" disabled={busy} onClick={save}>
+                {actionIcon(Save, busyAction === "save")}{busyAction === "save" ? "Saving…" : "Save"}
               </button>
             )}
-            {isAdmin && canApprove && <button className="btn btn--ghost" disabled={busy} onClick={() => transition("approve")}><ThumbsUp size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Approve</button>}
-            {isAdmin && canApprove && <button className="btn btn--ghost" disabled={busy} onClick={() => transition("reject")}><ThumbsDown size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Reject</button>}
-            {isAdmin && canPublish && <button className="btn" disabled={busy} onClick={() => transition("publish")}><Rocket size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Publish</button>}
+            {isAdmin && (
+              <button className="btn btn--ghost" disabled={busy} onClick={doValidate}>
+                {actionIcon(CheckCircle2, busyAction === "validate")}{busyAction === "validate" ? "Validating…" : "Validate"}
+              </button>
+            )}
+            {isAdmin && canSubmit && (
+              <button className="btn btn--ghost" disabled={busy} onClick={() => transition("submit")}>
+                {actionIcon(Send, busyAction === "submit")}
+                {busyAction === "submit" ? "Submitting…" : fastTrack ? "Submit for approval (skip validate/dry-run)" : "Submit for approval"}
+              </button>
+            )}
+            {isAdmin && canApprove && (
+              <button className="btn btn--ghost" disabled={busy} onClick={() => transition("approve")}>
+                {actionIcon(ThumbsUp, busyAction === "approve")}{busyAction === "approve" ? "Approving…" : "Approve"}
+              </button>
+            )}
+            {isAdmin && canApprove && (
+              <button className="btn btn--ghost" disabled={busy} onClick={() => transition("reject")}>
+                {actionIcon(ThumbsDown, busyAction === "reject")}{busyAction === "reject" ? "Rejecting…" : "Reject"}
+              </button>
+            )}
+            {isAdmin && canPublish && (
+              <button className="btn" disabled={busy} onClick={() => transition("publish")}>
+                {actionIcon(Rocket, busyAction === "publish")}{busyAction === "publish" ? "Publishing…" : "Publish"}
+              </button>
+            )}
             {isAdmin && s === "PUBLISHED" && (
               <button className="btn btn--ghost" disabled={busy} onClick={toggleEnabled}>
-                {rule.enabled
-                  ? <><PowerOff size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Disable</>
-                  : <><Power size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Enable</>}
+                {busyAction === "toggle"
+                  ? <><span className="spinner spinner--sm" />Updating…</>
+                  : rule.enabled
+                    ? <><PowerOff size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Disable</>
+                    : <><Power size={13} style={{ marginRight: 5, verticalAlign: "-2px" }} />Enable</>}
               </button>
             )}
             {isAdmin && <button className="icon-btn" title="Delete rule" onClick={remove}><Trash2 size={16} /></button>}
@@ -304,7 +351,9 @@ function WorkflowTab({ rule, schema, datasetId, mutateWorkflow, setNotice, meta 
                       placeholder="e.g. For USD trades where the notional is above 1 million and the currency is USD, classify the trade as HIGH RISK."
                       value={text} onChange={(e) => setText(e.target.value)} />
             <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-              <button className="btn" disabled={busy || !text.trim()} onClick={interpret}>Interpret</button>
+              <button className="btn" disabled={busy || !text.trim()} onClick={interpret}>
+                {busy && <span className="spinner spinner--sm" />}{busy ? "Interpreting…" : "Interpret"}
+              </button>
               {interp && <button className="btn btn--ghost" onClick={apply}>Apply to workflow (replaces canvas)</button>}
             </div>
             {interp && (
@@ -358,7 +407,10 @@ function DryRunTab({ ruleId, datasetId, onRan }) {
             <input value={recordIdField} onChange={(e) => setRecordIdField(e.target.value)} placeholder="trade_id" />
           </label>
           <button className="btn" disabled={busy || !datasetId} onClick={run}>
-            <PlayCircle size={14} style={{ marginRight: 6, verticalAlign: "-2px" }} />{busy ? "Running…" : "Run dry test"}
+            {busy
+              ? <span className="spinner spinner--sm" />
+              : <PlayCircle size={14} style={{ marginRight: 6, verticalAlign: "-2px" }} />}
+            {busy ? "Running…" : "Run dry test"}
           </button>
         </div>
         {!datasetId && <p className="empty-hint">Select a dataset above first.</p>}

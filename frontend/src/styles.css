@@ -176,6 +176,13 @@ body {
   width: 16px; height: 16px; border: 2px solid var(--line);
   border-top-color: var(--accent); border-radius: 50%; animation: spin 0.7s linear infinite;
 }
+/* Sized to sit inline next to a 13px lucide icon inside a button (Validate,
+   Submit, Approve, Publish, ...) — same look, just small enough not to throw
+   off a button's line height. */
+.spinner--sm {
+  width: 12px; height: 12px; border-width: 2px;
+  display: inline-block; vertical-align: -2px; margin-right: 5px;
+}
 @keyframes spin { to { transform: rotate(360deg); } }
 .empty, .errorbox { padding: 28px; text-align: center; color: var(--muted); }
 .empty-title { font-weight: 600; color: var(--ink); }

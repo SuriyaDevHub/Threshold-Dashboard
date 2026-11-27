@@ -17,7 +17,7 @@ import { withCurrent } from "./ConditionBuilder.jsx";
 
 const OP_PARAM_KEYS = ["precision", "start", "end", "delimiter", "index", "find", "replace_with", "rules", "default",
                        "input_format", "custom_pattern", "unit", "amount", "fields", "separator",
-                       "spt_days", "snx_days", "key", "pair_delimiter", "kv_delimiter"];
+                       "spt_days", "snx_days", "key", "pair_delimiter", "kv_delimiter", "end_field", "start_field"];
 
 const TRANSFORM_OPS = [
   { value: "round", label: "round" },
@@ -59,13 +59,18 @@ const DATE_INPUT_FORMATS = [
 
 export default function TransformOpFields({ transform, onChange, allowNone, fields }) {
   const op = transform?.op || (allowNone ? "" : "round");
-  // "concatenate fields" needs a list of this node's available source
-  // fields to pick from — only the TRANSFORM node's own editor
-  // (NodeConfigPanel.jsx) passes `fields`; LOOKUP's two callers (field
-  // mappings, join-key transforms) operate on one already-pulled value
-  // and have no use for a field picker, so the op simply never appears
-  // there.
-  const ops = fields ? [{ value: "concat", label: "concatenate fields" }, ...TRANSFORM_OPS] : TRANSFORM_OPS;
+  // "concatenate fields"/"use first available field"/"days between two
+  // dates" all need a list of this node's available source fields to pick
+  // from — only the TRANSFORM node's own editor (NodeConfigPanel.jsx)
+  // passes `fields`; LOOKUP's two callers (field mappings, join-key
+  // transforms) operate on one already-pulled value and have no use for a
+  // field picker, so these ops simply never appear there.
+  const ops = fields ? [
+    { value: "concat", label: "concatenate fields" },
+    { value: "coalesce", label: "use first available field" },
+    { value: "date_diff_days", label: "days between two dates" },
+    ...TRANSFORM_OPS,
+  ] : TRANSFORM_OPS;
 
   function set(patch) { onChange({ ...transform, ...patch }); }
 
@@ -89,6 +94,14 @@ export default function TransformOpFields({ transform, onChange, allowNone, fiel
 
       {op === "concat" && (
         <ConcatFields transform={transform} onChange={set} fields={fields} />
+      )}
+
+      {op === "coalesce" && (
+        <ConcatFields transform={transform} onChange={set} fields={fields} showSeparator={false} />
+      )}
+
+      {op === "date_diff_days" && (
+        <DateDiffFields transform={transform} onChange={set} fields={fields} />
       )}
 
       {op === "round" && (
@@ -201,10 +214,13 @@ export default function TransformOpFields({ transform, onChange, allowNone, fiel
   );
 }
 
-function ConcatFields({ transform, onChange, fields }) {
+function ConcatFields({ transform, onChange, fields, showSeparator = true }) {
   // Same "+ combine column" multi-picker idiom already shipped in
   // LookupConfigForm.jsx's join-key reference side, for a consistent UX
-  // wherever this app lets you build a value from several columns.
+  // wherever this app lets you build a value from several columns. Shared
+  // by both "concatenate fields" (showSeparator) and "use first available
+  // field" (coalesce — order matters, but there's no separator to set)
+  // rather than a second near-duplicate picker.
   const cols = transform?.fields || [];
 
   function updateCol(i, value) {
@@ -217,7 +233,9 @@ function ConcatFields({ transform, onChange, fields }) {
     <span style={{ display: "inline-flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
       {cols.map((c, i) => (
         <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-          {i > 0 && <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>+</span>}
+          {i > 0 && <span className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>
+            {showSeparator ? "+" : "or"}
+          </span>}
           <select value={c} onChange={(e) => updateCol(i, e.target.value)}>
             <option value="" disabled>field…</option>
             {withCurrent(fields, c).map((f) => (
@@ -230,10 +248,35 @@ function ConcatFields({ transform, onChange, fields }) {
         </span>
       ))}
       <button className="btn btn--ghost btn--xs" onClick={addCol}><Plus size={13} /> Add field</button>
-      <label className="control" style={{ minWidth: 120 }}><span>Separator (optional)</span>
-        <input value={transform?.separator ?? ""} onChange={(e) => onChange({ separator: e.target.value })} placeholder="none" />
-      </label>
+      {showSeparator && (
+        <label className="control" style={{ minWidth: 120 }}><span>Separator (optional)</span>
+          <input value={transform?.separator ?? ""} onChange={(e) => onChange({ separator: e.target.value })} placeholder="none" />
+        </label>
+      )}
     </span>
+  );
+}
+
+function DateDiffFields({ transform, onChange, fields }) {
+  return (
+    <>
+      <label className="control"><span>End date field (e.g. Maturity Date)</span>
+        <select value={transform?.end_field || ""} onChange={(e) => onChange({ end_field: e.target.value })}>
+          <option value="" disabled>field…</option>
+          {withCurrent(fields, transform?.end_field).map((f) => (
+            <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
+          ))}
+        </select>
+      </label>
+      <label className="control"><span>Start date field (e.g. Trade Date)</span>
+        <select value={transform?.start_field || ""} onChange={(e) => onChange({ start_field: e.target.value })}>
+          <option value="" disabled>field…</option>
+          {withCurrent(fields, transform?.start_field).map((f) => (
+            <option key={f.field} value={f.field}>{f.field}{f.unavailable ? " (unavailable)" : ""}</option>
+          ))}
+        </select>
+      </label>
+    </>
   );
 }
 
@@ -272,6 +315,8 @@ function ValueMapFields({ transform, onChange }) {
 
 export function transformHint(op) {
   if (op === "concat") return 'Builds the output field by joining the selected fields\' values together, in order — leave the separator blank to join them directly, or set one (e.g. "-" or "_") to insert between each. Handy for materializing a composite key (e.g. TradingLocation+Currency+Curve+Tenor) as an actual field that other rules or a LOOKUP\'s join key can then match against directly.';
+  if (op === "coalesce") return "Checked in order — the output field becomes the first one of these that actually has a value (not blank/missing) on the record; later fields are only used when every earlier one is empty. E.g. \"Trade Date, or COB Date if Trade Date is missing\" for a tenor day-count that always has a usable start date.";
+  if (op === "date_diff_days") return 'Output is the end field minus the start field, in whole days (negative if reversed) — e.g. Maturity Date minus Trade Date for a numeric tenor day-count, exactly what an "interpolated" LOOKUP\'s source tenor field expects. Both fields must already be YYYY-MM-DD — add a "parse date" step first for either one if it isn\'t already in that form. Chain a "use first available field" step beforehand (e.g. Trade Date, or COB Date as a fallback) to build the start date when it isn\'t always populated.';
   if (op === "substring") return 'e.g. start 0, end 3 keeps the first 3 characters. Leave end blank to go to the end of the text.';
   if (op === "split") return 'e.g. splitting "HKFXO_052" on "_" at index 1 gives "052".';
   if (op === "value_map") return 'Checked top to bottom — the first rule whose text is found (case-insensitive) anywhere in the value wins, e.g. "London (LN) Branch" containing "LONDON" maps to "LN".';

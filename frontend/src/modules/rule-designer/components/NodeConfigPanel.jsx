@@ -133,7 +133,7 @@ function TransformEditor({ transform, onChange, fields }) {
       {entries.map((entry, i) => (
         <div key={i}>
           <div className="lk-row">
-            {entry.op !== "concat" && (
+            {!["concat", "coalesce", "date_diff_days"].includes(entry.op) && (
               <select value={entry.field || ""} onChange={(e) => update(i, { field: e.target.value })}>
                 <option value="" disabled>field…</option>
                 {withCurrent(fields, entry.field).map((f) => (

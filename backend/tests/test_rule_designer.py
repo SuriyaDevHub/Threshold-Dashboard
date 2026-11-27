@@ -3292,6 +3292,76 @@ def test_concat_transform_end_to_end_via_run_workflow():
     assert results[0].final_record["Rate"] == 1.55
 
 
+def test_date_diff_days_transform_basic_case():
+    node = WorkflowNode(id="n", type=NodeType.TRANSFORM, transform={
+        "op": "date_diff_days", "output_field": "tenor_days",
+        "end_field": "maturity_date", "start_field": "trade_date",
+    })
+    status, fields = workflow_engine._apply_transform(
+        node, {"maturity_date": "2026-04-15", "trade_date": "2026-01-15"})
+    assert status == "ok" and fields == {"tenor_days": 90}
+
+
+def test_date_diff_days_transform_negative_when_reversed():
+    node = WorkflowNode(id="n", type=NodeType.TRANSFORM, transform={
+        "op": "date_diff_days", "output_field": "tenor_days",
+        "end_field": "maturity_date", "start_field": "trade_date",
+    })
+    status, fields = workflow_engine._apply_transform(
+        node, {"maturity_date": "2026-01-15", "trade_date": "2026-04-15"})
+    assert status == "ok" and fields == {"tenor_days": -90}
+
+
+def test_date_diff_days_transform_missing_field_is_an_error_not_zero():
+    node = WorkflowNode(id="n", type=NodeType.TRANSFORM, transform={
+        "op": "date_diff_days", "output_field": "tenor_days",
+        "end_field": "maturity_date", "start_field": "trade_date",
+    })
+    status, fields = workflow_engine._apply_transform(
+        node, {"maturity_date": "2026-04-15", "trade_date": None})
+    assert status == "error" and fields == {}
+
+
+def test_date_diff_days_transform_non_canonical_date_is_an_error():
+    # Needs a parse_date step first — not another format-guessing entry point.
+    node = WorkflowNode(id="n", type=NodeType.TRANSFORM, transform={
+        "op": "date_diff_days", "output_field": "tenor_days",
+        "end_field": "maturity_date", "start_field": "trade_date",
+    })
+    status, fields = workflow_engine._apply_transform(
+        node, {"maturity_date": "15/04/2026", "trade_date": "2026-01-15"})
+    assert status == "error" and fields == {}
+
+
+def test_tenor_calculated_coalesce_then_date_diff_days_end_to_end():
+    # The actual motivating recipe: Tenor Calculated = Maturity Date minus
+    # Trade Date, falling back to COB Date only when Trade Date is missing
+    # — one TRANSFORM node, two chained entries (coalesce then
+    # date_diff_days), no new node type needed.
+    wf = Workflow(
+        nodes=[
+            WorkflowNode(id="in", type=NodeType.INPUT),
+            WorkflowNode(id="tx", type=NodeType.TRANSFORM, transform={"transforms": [
+                {"op": "coalesce", "output_field": "effective_start_date",
+                 "fields": ["trade_date", "cob_date"]},
+                {"op": "date_diff_days", "output_field": "TenorCalculated",
+                 "end_field": "maturity_date", "start_field": "effective_start_date"},
+            ]}),
+        ],
+        edges=[WorkflowEdge(source="in", target="tx")],
+    )
+    results, _, summary = workflow_engine.run_workflow(
+        wf, [
+            {"trade_id": 1, "maturity_date": "2026-04-15", "trade_date": "2026-01-15", "cob_date": "2026-01-10"},
+            {"trade_id": 2, "maturity_date": "2026-04-15", "trade_date": None, "cob_date": "2026-01-10"},
+        ],
+        reference_store.reference_loader, record_id_field="trade_id",
+    )
+    by_id = {r.record_id: r.final_record for r in results}
+    assert by_id[1]["TenorCalculated"] == 90  # used trade_date
+    assert by_id[2]["TenorCalculated"] == 95  # trade_date missing -> fell back to cob_date
+
+
 def _transform_node(**cfg):
     return WorkflowNode(id="n", type=NodeType.TRANSFORM, transform=cfg)
 

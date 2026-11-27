@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.modules.rule_designer import (
-    calc_ops, condition_engine, day_partitioned_source, expr_engine, lookup_engine, reference_store,
+    calc_ops, condition_engine, day_partitioned_source, expr_engine, lookup_engine, reference_store, transform_ops,
 )
 from app.modules.rule_designer.transform_ops import apply_transform_op
 from app.modules.rule_designer.models import (
@@ -446,6 +446,33 @@ def _apply_single_transform(cfg: Dict[str, Any], record: dict) -> Tuple[str, Dic
         sep = cfg.get("separator") or ""
         parts = ["" if (v := record.get(f)) is None else str(v) for f in cfg.get("fields", [])]
         return "ok", {out: sep.join(parts)}, ""
+
+    if op == "date_diff_days":
+        # (end_field - start_field) in days — e.g. Maturity Date minus a
+        # coalesced Trade-Date-or-COB-Date, to build a numeric day-count
+        # "Tenor Calculated" field (the exact input an `interpolated`
+        # LOOKUP's interp_source_field needs — see lookup_engine.py).
+        # Reads two record fields directly like coalesce/concat above,
+        # so it doesn't go through transform_ops.apply_transform_op()
+        # either. Both fields must already be canonical YYYY-MM-DD (a
+        # date in another format needs a parse_date step first — same
+        # "not another format-guessing entry point" convention
+        # transform_ops._shift_date() already follows); a missing or
+        # unparseable field raises here (caught by the try/except below,
+        # surfaced as an "error" status) rather than silently computing a
+        # 0-day tenor — a trade missing its Maturity Date is a real data
+        # problem worth surfacing, not a blank to fill in.
+        out = cfg.get("output_field")
+        end_field, start_field = cfg.get("end_field"), cfg.get("start_field")
+        try:
+            end = transform_ops._parse_iso_date(record.get(end_field))  # noqa: SLF001
+            start = transform_ops._parse_iso_date(record.get(start_field))  # noqa: SLF001
+            return "ok", {out: (end - start).days}, ""
+        except (TypeError, ValueError) as exc:
+            return "error", {}, (
+                f"{out}: could not compute date_diff_days from {end_field}={record.get(end_field)!r} "
+                f"and {start_field}={record.get(start_field)!r} ({exc})"
+            )
 
     src = cfg.get("field")
     out = cfg.get("output_field", src)
